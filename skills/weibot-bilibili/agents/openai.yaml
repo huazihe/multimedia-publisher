@@ -1,0 +1,4 @@
+﻿interface:
+  display_name: "B绔欏彂甯?
+  short_description: "浣跨敤 WEIBOT Node 杩愯鏃朵繚瀛楤绔欒崏绋?
+  default_prompt: "Use $wechat-bilibili to publish an article draft."

@@ -1,0 +1,46 @@
+{
+  "name": "weibot",
+  "version": "2.0.0",
+  "private": true,
+  "description": "WEIBOT - standalone multi-platform content publisher",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dashboard",
+    "build": "npm run build:core && npm run build:cli",
+    "build:core": "npx -y pnpm@9.15.9 --filter @weibot/core build",
+    "build:cli": "npx -y pnpm@9.15.9 --filter @weibot/cli build",
+    "dashboard": "npm --prefix publisher-dashboard start",
+    "dashboard:test": "npm --prefix publisher-dashboard test",
+    "test": "npm run dashboard:test",
+    "typecheck": "npx -y pnpm@9.15.9 --filter @weibot/core typecheck && npx -y pnpm@9.15.9 --filter @weibot/cli typecheck",
+    "clean": "npx -y pnpm@9.15.9 --filter @weibot/core clean && npx -y pnpm@9.15.9 --filter @weibot/cli clean"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "eslint": "^8.55.0",
+    "prettier": "^3.1.0",
+    "rehype-parse": "^9.0.1",
+    "rehype-remark": "^10.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-stringify": "^11.0.0",
+    "turndown": "^7.2.2",
+    "turndown-plugin-gfm": "^1.0.2",
+    "typescript": "^5.3.0",
+    "unified": "^11.0.5"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@modyfi/vite-plugin-yaml": "^1.1.1"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>内容运营工作台</title>
+  <link rel="stylesheet" href="/styles.css?v=20260723-original-reference">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"><span class="brand-glyph">内</span></span>
+        <div class="brand-copy">
+          <strong>内容运营工作台</strong>
+          <span>选题 · 排版 · 发布</span>
+        </div>
+      </div>
+      <nav class="topnav" aria-label="主导航">
+        <button class="nav-btn active" data-view="dashboard" data-short="看板" title="数据看板">
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 13h6v7H4z"></path><path d="M14 4h6v16h-6z"></path><path d="M4 4h6v5H4z"></path></svg></span>
+          <span class="nav-label">数据看板</span>
+        </button>
+        <button class="nav-btn" data-view="plans" data-short="选题" title="选题计划">
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 3v4"></path><path d="M17 3v4"></path><path d="M4 8h16"></path><rect x="4" y="5" width="16" height="16" rx="3"></rect><path d="M8 13h3"></path><path d="M8 17h6"></path></svg></span>
+          <span class="nav-label">选题计划</span>
+        </button>
+        <button class="nav-btn" data-view="content" data-short="内容" title="内容中心">
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 3h7l4 4v14H7z"></path><path d="M14 3v5h5"></path><path d="M10 13h7"></path><path d="M10 17h5"></path></svg></span>
+          <span class="nav-label">内容中心</span>
+        </button>
+        <button class="nav-btn" data-view="publish" data-short="发布" title="发布中心">
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 12 20 4l-5 16-3-7z"></path><path d="m12 13 8-9"></path></svg></span>
+          <span class="nav-label">发布中心</span>
+        </button>
+        <button class="nav-btn" data-view="platforms" data-short="登录" title="平台登录">
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 11V8a4 4 0 0 1 8 0v3"></path><rect x="5" y="11" width="14" height="10" rx="3"></rect><path d="M12 15v2"></path></svg></span>
+          <span class="nav-label">平台登录</span>
+        </button>
+        <button class="nav-btn" data-view="history" data-short="历史" title="发布历史">
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 3-6.25"></path><path d="M4 5v5h5"></path><path d="M12 8v5l3 2"></path></svg></span>
+          <span class="nav-label">发布历史</span>
+        </button>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="employee-picker" data-employee-picker>
+          <button class="user-card employee-card" type="button" data-action="toggle-employee-menu" aria-haspopup="menu" aria-expanded="false" aria-label="选择操控员工">
+            <span class="user-avatar employee-avatar" data-employee-avatar aria-hidden="true"></span>
+            <div class="user-copy">
+              <strong data-employee-name>内容编辑员</strong>
+              <span data-employee-role>正文与配图整理</span>
+            </div>
+          </button>
+          <div class="employee-menu" data-employee-menu role="menu" aria-label="选择操控员工"></div>
+        </div>
+        <button class="sidebar-toggle" type="button" data-action="toggle-sidebar" aria-label="折叠工作台" title="折叠工作台" aria-expanded="true">
+          <svg viewBox="0 0 24 24" aria-hidden="true" class="chevron-icon">
+            <path d="M15 18 9 12l6-6"></path>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <main class="main-area">
+      <section id="view-dashboard" class="view active"></section>
+      <section id="view-plans" class="view"></section>
+      <section id="view-content" class="view"></section>
+      <section id="view-publish" class="view"></section>
+      <section id="view-platforms" class="view"></section>
+      <section id="view-history" class="view"></section>
+    </main>
+  </div>
+
+  <div id="toast-root" class="toast-root" aria-live="polite"></div>
+
+  <dialog id="candidate-dialog">
+    <div class="dialog-head">
+      <div>
+        <strong>日选题候选</strong>
+        <span id="candidate-date"></span>
+      </div>
+      <button class="icon-btn" data-action="close-dialog" title="关闭">×</button>
+    </div>
+    <div id="candidate-list" class="candidate-list"></div>
+  </dialog>
+
+  <dialog id="plan-dialog">
+    <div class="dialog-head">
+      <div>
+        <strong>批量新增选题计划</strong>
+        <span>选择日期范围后生成空计划行</span>
+      </div>
+      <button class="icon-btn" data-action="close-plan-dialog" title="关闭">×</button>
+    </div>
+    <div class="dialog-form">
+      <label><span>开始日期</span><input id="plan-start-input" type="date"></label>
+      <label><span>结束日期</span><input id="plan-end-input" type="date"></label>
+      <label><span>默认状态</span>
+        <select id="plan-status-input">
+          <option value="待选题">待选题</option>
+          <option value="选题已确认">选题已确认</option>
+          <option value="正文已生成">正文已生成</option>
+          <option value="已排版">已排版</option>
+          <option value="草稿已保存">草稿已保存</option>
+          <option value="已发布">已发布</option>
+          <option value="发布失败">发布失败</option>
+        </select>
+      </label>
+      <label class="span-2"><span>默认选题方向（可留空）</span><input id="plan-topic-input" type="text" placeholder="例如：视觉检测行业热点复盘"></label>
+      <div class="dialog-actions">
+        <button class="secondary" data-action="close-plan-dialog">取消</button>
+        <button class="primary" data-action="create-plan-range">新增计划</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="layout-dialog" class="layout-dialog">
+    <div class="dialog-head">
+      <div>
+        <strong>排版预览</strong>
+        <span id="layout-dialog-title"></span>
+      </div>
+      <button class="icon-btn" data-action="close-layout-dialog" title="关闭">×</button>
+    </div>
+    <div id="layout-dialog-body"></div>
+  </dialog>
+
+  <script src="/app.js?v=20260723-nous-flat"></script>
+</body>
+</html>

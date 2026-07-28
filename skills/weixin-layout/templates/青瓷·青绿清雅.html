@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>排版样式 · 青瓷</title>
+<style>
+  :root {
+    --bg: #f4f8f4;
+    --card: #fff;
+    --text: #2d3a2d;
+    --light: #6b7b6b;
+    --pri: #3a5a40;
+    --acc: #588157;
+    --acc2: #a3b18a;
+    --border: #dde8dd;
+    --radius: 10px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Serif SC', 'STSong', serif;
+    background: #e8ede5; color: var(--text); line-height: 1.9; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 680px; margin: 0 auto; background: var(--bg); }
+
+  /* 头部：青瓷开片纹 */
+  .hero {
+    background: linear-gradient(160deg, #2d3a2d 0%, #3a5a40 50%, #4a6a4a 100%);
+    padding: 52px 28px 36px; text-align: center; position: relative; overflow: hidden;
+  }
+  .hero::before {
+    content: ''; position: absolute; inset: 0;
+    background: repeating-linear-gradient(45deg, transparent, transparent 3px, rgba(163,177,138,0.05) 3px, rgba(163,177,138,0.05) 6px),
+                repeating-linear-gradient(-45deg, transparent, transparent 3px, rgba(163,177,138,0.05) 3px, rgba(163,177,138,0.05) 6px);
+  }
+  .hero::after { content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 36px; background: linear-gradient(to top, var(--bg), transparent); }
+  .hero .tag { display: inline-block; padding: 3px 14px; border: 1px solid rgba(163,177,138,0.4); border-radius: 14px; color: var(--acc2); font-size: 11px; letter-spacing: 2px; position: relative; z-index: 1; margin-bottom: 16px; }
+  .hero h1 { font-size: 26px; font-weight: 700; color: #f4f8f4; line-height: 1.5; position: relative; z-index: 1; letter-spacing: 2px; }
+  .hero .sub { font-size: 13px; color: rgba(244,248,244,0.45); margin-top: 10px; position: relative; z-index: 1; }
+
+  .content { padding: 0 24px 32px; }
+  .content .lead { font-size: 16px; color: var(--light); line-height: 2.1; margin: 24px 0 32px; padding: 22px 24px; background: rgba(88,129,87,0.04); border-radius: var(--radius); border-left: 3px solid var(--acc); }
+
+  h2 { font-size: 20px; font-weight: 700; color: var(--pri); margin: 36px 0 18px; padding-left: 14px; border-left: 3px solid var(--acc); }
+  p { font-size: 15px; line-height: 2; margin-bottom: 16px; text-align: justify; text-indent: 2em; }
+
+  /* 组件1：左右分栏卡片 */
+  .split-card { display: flex; gap: 0; margin: 28px 0; background: var(--card); border-radius: var(--radius); overflow: hidden; box-shadow: 0 2px 12px rgba(0,0,0,0.04); border: 1px solid var(--border); }
+  .split-card .sc-left { width: 140px; min-width: 140px; background: linear-gradient(160deg, #3a5a40, #588157); display: flex; align-items: center; justify-content: center; font-size: 42px; color: rgba(255,255,255,0.9); }
+  .split-card .sc-right { flex: 1; padding: 22px 20px; }
+  .split-card .sc-right h4 { font-size: 16px; font-weight: 700; color: var(--pri); margin-bottom: 6px; }
+  .split-card .sc-right p { font-size: 13px; color: var(--light); line-height: 1.7; text-indent: 0; }
+
+  /* 组件2：对话气泡 */
+  .chat-row { margin: 28px 0; display: flex; flex-direction: column; gap: 16px; }
+  .chat-left { display: flex; gap: 12px; align-items: flex-start; }
+  .chat-left .avatar { width: 40px; height: 40px; border-radius: 50%; background: linear-gradient(135deg, var(--acc), var(--acc2)); display: flex; align-items: center; justify-content: center; font-size: 18px; color: #fff; flex-shrink: 0; }
+  .chat-left .bubble { background: var(--card); border-radius: 14px 14px 14px 4px; padding: 14px 18px; box-shadow: 0 1px 4px rgba(0,0,0,0.04); border: 1px solid var(--border); font-size: 14px; line-height: 1.8; }
+  .chat-right { display: flex; gap: 12px; align-items: flex-start; justify-content: flex-end; }
+  .chat-right .bubble { background: linear-gradient(135deg, rgba(88,129,87,0.08), rgba(163,177,138,0.06)); border-radius: 14px 14px 4px 14px; padding: 14px 18px; border: 1px solid rgba(88,129,87,0.15); font-size: 14px; line-height: 1.8; }
+  .chat-right .avatar { width: 40px; height: 40px; border-radius: 50%; background: linear-gradient(135deg, #dde8dd, var(--acc2)); display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0; }
+  .bubble .name { font-size: 12px; color: var(--acc); font-weight: 600; margin-bottom: 4px; }
+
+  /* 组件3：圆形图标网格 */
+  .circle-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin: 28px 0; }
+  .circle-item { text-align: center; }
+  .circle-item .circle { width: 64px; height: 64px; border-radius: 50%; margin: 0 auto 10px; display: flex; align-items: center; justify-content: center; font-size: 26px; }
+  .circle-item .circle.c1 { background: rgba(88,129,87,0.1); }
+  .circle-item .circle.c2 { background: rgba(163,177,138,0.1); }
+  .circle-item .circle.c3 { background: rgba(58,90,64,0.08); }
+  .circle-item .circle.c4 { background: rgba(107,123,107,0.08); }
+  .circle-item .c-label { font-size: 12px; color: var(--light); font-weight: 500; }
+
+  /* 组件4：卷轴式引用 */
+  .scroll-quote { margin: 28px 0; position: relative; padding: 28px 32px; background: linear-gradient(180deg, rgba(88,129,87,0.04) 0%, rgba(163,177,138,0.04) 100%); border-top: 2px solid var(--acc); border-bottom: 2px solid var(--acc); text-align: center; }
+  .scroll-quote::before, .scroll-quote::after { content: ''; position: absolute; left: 0; right: 0; height: 1px; background: var(--acc2); opacity: 0.3; }
+  .scroll-quote::before { top: 6px; }
+  .scroll-quote::after { bottom: 6px; }
+  .scroll-quote .sq-text { font-size: 17px; color: var(--pri); line-height: 2.2; letter-spacing: 1px; font-family: 'Noto Serif SC', 'STKaiti', 'KaiTi', serif; }
+  .scroll-quote .sq-from { font-size: 13px; color: var(--light); margin-top: 10px; }
+
+  /* 组件5：瀑布流卡片 */
+  .waterfall { margin: 28px 0; display: flex; flex-direction: column; gap: 12px; }
+  .wf-item { display: flex; gap: 14px; align-items: center; padding: 16px 18px; background: var(--card); border-radius: var(--radius); box-shadow: 0 1px 4px rgba(0,0,0,0.03); border: 1px solid var(--border); }
+  .wf-item .wf-thumb { width: 72px; height: 72px; border-radius: var(--radius); background: linear-gradient(135deg, #dde8dd, #c5d5c0); display: flex; align-items: center; justify-content: center; font-size: 28px; flex-shrink: 0; }
+  .wf-item .wf-info h4 { font-size: 15px; font-weight: 700; color: var(--pri); margin-bottom: 4px; }
+  .wf-item .wf-info p { font-size: 12px; color: var(--light); line-height: 1.6; text-indent: 0; }
+  .wf-item .wf-arrow { margin-left: auto; color: var(--acc2); font-size: 18px; }
+
+  /* 组件6：步骤编号 */
+  .step-row { display: flex; gap: 0; margin: 28px 0; }
+  .step-col { flex: 1; text-align: center; padding: 20px 8px; position: relative; }
+  .step-col::after { content: '→'; position: absolute; right: -4px; top: 30px; color: var(--acc2); font-size: 16px; }
+  .step-col:last-child::after { display: none; }
+  .step-col .s-num { width: 44px; height: 44px; border-radius: 50%; margin: 0 auto 10px; display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: 700; color: #fff; background: var(--acc); }
+  .step-col:nth-child(2) .s-num { background: var(--acc2); }
+  .step-col:nth-child(3) .s-num { background: #6b7b6b; }
+  .step-col .s-label { font-size: 12px; color: var(--light); font-weight: 500; }
+
+  /* 组件7：高亮文本块 */
+  .highlight-block { margin: 28px 0; padding: 20px 24px; background: linear-gradient(135deg, rgba(88,129,87,0.06), rgba(163,177,138,0.06)); border-radius: var(--radius); border: 1px solid rgba(88,129,87,0.12); font-size: 15px; line-height: 2; color: var(--pri); }
+  .highlight-block .hl-label { display: inline-block; padding: 2px 10px; background: var(--acc); color: #fff; border-radius: 4px; font-size: 11px; letter-spacing: 1px; margin-bottom: 8px; }
+
+  /* 组件8：图文错落 */
+  .stagger { margin: 28px 0; display: flex; flex-direction: column; gap: 16px; }
+  .stagger-item { display: flex; gap: 16px; align-items: center; }
+  .stagger-item:nth-child(even) { flex-direction: row-reverse; }
+  .stagger-item .sg-img { width: 100px; height: 100px; border-radius: var(--radius); background: linear-gradient(135deg, #dde8dd, #c5d5c0); display: flex; align-items: center; justify-content: center; font-size: 32px; flex-shrink: 0; }
+  .stagger-item .sg-text { flex: 1; }
+  .stagger-item .sg-text h4 { font-size: 15px; font-weight: 700; color: var(--pri); margin-bottom: 4px; }
+  .stagger-item .sg-text p { font-size: 13px; color: var(--light); line-height: 1.7; text-indent: 0; }
+
+  .footer { padding: 36px 24px; text-align: center; background: linear-gradient(180deg, var(--bg) 0%, #e8ede5 100%); }
+  .footer .f-logo { width: 64px; height: 64px; border-radius: 50%; border: 2px solid var(--acc); margin: 0 auto 14px; display: flex; align-items: center; justify-content: center; font-size: 28px; }
+  .footer h4 { font-size: 16px; color: var(--pri); font-weight: 700; }
+  .footer .f-desc { font-size: 12px; color: var(--light); margin-top: 6px; line-height: 1.8; }
+
+  @media (max-width: 480px) {
+    .circle-grid { grid-template-columns: repeat(2, 1fr); }
+    .step-row { flex-wrap: wrap; }
+    .step-col { flex-basis: 50%; }
+    .step-col:nth-child(2)::after { display: none; }
+    .split-card { flex-direction: column; }
+    .split-card .sc-left { width: 100%; height: 100px; }
+    .hero h1 { font-size: 22px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hero">
+    <div class="tag">青 瓷</div>
+    <h1>此处为文章主标题<br>可写两行</h1>
+    <div class="sub">—— 副标题或栏目名称 ——</div>
+  </div>
+
+  <div class="content">
+    <div class="lead">此处为引导语，建议 50-80 字，点明文章主旨与阅读价值。可<strong>加粗关键短语</strong>增强视觉层次。</div>
+
+    <!-- 组件1：左右分栏卡片 -->
+    <h2>壹 · 左右分栏</h2>
+    <p>左侧为色块+图标，右侧为标题+正文。适合展示独立内容单元，比如产品介绍、案例摘要、人物简介。左右结构比上下结构更紧凑，信息密度更高。</p>
+    <div class="split-card">
+      <div class="sc-left">📋</div>
+      <div class="sc-right"><h4>此处为卡片标题</h4><p>此处为卡片描述文字，建议控制在 40-60 字。简要说明内容要点，保持简洁有力。</p></div>
+    </div>
+    <div class="split-card">
+      <div class="sc-left">💬</div>
+      <div class="sc-right"><h4>此处为卡片标题</h4><p>此处为卡片描述文字，建议控制在 40-60 字。简要说明内容要点，保持简洁有力。</p></div>
+    </div>
+
+    <!-- 组件2：对话气泡 -->
+    <h2>贰 · 对话气泡</h2>
+    <p>模拟微信对话界面，适合呈现访谈内容、用户反馈、问答场景。左右交替的气泡制造对话感，比传统引用更生动、更有代入感。</p>
+    <div class="chat-row">
+      <div class="chat-left"><div class="avatar">问</div><div class="bubble"><div class="name">提问者</div>此处为提问内容，建议控制在 30-50 字。简洁明了地提出问题。</div></div>
+      <div class="chat-right"><div class="bubble"><div class="name">回答者</div>此处为回答内容，建议控制在 40-60 字。清晰有力地回应问题，可适当展开。</div><div class="avatar">答</div></div>
+      <div class="chat-left"><div class="avatar">问</div><div class="bubble"><div class="name">提问者</div>此处为追问内容，建议控制在 20-40 字。针对上一个回答的进一步提问。</div></div>
+    </div>
+
+    <!-- 组件3：圆形图标网格 -->
+    <h2>叁 · 圆形图标网格</h2>
+    <p>四列圆形图标+标签，适合展示品牌矩阵、产品线、服务分类。圆形天然比方形更柔和，配合浅色背景填充，视觉上轻量不压迫。</p>
+    <div class="circle-grid">
+      <div class="circle-item"><div class="circle c1">📦</div><div class="c-label">品类一</div></div>
+      <div class="circle-item"><div class="circle c2">🔧</div><div class="c-label">品类二</div></div>
+      <div class="circle-item"><div class="circle c3">📐</div><div class="c-label">品类三</div></div>
+      <div class="circle-item"><div class="circle c4">🎯</div><div class="c-label">品类四</div></div>
+    </div>
+
+    <!-- 组件4：卷轴式引用 -->
+    <h2>肆 · 卷轴式引用</h2>
+    <p>模拟中国传统卷轴的开合感，上下双线+浅色背景，适合放置文章金句、核心观点。比普通引用块更有仪式感，适合在文章高潮处使用。</p>
+    <div class="scroll-quote">
+      <div class="sq-text">此处为引用或金句文字<br>可写两到三行<br>字间距会自动调整</div>
+      <div class="sq-from">—— 出处或作者</div>
+    </div>
+
+    <!-- 组件5：瀑布流卡片 -->
+    <h2>伍 · 瀑布流列表</h2>
+    <p>缩略图+标题+箭头引导，适合展示文章列表、推荐阅读、相关链接。右侧箭头暗示可点击，天然具有引导转化的效果。</p>
+    <div class="waterfall">
+      <div class="wf-item"><div class="wf-thumb">📄</div><div class="wf-info"><h4>此处为条目标题</h4><p>此处为条目摘要，建议控制在 20 字以内</p></div><div class="wf-arrow">›</div></div>
+      <div class="wf-item"><div class="wf-thumb">📄</div><div class="wf-info"><h4>此处为条目标题</h4><p>此处为条目摘要，建议控制在 20 字以内</p></div><div class="wf-arrow">›</div></div>
+      <div class="wf-item"><div class="wf-thumb">📄</div><div class="wf-info"><h4>此处为条目标题</h4><p>此处为条目摘要，建议控制在 20 字以内</p></div><div class="wf-arrow">›</div></div>
+    </div>
+
+    <!-- 组件6：步骤编号 -->
+    <h2>陆 · 步骤流程</h2>
+    <p>横向排列的圆形编号+箭头连接，适合展示操作步骤、使用流程、服务环节。三到四步最佳，每步配简短标签。</p>
+    <div class="step-row">
+      <div class="step-col"><div class="s-num">1</div><div class="s-label">步骤一</div></div>
+      <div class="step-col"><div class="s-num">2</div><div class="s-label">步骤二</div></div>
+      <div class="step-col"><div class="s-num">3</div><div class="s-label">步骤三</div></div>
+    </div>
+
+    <!-- 组件7：高亮文本块 -->
+    <h2>柒 · 高亮文本块</h2>
+    <p>带标签的浅色背景文本区域，适合强调核心观点、总结段落。标签用主题色填充，在浅色背景上形成强烈对比，读者一眼就能定位。</p>
+    <div class="highlight-block">
+      <div class="hl-label">核心观点</div>
+      此处为核心观点或总结文字，建议控制在 40-60 字。浅色背景配合左侧标签，在正文中形成醒目的视觉焦点。
+    </div>
+
+    <!-- 组件8：图文错落 -->
+    <h2>捌 · 图文错落</h2>
+    <p>图片和文字左右交替排列，打破单调的上下结构。偶数项图文位置互换，制造视觉节奏变化，适合展示多个并列内容单元。</p>
+    <div class="stagger">
+      <div class="stagger-item"><div class="sg-img">🖼️</div><div class="sg-text"><h4>此处为小标题</h4><p>此处为描述文字，建议控制在 30-40 字。简要说明该单元的核心内容。</p></div></div>
+      <div class="stagger-item"><div class="sg-img">🖼️</div><div class="sg-text"><h4>此处为小标题</h4><p>此处为描述文字，建议控制在 30-40 字。简要说明该单元的核心内容。</p></div></div>
+      <div class="stagger-item"><div class="sg-img">🖼️</div><div class="sg-text"><h4>此处为小标题</h4><p>此处为描述文字，建议控制在 30-40 字。简要说明该单元的核心内容。</p></div></div>
+    </div>
+
+    <p style="text-align:center;color:var(--light);font-size:14px;margin-top:36px;text-indent:0;">—— 全文完 · 感谢阅读 ——</p>
+  </div>
+
+  <div class="footer">
+    <div class="f-logo">印</div>
+    <h4>此处放公众号名称</h4>
+    <div class="f-desc">此处放公众号简介<br>长按识别二维码 · 关注我们</div>
+  </div>
+</div>
+</body>
+</html>

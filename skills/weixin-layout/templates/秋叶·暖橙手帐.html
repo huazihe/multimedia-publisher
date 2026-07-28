@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>排版样式 · 秋叶</title>
+<style>
+  :root {
+    --bg: #fdf8f2;
+    --card: #fffbf6;
+    --text: #3d3028;
+    --light: #8b7560;
+    --pri: #5c3d20;
+    --acc: #d4843a;
+    --acc2: #e8b878;
+    --border: #ead9c4;
+    --radius: 12px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Serif SC', 'STSong', serif;
+    background: #f0e4d5; color: var(--text); line-height: 1.9; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 680px; margin: 0 auto; background: var(--bg); }
+
+  .hero {
+    background: linear-gradient(160deg, #5c3d20 0%, #7a5230 50%, #8b6340 100%);
+    padding: 50px 28px 36px; text-align: center; position: relative; overflow: hidden;
+  }
+  .hero::before {
+    content: ''; position: absolute; inset: 0;
+    background: radial-gradient(ellipse at 30% 60%, rgba(232,184,120,0.12) 0%, transparent 50%),
+                radial-gradient(ellipse at 70% 30%, rgba(212,132,58,0.08) 0%, transparent 50%);
+  }
+  .hero::after { content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 36px; background: linear-gradient(to top, var(--bg), transparent); }
+  .hero .leaf { display: inline-block; font-size: 32px; margin-bottom: 12px; position: relative; z-index: 1; animation: leafSway 3s ease-in-out infinite; }
+  @keyframes leafSway { 0%,100% { transform: rotate(-3deg); } 50% { transform: rotate(3deg); } }
+  .hero h1 { font-size: 26px; font-weight: 600; color: #fdf8f2; line-height: 1.5; position: relative; z-index: 1; letter-spacing: 2px; }
+  .hero .sub { font-size: 13px; color: rgba(253,248,242,0.45); margin-top: 10px; position: relative; z-index: 1; letter-spacing: 1px; }
+
+  .content { padding: 0 24px 32px; }
+  .content .lead { font-size: 16px; color: var(--light); line-height: 2.1; margin: 24px 0 32px; padding: 22px 24px; background: rgba(212,132,58,0.04); border-radius: var(--radius); border-left: 3px solid var(--acc); }
+  h2 { font-size: 20px; font-weight: 600; color: var(--pri); margin: 36px 0 18px; padding-left: 14px; border-left: 3px solid var(--acc); }
+  p { font-size: 15px; line-height: 2; margin-bottom: 16px; text-align: justify; text-indent: 2em; }
+
+  /* 组件1：毛玻璃卡片 */
+  .glass-card { margin: 28px 0; padding: 24px 22px; background: rgba(255,251,246,0.7); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border: 1px solid rgba(234,217,196,0.6); border-radius: var(--radius); box-shadow: 0 4px 16px rgba(92,61,32,0.04); }
+  .glass-card .gc-eyebrow { font-size: 11px; color: var(--acc); letter-spacing: 2px; text-transform: uppercase; margin-bottom: 8px; }
+  .glass-card h4 { font-size: 17px; font-weight: 600; color: var(--pri); margin-bottom: 8px; }
+  .glass-card p { font-size: 14px; color: var(--light); line-height: 1.8; text-indent: 0; }
+
+  /* 组件2：杂志式首字下沉 */
+  .drop-cap { margin: 28px 0; }
+  .drop-cap::first-letter { float: left; font-size: 64px; line-height: 0.8; font-weight: 700; color: var(--acc); margin-right: 10px; margin-top: 4px; font-family: 'Noto Serif SC', 'STSong', serif; }
+  .drop-cap p { text-indent: 0; }
+
+  /* 组件3：图文环绕 */
+  .img-wrap { margin: 28px 0; overflow: hidden; }
+  .img-wrap .iw-img { width: 160px; height: 120px; border-radius: var(--radius); background: linear-gradient(135deg, #ead9c4, #dcc8a8); float: left; margin: 0 16px 12px 0; display: flex; align-items: center; justify-content: center; font-size: 36px; }
+  .img-wrap p { text-indent: 0; }
+
+  /* 组件4：手写体批注 */
+  .annotation { margin: 28px 0; position: relative; padding: 16px 20px 16px 32px; }
+  .annotation::before { content: ''; position: absolute; left: 8px; top: 0; bottom: 0; width: 3px; background: linear-gradient(to bottom, var(--acc), var(--acc2)); border-radius: 2px; }
+  .annotation .anno-label { font-size: 11px; color: var(--acc); letter-spacing: 2px; margin-bottom: 6px; }
+  .annotation .anno-text { font-family: 'STKaiti', 'KaiTi', 'Noto Serif SC', serif; font-size: 16px; color: var(--pri); line-height: 2; font-style: italic; }
+
+  /* 组件5：九宫格 */
+  .grid-9 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 28px 0; }
+  .g9-item { aspect-ratio: 1; border-radius: var(--radius); background: linear-gradient(135deg, rgba(232,184,120,0.15), rgba(212,132,58,0.08)); display: flex; align-items: center; justify-content: center; font-size: 28px; border: 1px solid rgba(234,217,196,0.5); }
+  .g9-item:nth-child(5) { background: linear-gradient(135deg, rgba(212,132,58,0.2), rgba(212,132,58,0.1)); border-color: rgba(212,132,58,0.3); }
+
+  /* 组件6：横幅公告 */
+  .banner { margin: 28px 0; padding: 20px 24px; background: linear-gradient(135deg, var(--pri), #7a5230); border-radius: var(--radius); color: #fdf8f2; text-align: center; }
+  .banner .bn-icon { font-size: 28px; margin-bottom: 8px; }
+  .banner .bn-title { font-size: 16px; font-weight: 600; letter-spacing: 1px; margin-bottom: 4px; }
+  .banner .bn-desc { font-size: 13px; opacity: 0.7; line-height: 1.7; }
+
+  /* 组件7：两端对齐要点 */
+  .justify-list { margin: 28px 0; }
+  .jl-item { display: flex; justify-content: space-between; align-items: center; padding: 14px 0; border-bottom: 1px dotted var(--border); }
+  .jl-item:last-child { border-bottom: none; }
+  .jl-item .jl-left { font-size: 15px; font-weight: 500; color: var(--pri); }
+  .jl-item .jl-right { font-size: 13px; color: var(--acc); font-weight: 600; }
+
+  /* 组件8：圆角矩形按钮组 */
+  .pill-group { margin: 28px 0; display: flex; flex-wrap: wrap; gap: 10px; }
+  .pill { padding: 8px 20px; border-radius: 20px; font-size: 13px; font-weight: 500; letter-spacing: 0.5px; }
+  .pill.fill { background: var(--acc); color: #fff; }
+  .pill.outline { border: 1.5px solid var(--acc); color: var(--acc); background: transparent; }
+  .pill.light { background: rgba(212,132,58,0.08); color: var(--acc); }
+
+  .footer { padding: 36px 24px; text-align: center; background: linear-gradient(180deg, var(--bg) 0%, #f0e4d5 100%); }
+  .footer .f-icon { font-size: 36px; margin-bottom: 12px; }
+  .footer h4 { font-size: 16px; color: var(--pri); font-weight: 600; letter-spacing: 1px; }
+  .footer .f-desc { font-size: 12px; color: var(--light); margin-top: 6px; line-height: 1.8; }
+
+  @media (max-width: 480px) {
+    .img-wrap .iw-img { width: 120px; height: 90px; }
+    .hero h1 { font-size: 22px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hero">
+    <div class="leaf">🍂</div>
+    <h1>此处为文章主标题<br>可写两行</h1>
+    <div class="sub">—— 副标题或栏目名称 ——</div>
+  </div>
+
+  <div class="content">
+    <div class="lead">此处为引导语，建议 50-80 字，点明文章主旨与阅读价值。可<strong>加粗关键短语</strong>增强视觉层次。</div>
+
+    <h2>壹 · 毛玻璃卡片</h2>
+    <p>半透明背景+模糊效果，模拟 iOS 毛玻璃风格。适合在图片背景上叠加文字信息，或作为独立的信息卡片。比纯白卡片更有层次感和现代感。</p>
+    <div class="glass-card">
+      <div class="gc-eyebrow">EYEBROW TEXT</div>
+      <h4>此处为卡片标题</h4>
+      <p>此处为卡片描述文字，建议控制在 40-60 字。毛玻璃效果让卡片与背景融合，视觉上更轻盈。</p>
+    </div>
+
+    <h2>贰 · 杂志式首字下沉</h2>
+    <p>段落首字放大下沉，模拟传统杂志排版。适合文章开篇第一段，制造强烈的视觉引导效果，让读者自然进入阅读状态。</p>
+    <div class="drop-cap">
+      <p>此处为使用了首字下沉效果的段落正文。首字会放大到 64px 并下沉两行，与后续文字形成自然的文字环绕效果。这种排版方式在杂志和报纸中非常常见，适合用于文章开篇或重要段落的起始，能有效吸引读者注意力并引导阅读节奏。</p>
+    </div>
+
+    <h2>叁 · 图文环绕</h2>
+    <p>图片浮动于文字左侧，文字自然环绕。适合在正文中嵌入小尺寸配图，图片和文字融为一体，比上下结构更紧凑自然。</p>
+    <div class="img-wrap">
+      <div class="iw-img">🖼️</div>
+      <p>此处为图文环绕的正文文字。图片浮动在左侧，文字自然地环绕在图片周围。这种排版方式适合在段落中穿插小型配图，让图文关系更加紧密。建议图片宽度控制在 150-180px，高度不超过 120px，过大的图片会挤压文字空间。</p>
+    </div>
+
+    <h2>肆 · 手写体批注</h2>
+    <p>左侧色条+楷体斜体文字，模拟手写批注效果。适合嵌入编者点评、阅读感悟、补充观点。楷体天然带有手写感，与正文字体形成对比。</p>
+    <div class="annotation">
+      <div class="anno-label">编者按</div>
+      <div class="anno-text">此处为批注或点评文字，建议控制在 30-50 字。楷体斜体模拟手写效果，与正文形成视觉对比。</div>
+    </div>
+
+    <h2>伍 · 九宫格</h2>
+    <p>3×3 网格布局，中心格用强调色突出。适合展示产品矩阵、服务分类、品牌阵列。九宫格是经典的中国式布局，视觉均衡稳定。</p>
+    <div class="grid-9">
+      <div class="g9-item">📦</div><div class="g9-item">🔧</div><div class="g9-item">📐</div>
+      <div class="g9-item">🎯</div><div class="g9-item">⭐</div><div class="g9-item">💡</div>
+      <div class="g9-item">📋</div><div class="g9-item">🔍</div><div class="g9-item">✍️</div>
+    </div>
+
+    <h2>陆 · 横幅公告</h2>
+    <p>深色背景+白色文字的全宽横幅，适合发布重要通知、活动预告、核心观点。视觉冲击力强，在浅色页面中形成强烈对比。</p>
+    <div class="banner">
+      <div class="bn-icon">📢</div>
+      <div class="bn-title">此处为公告标题</div>
+      <div class="bn-desc">此处为公告内容，建议控制在 30-50 字。深色背景让信息在页面中脱颖而出。</div>
+    </div>
+
+    <h2>柒 · 两端对齐列表</h2>
+    <p>左侧标题+右侧数值，两端对齐。适合展示参数列表、规格说明、属性对比。虚线分隔比实线更轻盈。</p>
+    <div class="justify-list">
+      <div class="jl-item"><span class="jl-left">项目名称一</span><span class="jl-right">说明文字</span></div>
+      <div class="jl-item"><span class="jl-left">项目名称二</span><span class="jl-right">说明文字</span></div>
+      <div class="jl-item"><span class="jl-left">项目名称三</span><span class="jl-right">说明文字</span></div>
+      <div class="jl-item"><span class="jl-left">项目名称四</span><span class="jl-right">说明文字</span></div>
+    </div>
+
+    <h2>捌 · 圆角按钮组</h2>
+    <p>三种状态的圆角按钮——实心填充、描边轮廓、浅色背景。适合行动号召、链接跳转、选项选择。圆角比直角更友好。</p>
+    <div class="pill-group">
+      <span class="pill fill">主要操作</span>
+      <span class="pill outline">次要操作</span>
+      <span class="pill light">辅助选项</span>
+      <span class="pill outline">更多选择</span>
+    </div>
+
+    <p style="text-align:center;color:var(--light);font-size:14px;margin-top:36px;text-indent:0;">—— 全文完 · 感谢阅读 ——</p>
+  </div>
+
+  <div class="footer">
+    <div class="f-icon">🍂</div>
+    <h4>此处放公众号名称</h4>
+    <div class="f-desc">此处放公众号简介<br>长按识别二维码 · 关注我们</div>
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>维视智造排版 · 工业质检清爽风</title>
+<style>
+  :root {
+    --page: #f5f7fa;
+    --paper: #ffffff;
+    --text: #1f2937;
+    --muted: #6b7280;
+    --soft: #eefaf7;
+    --accent: #0f766e;
+    --accent-dark: #0f5f59;
+    --border: #dfe5ee;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 0;
+    background: var(--page);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap {
+    max-width: 680px;
+    margin: 0 auto;
+    background: var(--paper);
+  }
+  .hero {
+    padding: 34px 26px 28px;
+    border-top: 6px solid var(--accent);
+    background: linear-gradient(180deg, #ffffff 0%, var(--soft) 100%);
+  }
+  .eyebrow {
+    display: inline-block;
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--accent-dark);
+    font-size: 12px;
+    letter-spacing: 1px;
+    background: rgba(255,255,255,.82);
+  }
+  h1 {
+    margin: 18px 0 10px;
+    font-size: 28px;
+    line-height: 1.42;
+    font-weight: 750;
+    color: #111827;
+    letter-spacing: 0;
+  }
+  .subtitle {
+    margin: 0;
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.8;
+  }
+  .content {
+    padding: 26px 24px 34px;
+  }
+  .lead {
+    margin: 0 0 28px;
+    padding: 18px 18px;
+    background: var(--soft);
+    border-left: 4px solid var(--accent);
+    border-radius: 6px;
+    color: #374151;
+    font-size: 15px;
+    line-height: 2;
+  }
+  h2 {
+    margin: 34px 0 16px;
+    padding: 0 0 10px;
+    border-bottom: 1px solid var(--border);
+    font-size: 20px;
+    line-height: 1.5;
+    color: #111827;
+    font-weight: 720;
+  }
+  h2::before {
+    content: "";
+    display: inline-block;
+    width: 6px;
+    height: 18px;
+    margin-right: 9px;
+    border-radius: 2px;
+    background: var(--accent);
+    vertical-align: -3px;
+  }
+  h3 {
+    margin: 26px 0 10px;
+    padding-left: 12px;
+    border-left: 3px solid var(--accent);
+    color: var(--accent-dark);
+    font-size: 16px;
+    line-height: 1.6;
+    font-weight: 700;
+  }
+  p {
+    margin: 0 0 16px;
+    font-size: 15px;
+    line-height: 2;
+    color: #374151;
+    text-align: justify;
+  }
+  strong { color: #111827; font-weight: 700; }
+  .image-slot {
+    margin: 26px 0;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    background: #f8fafc;
+  }
+  .image-box {
+    height: 210px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+    font-size: 14px;
+    background:
+      linear-gradient(90deg, rgba(255,255,255,.72) 1px, transparent 1px),
+      linear-gradient(180deg, rgba(255,255,255,.72) 1px, transparent 1px),
+      var(--soft);
+    background-size: 24px 24px;
+  }
+  .caption {
+    padding: 10px 14px;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.7;
+    text-align: center;
+    background: #ffffff;
+  }
+  .fact-card {
+    margin: 24px 0;
+    padding: 18px 18px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #ffffff;
+  }
+  .fact-card .label {
+    margin-bottom: 8px;
+    color: var(--accent-dark);
+    font-size: 13px;
+    font-weight: 700;
+  }
+  .fact-card p { margin-bottom: 0; }
+  .point-list {
+    margin: 22px 0;
+    padding: 0;
+    list-style: none;
+  }
+  .point-list li {
+    position: relative;
+    padding: 12px 0 12px 24px;
+    border-bottom: 1px solid var(--border);
+    color: #374151;
+    font-size: 14px;
+    line-height: 1.8;
+  }
+  .point-list li::before {
+    content: "";
+    position: absolute;
+    left: 2px;
+    top: 20px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+  .quote {
+    margin: 26px 0;
+    padding: 18px 20px;
+    border-left: 4px solid var(--accent);
+    background: var(--soft);
+    color: #374151;
+    font-size: 15px;
+    line-height: 2;
+  }
+  .cta {
+    margin: 34px 0 0;
+    padding: 22px 18px;
+    border-radius: 6px;
+    background: var(--accent-dark);
+    color: #ffffff;
+    text-align: center;
+  }
+  .cta h4 {
+    margin: 0 0 8px;
+    font-size: 17px;
+    line-height: 1.6;
+  }
+  .cta p {
+    margin: 0;
+    color: rgba(255,255,255,.84);
+    text-align: center;
+    font-size: 13px;
+  }
+  .footer {
+    padding: 24px;
+    text-align: center;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.8;
+    background: #fafafa;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <section class="hero">
+    <span class="eyebrow">维视智造 · 工业质检</span>
+    <h1>此处为文章主标题<br>可写两行</h1>
+    <p class="subtitle">副标题或栏目名称</p>
+  </section>
+
+  <section class="content">
+    <section class="lead">此处为引导语，建议 50-100 字。先点明具体行业场景、检测难点和阅读价值，不做夸张铺陈。</section>
+
+    <h2>一、从一个具体工位说起</h2>
+    <p>此处为正文段落。建议从客户产线、检测对象、质量风险或工艺节点切入，让读者先知道“为什么这件事值得看”。</p>
+    <p>正文保持白底、短段落和清晰层级。适合工业检测、客户案例、方案解读和行业观察。</p>
+
+    <section class="image-slot">
+      <section class="image-box">配图位 1：现场图 / 检测对象 / 方案示意</section>
+      <section class="caption">图片说明：用于承接开头场景，替换为已审核图片。</section>
+    </section>
+
+    <h2>二、问题不在“有没有检测”，而在能否稳定判断</h2>
+    <p>此处展开问题拆解。可以按“表象、根源、代价”写：人工为什么不稳定，传统方式为什么容易误判，质量问题流到后道会带来什么管理压力。</p>
+
+    <section class="fact-card">
+      <section class="label">案例要点</section>
+      <p>此处放案例中的关键事实，例如检测对象、检测任务、核心配置、系统联动或可公开效果。不要填写无来源数字。</p>
+    </section>
+
+    <h3>方案拆解</h3>
+    <p>此处说明方案为什么有效。建议按成像、算法、软件、MES 或系统联动拆开写，每个技术点都回答“解决了什么产线问题”。</p>
+
+    <ul class="point-list">
+      <li>成像层：说明光源、镜头、相机如何让目标特征更清楚。</li>
+      <li>算法层：说明检测逻辑如何从图像中判断 OK/NG。</li>
+      <li>系统层：说明检测结果如何上传、追溯或反馈。</li>
+    </ul>
+
+    <section class="image-slot">
+      <section class="image-box">配图位 2：OK/NG 原图 / 检测效果图</section>
+      <section class="caption">图片说明：用于支撑方案段，优先使用 visual_verified 图片。</section>
+    </section>
+
+    <h2>三、案例价值：把一次检测变成可追溯的质量节点</h2>
+    <p>此处回到客户价值。少写“赋能升级”，多写检测一致性、漏检风险控制、MES 回传、设备可监控、质量问题实时反馈。</p>
+
+    <section class="quote">此处放核心观点或金句：好的视觉检测不是替代一双眼睛，而是把质量判断变成稳定、可记录、可追溯的流程。</section>
+
+    <section class="cta">
+      <h4>此处放公众号名称</h4>
+      <p>此处放公众号简介。可加入“后台留言关键词获取方案资料”。</p>
+    </section>
+  </section>
+
+  <section class="footer">清爽工业质检风</section>
+</div>
+</body>
+</html>

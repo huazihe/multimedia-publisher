@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>公众号排版样式 - 暖色国风</title>
+<style>
+  :root {
+    --primary: #3d2b1f;
+    --accent: #c0392b;
+    --accent2: #d4a017;
+    --text: #4a3728;
+    --text-light: #8b7355;
+    --bg: #fdf8f0;
+    --card-bg: #fffaf3;
+    --border: #e8d5c4;
+    --shadow: 0 2px 12px rgba(139,115,85,0.08);
+    --radius: 8px;
+    --font-body: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Noto Serif SC', 'STSong', 'SimSun', serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: var(--font-body);
+    background: #f0ebe3;
+    color: var(--text);
+    line-height: 1.9;
+    -webkit-font-smoothing: antialiased;
+  }
+  .article-container { max-width: 680px; margin: 0 auto; background: var(--bg); min-height: 100vh; }
+
+  /* 头部水墨 */
+  .hero-ink {
+    background: linear-gradient(180deg, #3d2b1f 0%, #5c3d2e 40%, #8b5e3c 100%);
+    padding: 56px 28px 40px; text-align: center; position: relative; overflow: hidden;
+  }
+  .hero-ink::before {
+    content: ''; position: absolute; inset: 0;
+    background: radial-gradient(circle at 20% 80%, rgba(212,160,23,0.15) 0%, transparent 50%),
+                radial-gradient(circle at 80% 20%, rgba(192,57,43,0.1) 0%, transparent 50%);
+  }
+  .hero-ink::after {
+    content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 40px;
+    background: linear-gradient(to top, var(--bg), transparent);
+  }
+  .hero-ink .ink-seal {
+    width: 56px; height: 56px; border: 2px solid rgba(212,160,23,0.4); border-radius: 50%;
+    margin: 0 auto 16px; display: flex; align-items: center; justify-content: center;
+    font-size: 24px; color: var(--accent2); position: relative; z-index: 1;
+  }
+  .hero-ink h1 { font-size: 26px; font-weight: 700; color: #fdf8f0; line-height: 1.5; position: relative; z-index: 1; letter-spacing: 2px; }
+  .hero-ink .ink-subtitle { font-size: 13px; color: rgba(253,248,240,0.5); margin-top: 12px; position: relative; z-index: 1; letter-spacing: 1px; }
+
+  .content-section { padding: 0 24px 32px; }
+  .content-section h2 { font-size: 20px; font-weight: 700; color: var(--primary); margin: 36px 0 18px; text-align: center; position: relative; letter-spacing: 1px; }
+  .content-section h2::after { content: ''; display: block; width: 40px; height: 2px; background: var(--accent2); margin: 10px auto 0; }
+  .content-section p { font-size: 15px; color: var(--text); line-height: 2; margin-bottom: 16px; text-align: justify; text-indent: 2em; }
+  .content-section .lead { font-size: 16px; color: var(--text-light); line-height: 2.1; margin: 24px 0 32px; padding: 24px; background: linear-gradient(135deg, rgba(212,160,23,0.06), rgba(192,57,43,0.04)); border-radius: var(--radius); border-left: 3px solid var(--accent2); text-indent: 0; }
+
+  /* 竖排分隔 */
+  .chinese-divider { text-align: center; margin: 36px 0; color: var(--accent2); font-size: 18px; letter-spacing: 8px; opacity: 0.5; }
+
+  /* 图文卡片 */
+  .img-text-card { margin: 28px 0; background: var(--card-bg); border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); border: 1px solid var(--border); }
+  .img-text-card .it-img { height: 180px; background: linear-gradient(135deg, #e8d5c4, #d4c4b0); display: flex; align-items: center; justify-content: center; font-size: 48px; }
+  .img-text-card .it-body { padding: 20px; }
+  .img-text-card .it-body h4 { font-size: 16px; font-weight: 700; color: var(--primary); margin-bottom: 8px; }
+  .img-text-card .it-body p { font-size: 14px; color: var(--text-light); line-height: 1.8; text-indent: 0; }
+
+  /* 印章列表 */
+  .seal-list { margin: 28px 0; display: flex; flex-direction: column; gap: 16px; }
+  .seal-item { display: flex; gap: 16px; align-items: flex-start; padding: 18px; background: var(--card-bg); border-radius: var(--radius); box-shadow: var(--shadow); border: 1px solid var(--border); }
+  .seal-item .seal-num { width: 40px; height: 40px; min-width: 40px; border-radius: 50%; border: 2px solid var(--accent); color: var(--accent); display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 700; }
+  .seal-item .seal-num.gold { border-color: var(--accent2); color: var(--accent2); }
+  .seal-item .seal-num.brown { border-color: #5c3d2e; color: #5c3d2e; }
+  .seal-item .seal-content h4 { font-size: 15px; font-weight: 700; color: var(--primary); margin-bottom: 4px; }
+  .seal-item .seal-content p { font-size: 13px; color: var(--text-light); line-height: 1.7; text-indent: 0; }
+
+  /* 竖排引用 */
+  .vertical-quote { margin: 28px 0; padding: 24px; background: linear-gradient(135deg, rgba(212,160,23,0.06), rgba(192,57,43,0.04)); border-radius: var(--radius); text-align: center; border: 1px dashed var(--border); }
+  .vertical-quote .vq-text { font-size: 18px; color: var(--primary); line-height: 2; letter-spacing: 2px; font-family: 'Noto Serif SC', 'STKaiti', 'KaiTi', serif; }
+  .vertical-quote .vq-author { font-size: 13px; color: var(--text-light); margin-top: 12px; }
+
+  /* 三列要点 */
+  .trio-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 28px 0; }
+  .trio-card { background: var(--card-bg); border-radius: var(--radius); padding: 20px 14px; text-align: center; box-shadow: var(--shadow); border: 1px solid var(--border); }
+  .trio-card .trio-icon { font-size: 28px; margin-bottom: 8px; }
+  .trio-card .trio-title { font-size: 14px; font-weight: 700; color: var(--primary); margin-bottom: 4px; }
+  .trio-card .trio-desc { font-size: 12px; color: var(--text-light); line-height: 1.6; }
+
+  /* 时间轴 */
+  .ink-timeline { margin: 28px 0; position: relative; padding-left: 28px; }
+  .ink-timeline::before { content: ''; position: absolute; left: 8px; top: 0; bottom: 0; width: 2px; background: linear-gradient(to bottom, var(--accent2), var(--accent), transparent); }
+  .ink-tl-item { position: relative; padding-bottom: 28px; }
+  .ink-tl-item:last-child { padding-bottom: 0; }
+  .ink-tl-item::before { content: ''; position: absolute; left: -24px; top: 6px; width: 10px; height: 10px; border-radius: 50%; background: var(--accent2); border: 2px solid var(--bg); }
+  .ink-tl-item:nth-child(2)::before { background: var(--accent); }
+  .ink-tl-item:nth-child(3)::before { background: #5c3d2e; }
+  .ink-tl-item .tl-date { font-size: 12px; color: var(--accent2); letter-spacing: 1px; margin-bottom: 4px; }
+  .ink-tl-item .tl-title { font-size: 15px; font-weight: 700; color: var(--primary); margin-bottom: 4px; }
+  .ink-tl-item .tl-desc { font-size: 13px; color: var(--text-light); line-height: 1.7; }
+
+  /* 手风琴 */
+  .ink-accordion { margin: 28px 0; }
+  .ink-acc-item { margin-bottom: 10px; background: var(--card-bg); border-radius: var(--radius); box-shadow: var(--shadow); border: 1px solid var(--border); overflow: hidden; }
+  .ink-acc-item .acc-title { padding: 16px 20px; font-size: 15px; font-weight: 600; color: var(--primary); display: flex; justify-content: space-between; align-items: center; }
+  .ink-acc-item .acc-title .acc-arrow { color: var(--accent2); font-size: 12px; }
+  .ink-acc-item .acc-content { padding: 0 20px 18px; font-size: 14px; color: var(--text-light); line-height: 1.9; border-top: 1px solid var(--border); margin: 0 20px; }
+
+  /* 数据条 */
+  .data-bars { margin: 28px 0; display: flex; flex-direction: column; gap: 14px; }
+  .data-bar-item { display: flex; align-items: center; gap: 12px; }
+  .data-bar-item .bar-label { width: 80px; font-size: 13px; color: var(--text); font-weight: 600; text-align: right; flex-shrink: 0; }
+  .data-bar-item .bar-track { flex: 1; height: 20px; background: #f0ebe3; border-radius: 10px; overflow: hidden; }
+  .data-bar-item .bar-fill { height: 100%; border-radius: 10px; display: flex; align-items: center; justify-content: flex-end; padding-right: 10px; font-size: 11px; color: #fff; font-weight: 600; }
+  .bar-fill.warm { background: linear-gradient(90deg, var(--accent2), #e6c04a); }
+  .bar-fill.red { background: linear-gradient(90deg, var(--accent), #e74c3c); }
+  .bar-fill.brown { background: linear-gradient(90deg, #5c3d2e, #8b5e3c); }
+  .bar-fill.tea { background: linear-gradient(90deg, #8b7355, #a0845c); }
+
+  /* 标签组 */
+  .ink-tags { display: flex; flex-wrap: wrap; gap: 8px; margin: 28px 0; justify-content: center; }
+  .ink-tag { padding: 5px 16px; border-radius: 16px; font-size: 13px; letter-spacing: 1px; }
+  .ink-tag.red { background: rgba(192,57,43,0.08); color: var(--accent); border: 1px solid rgba(192,57,43,0.15); }
+  .ink-tag.gold { background: rgba(212,160,23,0.08); color: var(--accent2); border: 1px solid rgba(212,160,23,0.15); }
+  .ink-tag.brown { background: rgba(92,61,46,0.06); color: #5c3d2e; border: 1px solid rgba(92,61,46,0.1); }
+  .ink-tag.tea { background: rgba(139,115,85,0.06); color: #8b7355; border: 1px solid rgba(139,115,85,0.1); }
+
+  /* 提示卡片 */
+  .ink-tip { margin: 28px 0; padding: 20px 24px; border-radius: var(--radius); font-size: 14px; line-height: 1.9; }
+  .ink-tip.wisdom { background: linear-gradient(135deg, rgba(212,160,23,0.08), rgba(253,248,240,0.5)); border: 1px solid rgba(212,160,23,0.2); color: #5c3d2e; }
+  .ink-tip.notice { background: linear-gradient(135deg, rgba(192,57,43,0.06), rgba(253,248,240,0.5)); border: 1px solid rgba(192,57,43,0.15); color: #6b2f1a; }
+  .ink-tip .tip-label { font-weight: 700; margin-bottom: 4px; font-size: 13px; letter-spacing: 1px; }
+
+  /* 底部 */
+  .footer-ink { padding: 36px 24px; text-align: center; background: linear-gradient(180deg, var(--bg) 0%, #f0ebe3 100%); }
+  .footer-ink .footer-seal { width: 72px; height: 72px; border: 2px solid var(--accent); border-radius: 50%; margin: 0 auto 14px; display: flex; align-items: center; justify-content: center; font-size: 14px; color: var(--accent); font-weight: 700; letter-spacing: 2px; }
+  .footer-ink h4 { font-size: 16px; color: var(--primary); font-weight: 700; letter-spacing: 1px; }
+  .footer-ink .footer-desc { font-size: 12px; color: var(--text-light); margin-top: 6px; line-height: 1.8; }
+
+  @media (max-width: 480px) {
+    .trio-cards { grid-template-columns: repeat(2, 1fr); }
+    .hero-ink h1 { font-size: 22px; }
+    .data-bar-item .bar-label { width: 60px; font-size: 12px; }
+  }
+</style>
+</head>
+<body>
+<div class="article-container">
+  <div class="hero-ink">
+    <div class="ink-seal">印</div>
+    <h1>中式排版美学<br>让文字在纸上呼吸</h1>
+    <div class="ink-subtitle">—— 公众号国风排版完全手册 ——</div>
+  </div>
+
+  <div class="content-section">
+    <div class="lead">中国传统文化讲究"留白"与"气韵"。好的排版如同书法——疏可走马，密不透风。本篇从东方美学出发，提炼 10 种适合公众号的国风排版样式。</div>
+
+    <h2>壹 · 图文卡片</h2>
+    <p>图文卡片是公众号最基础的排版单元。上方配图、下方文字的结构符合自上而下的阅读习惯，适合产品展示、案例介绍等场景。</p>
+    <div class="img-text-card">
+      <div class="it-img">🖼️</div>
+      <div class="it-body"><h4>远心镜头在锂电检测中的应用</h4><p>远心镜头消除了普通镜头的透视误差，在锂电池极片边缘检测中，测量精度可达 ±1μm，满足动力电池日益严苛的质量标准。</p></div>
+    </div>
+
+    <div class="chinese-divider">· · · 壹章完 · · ·</div>
+
+    <h2>贰 · 印章列表</h2>
+    <p>以圆形编号模拟印章效果，搭配标题与描述。圆形元素呼应传统印章美学，视觉上比方形序号更柔和、更有文化感。</p>
+    <div class="seal-list">
+      <div class="seal-item"><div class="seal-num">壹</div><div class="seal-content"><h4>留白有度</h4><p>段落间距不少于 1.5 倍行高，章节之间保留充足的呼吸空间。留白不是浪费，是给读者喘息的机会。</p></div></div>
+      <div class="seal-item"><div class="seal-num gold">贰</div><div class="seal-content"><h4>色彩克制</h4><p>全文主色不超过 3 种。国风配色推荐：赭石 + 金色 + 墨色，或朱砂 + 月白 + 黛青。</p></div></div>
+      <div class="seal-item"><div class="seal-num brown">叁</div><div class="seal-content"><h4>字体有骨</h4><p>标题用宋体或楷体凸显文化感，正文用系统默认字体保证可读性。字号差异控制在 4-6px 以内。</p></div></div>
+    </div>
+
+    <div class="chinese-divider">· · · 贰章完 · · ·</div>
+
+    <h2>叁 · 竖排引用</h2>
+    <p>引用古人名言或核心观点时，使用居中、加大字距的排版方式，营造庄重感和仪式感。适合文章开篇或结尾点题。</p>
+    <div class="vertical-quote">
+      <div class="vq-text">大音希声<br>大象无形<br>大巧若拙</div>
+      <div class="vq-author">——《道德经》</div>
+    </div>
+
+    <h2>肆 · 三列要点</h2>
+    <p>三列布局在移动端刚好填满一屏宽度，信息密度适中。适合罗列核心优势、服务特色、产品亮点。</p>
+    <div class="trio-cards">
+      <div class="trio-card"><div class="trio-icon">🎯</div><div class="trio-title">精准定位</div><div class="trio-desc">基于用户画像的内容策略</div></div>
+      <div class="trio-card"><div class="trio-icon">✍️</div><div class="trio-title">原创内容</div><div class="trio-desc">每篇经过 3 轮审核打磨</div></div>
+      <div class="trio-card"><div class="trio-icon">📈</div><div class="trio-title">数据驱动</div><div class="trio-desc">用阅读数据反哺选题</div></div>
+    </div>
+
+    <h2>伍 · 时间轴</h2>
+    <p>纵向时间轴天然具有叙事感，适合展示发展历程、项目里程碑。配合渐变线条和节点圆点，视觉引导清晰。</p>
+    <div class="ink-timeline">
+      <div class="ink-tl-item"><div class="tl-date">庚子年 · 2020</div><div class="tl-title">项目立项</div><div class="tl-desc">完成市场调研与可行性分析，确定核心技术路线。</div></div>
+      <div class="ink-tl-item"><div class="tl-date">壬寅年 · 2022</div><div class="tl-title">产品发布</div><div class="tl-desc">首款产品正式商用，获得行业头部客户认可。</div></div>
+      <div class="ink-tl-item"><div class="tl-date">甲辰年 · 2024</div><div class="tl-title">规模化扩张</div><div class="tl-desc">覆盖 500+ 企业客户，年营收突破亿元大关。</div></div>
+    </div>
+
+    <h2>陆 · 手风琴面板</h2>
+    <p>折叠式内容区适合 FAQ、知识库、详细说明。展开前保持页面简洁，读者按需深入，符合"由简入繁"的阅读心理。</p>
+    <div class="ink-accordion">
+      <div class="ink-acc-item"><div class="acc-title">何谓"留白"？<span class="acc-arrow">▼</span></div><div class="acc-content">留白是中国书画中的核心概念，指画面中不着笔墨的区域。在排版中，留白指的是段落间距、页边距、元素间距等空白区域。恰当的留白能让内容呼吸，提升阅读舒适度。</div></div>
+      <div class="ink-acc-item"><div class="acc-title">国风配色有何讲究？<span class="acc-arrow">▼</span></div><div class="acc-content">中国传统色彩讲究"五行五色"——青赤黄白黑。公众号国风排版推荐使用低饱和度暖色系：赭石(#8B4513)、琥珀(#FFBF00)、月白(#D6E4F0)、黛青(#426666)。</div></div>
+      <div class="ink-acc-item"><div class="acc-title">如何选择合适的字体？<span class="acc-arrow">▼</span></div><div class="acc-content">标题推荐使用"思源宋体"或"方正清刻本"等衬线字体，正文使用系统默认无衬线字体。注意：微信公众号不支持自定义字体，需通过图片方式呈现特殊字体效果。</div></div>
+    </div>
+
+    <h2>柒 · 数据条</h2>
+    <p>水平数据条比饼图和柱状图更适合移动端。配合暖色渐变，让数据展示既有说服力又有温度。</p>
+    <div class="data-bars">
+      <div class="data-bar-item"><span class="bar-label">阅读完成率</span><div class="bar-track"><div class="bar-fill warm" style="width:92%">92%</div></div></div>
+      <div class="data-bar-item"><span class="bar-label">分享转化率</span><div class="bar-track"><div class="bar-fill red" style="width:78%">78%</div></div></div>
+      <div class="data-bar-item"><span class="bar-label">粉丝增长率</span><div class="bar-track"><div class="bar-fill brown" style="width:65%">65%</div></div></div>
+      <div class="data-bar-item"><span class="bar-label">广告点击率</span><div class="bar-track"><div class="bar-fill tea" style="width:43%">43%</div></div></div>
+    </div>
+
+    <h2>捌 · 标签云</h2>
+    <p>标签云适合在文末或文中快速罗列关键词，帮助读者建立对主题的认知框架。国风配色标签比纯色标签更有质感。</p>
+    <div class="ink-tags">
+      <span class="ink-tag red">机器视觉</span><span class="ink-tag gold">深度学习</span><span class="ink-tag brown">智能制造</span>
+      <span class="ink-tag tea">缺陷检测</span><span class="ink-tag red">3D 成像</span><span class="ink-tag gold">AI 质检</span>
+      <span class="ink-tag brown">边缘计算</span><span class="ink-tag tea">尺寸测量</span><span class="ink-tag red">OCR 识别</span>
+    </div>
+
+    <h2>玖 · 提示卡片</h2>
+    <p>在正文中嵌入提示卡片，用暖色背景和左侧边框区分信息层级。可用于核心观点强调、阅读提示、行动号召。</p>
+    <div class="ink-tip wisdom"><div class="tip-label">💡 排版心法</div>好的排版如同好茶——初看平淡，细品有韵。不必追求花哨的效果，把最基本的字号、间距、色彩做到极致，就已经超越了 90% 的公众号。</div>
+    <div class="ink-tip notice"><div class="tip-label">⚠️ 避坑指南</div>避免使用超过 3 种字体、5 种颜色。避免段落过长（手机屏幕超过一屏）。避免图片和文字比例失衡。记住：少即是多。</div>
+
+    <div class="chinese-divider">· · · 终章 · · ·</div>
+
+    <h2>拾 · 排版哲学</h2>
+    <p>排版不是炫技，是服务内容的手段。一篇好文章如同一座园林——有开有合，有疏有密，有起有伏。读者在其中漫步时，既能欣赏到精致的细节，又不会迷失方向。</p>
+    <p>记住三个原则：<strong>留白是呼吸，色彩是情绪，节奏是心跳。</strong>掌握了这三者，你就能让文字在纸上真正地"活"起来。</p>
+
+    <p style="text-align:center;color:var(--text-light);font-size:14px;margin-top:36px;text-indent:0;">—— 全文完 · 感谢阅读 ——</p>
+  </div>
+
+  <div class="footer-ink">
+    <div class="footer-seal">维视</div>
+    <h4>维视智造</h4>
+    <div class="footer-desc">专注智能制造与机器视觉<br>以东方美学，讲技术故事</div>
+  </div>
+</div>
+</body>
+</html>

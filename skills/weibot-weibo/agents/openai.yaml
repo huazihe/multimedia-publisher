@@ -1,0 +1,4 @@
+﻿interface:
+  display_name: "寰崥鍙戝竷"
+  short_description: "浣跨敤 WEIBOT Node 杩愯鏃朵繚瀛樺井鍗氳崏绋?
+  default_prompt: "Use $wechat-weibo to publish an article draft."

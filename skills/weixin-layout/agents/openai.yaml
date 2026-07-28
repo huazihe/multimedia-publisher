@@ -1,0 +1,5 @@
+interface:
+  display_name: "微信公众号文章排版"
+  short_description: "使用本地模板生成可发布的公众号 HTML"
+  default_prompt: "Use $weixin-layout to format the provided article with a local WeChat Official Account template and validate the final HTML."
+

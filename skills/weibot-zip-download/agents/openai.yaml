@@ -1,0 +1,4 @@
+﻿interface:
+  display_name: "ZIP 瀵煎嚭鍙戝竷"
+  short_description: "浣跨敤 WEIBOT Node 杩愯鏃跺鍑烘湰鍦版枃绔?ZIP 鍖?
+  default_prompt: "Use $wechat-zip-download to publish an article draft."

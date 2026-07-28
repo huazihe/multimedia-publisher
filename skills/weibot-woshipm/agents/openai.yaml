@@ -1,0 +1,4 @@
+﻿interface:
+  display_name: "浜轰汉閮芥槸浜у搧缁忕悊鍙戝竷"
+  short_description: "浣跨敤 WEIBOT Node 杩愯鏃朵繚瀛樹汉浜洪兘鏄骇鍝佺粡鐞嗚崏绋?
+  default_prompt: "Use $wechat-woshipm to publish an article draft."

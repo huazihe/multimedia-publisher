@@ -1,0 +1,4 @@
+﻿interface:
+  display_name: "鎬濆惁鍙戝竷"
+  short_description: "浣跨敤 WEIBOT Node 杩愯鏃朵繚瀛樻€濆惁鑽夌"
+  default_prompt: "Use $wechat-segmentfault to publish an article draft."

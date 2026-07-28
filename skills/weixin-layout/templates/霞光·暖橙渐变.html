@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>排版样式 · 霞光</title>
+<style>
+  :root {
+    --bg: #fdfaf6;
+    --card: #fffdf9;
+    --text: #3d3028;
+    --light: #8b7560;
+    --pri: #5c2d0e;
+    --acc: #e07b39;
+    --acc2: #f4a460;
+    --acc3: #ffd4a8;
+    --border: #f0e0d0;
+    --radius: 14px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Serif SC', 'STSong', serif;
+    background: #f0e8dd; color: var(--text); line-height: 1.9; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 680px; margin: 0 auto; background: var(--bg); }
+
+  .hero {
+    background: linear-gradient(180deg, #5c2d0e 0%, #8b4513 30%, #c06020 60%, #e07b39 100%);
+    padding: 56px 28px 42px; text-align: center; position: relative; overflow: hidden;
+  }
+  .hero::before {
+    content: ''; position: absolute; top: -30%; left: 0; right: 0; height: 80%;
+    background: radial-gradient(ellipse at 50% 100%, rgba(255,212,168,0.2) 0%, transparent 60%);
+  }
+  .hero::after { content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 32px; background: linear-gradient(to top, var(--bg), transparent); }
+  .hero .sun { display: inline-block; width: 48px; height: 48px; border-radius: 50%; background: radial-gradient(circle, #ffd4a8 0%, #f4a460 60%, transparent 70%); margin-bottom: 14px; position: relative; z-index: 1; }
+  .hero h1 { font-size: 26px; font-weight: 600; color: #fdfaf6; line-height: 1.5; position: relative; z-index: 1; letter-spacing: 2px; }
+  .hero .sub { font-size: 13px; color: rgba(253,250,246,0.45); margin-top: 10px; position: relative; z-index: 1; letter-spacing: 1px; }
+
+  .content { padding: 0 24px 32px; }
+  .content .lead { font-size: 16px; color: var(--light); line-height: 2.1; margin: 24px 0 32px; padding: 22px 28px; background: linear-gradient(135deg, rgba(224,123,57,0.05), rgba(244,164,96,0.03)); border-radius: var(--radius); border-left: 3px solid var(--acc); }
+  h2 { font-size: 20px; font-weight: 600; color: var(--pri); margin: 40px 0 18px; padding-left: 14px; border-left: 3px solid var(--acc); }
+  p { font-size: 15px; line-height: 2; margin-bottom: 16px; text-align: justify; text-indent: 2em; }
+
+  /* 组件1：渐变光晕卡片 */
+  .glow-card { margin: 28px 0; border-radius: var(--radius); padding: 28px 24px; position: relative; overflow: hidden; }
+  .glow-card::before { content: ''; position: absolute; inset: 0; border-radius: var(--radius); }
+  .glow-card.gc1 { background: linear-gradient(135deg, rgba(224,123,57,0.06), rgba(255,212,168,0.08)); border: 1px solid rgba(224,123,57,0.15); }
+  .glow-card.gc2 { background: linear-gradient(135deg, rgba(244,164,96,0.06), rgba(255,212,168,0.06)); border: 1px solid rgba(244,164,96,0.15); }
+  .glow-card.gc3 { background: linear-gradient(135deg, rgba(92,45,14,0.04), rgba(224,123,57,0.04)); border: 1px solid rgba(92,45,14,0.1); }
+  .glow-card .gc-spot { position: absolute; width: 120px; height: 120px; border-radius: 50%; filter: blur(40px); opacity: 0.3; }
+  .glow-card .gc-spot.top-right { top: -40px; right: -40px; background: var(--acc2); }
+  .glow-card .gc-spot.bottom-left { bottom: -40px; left: -40px; background: var(--acc3); }
+  .glow-card h4 { font-size: 17px; font-weight: 600; color: var(--pri); margin-bottom: 8px; position: relative; z-index: 1; }
+  .glow-card p { font-size: 14px; color: var(--light); line-height: 1.8; text-indent: 0; position: relative; z-index: 1; }
+
+  /* 组件2：手风琴展开 */
+  .accordion-plus { margin: 28px 0; display: flex; flex-direction: column; gap: 8px; }
+  .ap-item { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--card); }
+  .ap-item .ap-head { padding: 16px 20px; display: flex; justify-content: space-between; align-items: center; font-size: 15px; font-weight: 600; color: var(--pri); }
+  .ap-item .ap-head .ap-icon { width: 28px; height: 28px; border-radius: 50%; background: linear-gradient(135deg, var(--acc), var(--acc2)); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0; }
+  .ap-item .ap-body { padding: 0 20px 18px; font-size: 14px; color: var(--light); line-height: 1.9; border-top: 1px solid var(--border); margin: 0 20px; }
+
+  /* 组件3：图片叠加 */
+  .img-stack { margin: 28px 0; position: relative; height: 240px; }
+  .img-stack .is-main { position: absolute; top: 0; left: 0; right: 0; height: 180px; background: linear-gradient(135deg, #f0e0d0, #e8d0b8); border-radius: var(--radius); display: flex; align-items: center; justify-content: center; font-size: 48px; z-index: 2; border: 1px solid var(--border); }
+  .img-stack .is-overlay { position: absolute; bottom: 0; right: 16px; width: 120px; height: 120px; background: linear-gradient(135deg, var(--acc), var(--acc2)); border-radius: var(--radius); display: flex; align-items: center; justify-content: center; font-size: 28px; color: #fff; z-index: 3; box-shadow: 0 4px 16px rgba(224,123,57,0.2); }
+
+  /* 组件4：双列图文 */
+  .dual-feature { margin: 28px 0; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .df-item { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .df-item .df-img { height: 120px; background: linear-gradient(135deg, rgba(224,123,57,0.1), rgba(244,164,96,0.08)); display: flex; align-items: center; justify-content: center; font-size: 36px; }
+  .df-item .df-body { padding: 14px 16px; }
+  .df-item .df-body h4 { font-size: 14px; font-weight: 600; color: var(--pri); margin-bottom: 4px; }
+  .df-item .df-body p { font-size: 12px; color: var(--light); line-height: 1.6; text-indent: 0; }
+
+  /* 组件5：数字标牌 */
+  .number-plate { margin: 28px 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .np-item { text-align: center; padding: 18px 8px; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); }
+  .np-item .np-num { font-size: 24px; font-weight: 700; color: var(--acc); line-height: 1.2; }
+  .np-item .np-label { font-size: 11px; color: var(--light); margin-top: 4px; }
+
+  /* 组件6：分隔装饰线 */
+  .ornament-divider { margin: 36px 0; display: flex; align-items: center; gap: 12px; }
+  .ornament-divider::before, .ornament-divider::after { content: ''; flex: 1; height: 1px; background: linear-gradient(to right, transparent, var(--border), transparent); }
+  .ornament-divider .od-icon { font-size: 18px; color: var(--acc2); }
+
+  /* 组件7：浮动提示框 */
+  .float-tip { margin: 28px 0; padding: 20px 22px; background: linear-gradient(135deg, rgba(224,123,57,0.06), rgba(255,212,168,0.08)); border: 1px solid rgba(224,123,57,0.2); border-radius: var(--radius); position: relative; }
+  .float-tip::after { content: ''; position: absolute; bottom: -10px; left: 30px; width: 0; height: 0; border-left: 10px solid transparent; border-right: 10px solid transparent; border-top: 10px solid rgba(224,123,57,0.2); }
+  .float-tip::before { content: ''; position: absolute; bottom: -8px; left: 32px; width: 0; height: 0; border-left: 8px solid transparent; border-right: 8px solid transparent; border-top: 8px solid #fdfaf6; z-index: 1; }
+  .float-tip .ft-icon { font-size: 20px; margin-bottom: 6px; }
+  .float-tip p { font-size: 14px; color: var(--pri); line-height: 1.8; text-indent: 0; }
+
+  /* 组件8：标签筛选栏 */
+  .filter-bar { margin: 28px 0; display: flex; gap: 8px; flex-wrap: wrap; }
+  .filter-btn { padding: 7px 18px; border-radius: 20px; font-size: 13px; letter-spacing: 0.5px; border: 1.5px solid var(--border); background: var(--card); color: var(--light); }
+  .filter-btn.active { background: var(--acc); color: #fff; border-color: var(--acc); }
+
+  /* 组件9：引用对话 */
+  .dialog-quote { margin: 28px 0; }
+  .dq-item { display: flex; gap: 12px; margin-bottom: 16px; align-items: flex-start; }
+  .dq-item .dq-avatar { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; color: #fff; flex-shrink: 0; }
+  .dq-item:nth-child(odd) .dq-avatar { background: var(--acc); }
+  .dq-item:nth-child(even) .dq-avatar { background: var(--acc2); }
+  .dq-item .dq-msg { flex: 1; background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 12px 16px; font-size: 14px; line-height: 1.8; }
+  .dq-item .dq-msg .dq-name { font-size: 12px; color: var(--acc); font-weight: 600; margin-bottom: 4px; }
+
+  /* 组件10：结束页 */
+  .end-card { margin: 36px 0 0; padding: 32px 24px; background: linear-gradient(135deg, var(--pri), #8b4513); border-radius: var(--radius); text-align: center; color: #fdfaf6; }
+  .end-card .ec-icon { font-size: 40px; margin-bottom: 12px; }
+  .end-card h4 { font-size: 18px; font-weight: 600; letter-spacing: 1px; margin-bottom: 6px; }
+  .end-card p { font-size: 13px; opacity: 0.6; line-height: 1.8; text-indent: 0; }
+
+  .footer { padding: 36px 24px; text-align: center; background: linear-gradient(180deg, var(--bg) 0%, #f0e8dd 100%); }
+  .footer .f-circle { width: 56px; height: 56px; border-radius: 50%; background: linear-gradient(135deg, var(--acc), var(--acc2)); margin: 0 auto 14px; display: flex; align-items: center; justify-content: center; font-size: 22px; color: #fff; }
+  .footer h4 { font-size: 16px; color: var(--pri); font-weight: 600; }
+  .footer .f-desc { font-size: 12px; color: var(--light); margin-top: 6px; line-height: 1.8; }
+
+  @media (max-width: 480px) {
+    .dual-feature { grid-template-columns: 1fr; }
+    .number-plate { grid-template-columns: repeat(2, 1fr); }
+    .img-stack { height: 200px; }
+    .img-stack .is-main { height: 150px; }
+    .img-stack .is-overlay { width: 90px; height: 90px; right: 8px; }
+    .hero h1 { font-size: 22px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hero">
+    <div class="sun"></div>
+    <h1>此处为文章主标题<br>可写两行</h1>
+    <div class="sub">—— 副标题或栏目名称 ——</div>
+  </div>
+
+  <div class="content">
+    <div class="lead">此处为引导语，建议 50-80 字，点明文章主旨与阅读价值。可<strong>加粗关键短语</strong>增强视觉层次。好的引导语能让读者在 3 秒内决定是否继续阅读。</div>
+
+    <!-- 组件1：渐变光晕卡片 -->
+    <h2>壹 · 渐变光晕卡片</h2>
+    <p>卡片背景带模糊光斑装饰，模拟摄影中的散景效果。三种不同渐变方向的光晕卡片可交替使用，每张都有独特的视觉氛围。适合展示有情感温度的内容。</p>
+    <div class="glow-card gc1">
+      <div class="gc-spot top-right"></div>
+      <h4>此处为光晕卡片标题</h4>
+      <p>此处为卡片描述文字，建议控制在 40-60 字。光斑装饰让卡片看起来温暖而有质感，适合生活类、情感类、品牌故事类内容。</p>
+    </div>
+    <div class="glow-card gc2">
+      <div class="gc-spot bottom-left"></div>
+      <h4>此处为光晕卡片标题</h4>
+      <p>此处为卡片描述文字，建议控制在 40-60 字。第二张卡片使用不同的渐变方向，形成视觉变化。</p>
+    </div>
+
+    <!-- 组件2：手风琴展开 -->
+    <h2>贰 · 手风琴展开</h2>
+    <p>圆形加减号按钮+折叠内容区，适合 FAQ、详细说明、分步指南。展开前页面简洁，展开后内容完整呈现。圆形按钮用主题渐变色填充，视觉统一。</p>
+    <div class="accordion-plus">
+      <div class="ap-item"><div class="ap-head">此处为可展开的标题<span class="ap-icon">+</span></div><div class="ap-body">此处为展开后的详细内容，建议控制在 50-80 字。手风琴组件适合在有限空间内展示大量信息，读者可按需展开感兴趣的部分。</div></div>
+      <div class="ap-item"><div class="ap-head">此处为可展开的标题<span class="ap-icon">+</span></div><div class="ap-body">此处为展开后的详细内容，建议控制在 50-80 字。每个手风琴项独立展开收起，互不影响。</div></div>
+      <div class="ap-item"><div class="ap-head">此处为可展开的标题<span class="ap-icon">+</span></div><div class="ap-body">此处为展开后的详细内容，建议控制在 50-80 字。建议将最常被查看的内容放在前面。</div></div>
+    </div>
+
+    <!-- 组件3：图片叠加 -->
+    <h2>叁 · 图片叠加</h2>
+    <p>主图+小图叠加的布局，小图用主题渐变色填充并带阴影。制造空间层次感，适合展示主产品+配件、主场景+细节、封面+头像的组合。</p>
+    <div class="img-stack">
+      <div class="is-main">🖼️</div>
+      <div class="is-overlay">⭐</div>
+    </div>
+
+    <!-- 组件4：双列图文 -->
+    <h2>肆 · 双列图文</h2>
+    <p>两列等宽的图文卡片，上方图片下方文字。适合展示并列的两个内容单元，如两个方案、两个案例、两个观点。图片区域用浅色渐变填充。</p>
+    <div class="dual-feature">
+      <div class="df-item"><div class="df-img">📋</div><div class="df-body"><h4>左栏标题</h4><p>此处为左栏描述文字，建议控制在 20-30 字。</p></div></div>
+      <div class="df-item"><div class="df-img">💡</div><div class="df-body"><h4>右栏标题</h4><p>此处为右栏描述文字，建议控制在 20-30 字。</p></div></div>
+    </div>
+
+    <!-- 组件5：数字标牌 -->
+    <h2>伍 · 数字标牌</h2>
+    <p>四列数字+标签，适合展示关键指标。数字用主题色突出，标签用浅色小字。简洁直接，读者扫一眼就能抓住关键信息。</p>
+    <div class="number-plate">
+      <div class="np-item"><div class="np-num">99</div><div class="np-label">指标名称</div></div>
+      <div class="np-item"><div class="np-num">85</div><div class="np-label">指标名称</div></div>
+      <div class="np-item"><div class="np-num">72</div><div class="np-label">指标名称</div></div>
+      <div class="np-item"><div class="np-num">60</div><div class="np-label">指标名称</div></div>
+    </div>
+
+    <!-- 组件6：装饰分隔线 -->
+    <h2>陆 · 装饰分隔线</h2>
+    <p>中间带图标的渐变横线，比纯横线更有设计感。适合用作章节之间的过渡，图标可以换成任何 emoji 来匹配文章主题。</p>
+    <div class="ornament-divider"><div class="od-icon">✦</div></div>
+    <p>分隔线下方的内容。装饰分隔线让章节切换变得优雅而有仪式感，读者在视觉上获得一个微妙的"休息信号"，准备好接受新章节的内容。</p>
+
+    <!-- 组件7：浮动提示框 -->
+    <h2>柒 · 浮动提示框</h2>
+    <p>带三角箭头的提示框，箭头指向下方。适合嵌入小贴士、温馨提示、补充说明。三角箭头让提示框与上下文产生视觉关联。</p>
+    <div class="float-tip">
+      <div class="ft-icon">💡</div>
+      <p>此处为浮动提示内容，建议控制在 30-50 字。三角箭头指向下方，暗示这是对上方内容的补充说明。</p>
+    </div>
+
+    <!-- 组件8：标签筛选栏 -->
+    <h2>捌 · 标签筛选栏</h2>
+    <p>圆角标签组，第一个默认激活。适合展示分类筛选、内容导航。激活标签用主题色填充，未激活标签保持描边状态。</p>
+    <div class="filter-bar">
+      <span class="filter-btn active">全部</span>
+      <span class="filter-btn">分类一</span>
+      <span class="filter-btn">分类二</span>
+      <span class="filter-btn">分类三</span>
+      <span class="filter-btn">分类四</span>
+    </div>
+
+    <!-- 组件9：引用对话 -->
+    <h2>玖 · 引用对话</h2>
+    <p>交替颜色的头像+消息气泡，模拟群聊对话效果。适合展示多人观点、圆桌讨论、用户反馈汇总。不同颜色头像区分不同发言人。</p>
+    <div class="dialog-quote">
+      <div class="dq-item"><div class="dq-avatar">A</div><div class="dq-msg"><div class="dq-name">发言人 A</div>此处为发言内容，建议控制在 30-50 字。对话形式让观点呈现更生动。</div></div>
+      <div class="dq-item"><div class="dq-avatar">B</div><div class="dq-msg"><div class="dq-name">发言人 B</div>此处为发言内容，建议控制在 30-50 字。不同颜色头像帮助区分发言人。</div></div>
+      <div class="dq-item"><div class="dq-avatar">C</div><div class="dq-msg"><div class="dq-name">发言人 C</div>此处为发言内容，建议控制在 30-50 字。对话气泡的圆角让界面更友好。</div></div>
+    </div>
+
+    <!-- 组件10：结束页 -->
+    <h2>拾 · 结束卡片</h2>
+    <p>深色背景+大图标+感谢文字，适合作为文章结尾的收束。比简单的"全文完"更有仪式感，给读者一个温暖的告别。</p>
+    <div class="end-card">
+      <div class="ec-icon">🙏</div>
+      <h4>感谢阅读</h4>
+      <p>如果这篇文章对你有帮助<br>欢迎分享给更多朋友</p>
+    </div>
+
+    <p style="text-align:center;color:var(--light);font-size:14px;margin-top:24px;text-indent:0;">—— 全文完 · 感谢阅读 ——</p>
+  </div>
+
+  <div class="footer">
+    <div class="f-circle">印</div>
+    <h4>此处放公众号名称</h4>
+    <div class="f-desc">此处放公众号简介<br>长按识别二维码 · 关注我们</div>
+  </div>
+</div>
+</body>
+</html>

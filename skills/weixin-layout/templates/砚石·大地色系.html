@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>排版样式 · 砚石</title>
+<style>
+  :root {
+    --bg: #fafaf7;
+    --card: #fffefb;
+    --text: #2d2b28;
+    --light: #7a7670;
+    --pri: #1a1815;
+    --acc: #6b5e4a;
+    --acc2: #a89880;
+    --border: #e6e3dd;
+    --radius: 6px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Noto Serif SC', 'STSong', serif;
+    background: #e8e5df; color: var(--text); line-height: 1.9; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 680px; margin: 0 auto; background: var(--bg); }
+
+  .hero {
+    background: linear-gradient(180deg, #1a1815 0%, #2d2b28 60%, #3d3a35 100%);
+    padding: 54px 28px 40px; text-align: center; position: relative; overflow: hidden;
+  }
+  .hero::before {
+    content: ''; position: absolute; inset: 0;
+    background: radial-gradient(ellipse at 30% 60%, rgba(168,152,128,0.08) 0%, transparent 50%),
+                radial-gradient(ellipse at 70% 30%, rgba(107,94,74,0.06) 0%, transparent 50%);
+  }
+  .hero::after { content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 36px; background: linear-gradient(to top, var(--bg), transparent); }
+  .hero .stone { display: inline-block; width: 40px; height: 40px; border-radius: 30% 70% 70% 30% / 30% 30% 70% 70%; background: rgba(168,152,128,0.3); margin-bottom: 16px; position: relative; z-index: 1; }
+  .hero h1 { font-size: 26px; font-weight: 600; color: #fafaf7; line-height: 1.5; position: relative; z-index: 1; letter-spacing: 3px; }
+  .hero .sub { font-size: 13px; color: rgba(250,250,247,0.4); margin-top: 10px; position: relative; z-index: 1; letter-spacing: 2px; }
+
+  .content { padding: 0 24px 32px; }
+  .content .lead { font-size: 16px; color: var(--light); line-height: 2.1; margin: 24px 0 32px; padding: 22px 28px; background: rgba(107,94,74,0.04); border-radius: var(--radius); border-left: 3px solid var(--acc); }
+  h2 { font-size: 19px; font-weight: 600; color: var(--pri); margin: 40px 0 18px; text-align: center; letter-spacing: 3px; position: relative; }
+  h2::after { content: ''; display: block; width: 30px; height: 2px; background: var(--acc); margin: 10px auto 0; }
+  p { font-size: 15px; line-height: 2; margin-bottom: 16px; text-align: justify; text-indent: 2em; }
+
+  /* 组件1：不规则形状卡片 */
+  .organic-card { margin: 28px 0; background: var(--card); border: 1px solid var(--border); border-radius: 20px 4px 20px 4px; padding: 28px 24px; position: relative; }
+  .organic-card:nth-child(even) { border-radius: 4px 20px 4px 20px; }
+  .organic-card .oc-num { position: absolute; top: -14px; left: 24px; width: 28px; height: 28px; background: var(--acc); color: #fff; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; }
+  .organic-card h4 { font-size: 16px; font-weight: 600; color: var(--pri); margin-bottom: 8px; }
+  .organic-card p { font-size: 14px; color: var(--light); line-height: 1.8; text-indent: 0; }
+
+  /* 组件2：报纸分栏 */
+  .newspaper { margin: 28px 0; column-count: 2; column-gap: 20px; column-rule: 1px solid var(--border); }
+  .newspaper p { text-indent: 0; margin-bottom: 12px; font-size: 14px; }
+  .newspaper .np-header { column-span: all; font-size: 18px; font-weight: 700; color: var(--pri); text-align: center; letter-spacing: 2px; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid var(--acc); }
+
+  /* 组件3：标签页切换 */
+  .tabs { margin: 28px 0; }
+  .tabs .tab-nav { display: flex; gap: 0; border-bottom: 2px solid var(--border); }
+  .tabs .tab-nav .tab-btn { padding: 10px 20px; font-size: 13px; color: var(--light); cursor: pointer; letter-spacing: 1px; border-bottom: 2px solid transparent; margin-bottom: -2px; }
+  .tabs .tab-nav .tab-btn.active { color: var(--acc); border-bottom-color: var(--acc); font-weight: 600; }
+  .tabs .tab-panel { padding: 20px 0; font-size: 14px; color: var(--text); line-height: 1.9; }
+
+  /* 组件4：印章盖印 */
+  .stamp { margin: 28px 0; display: flex; justify-content: flex-end; }
+  .stamp .stamp-mark { width: 80px; height: 80px; border: 3px solid var(--acc); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 16px; color: var(--acc); font-weight: 700; letter-spacing: 2px; transform: rotate(-15deg); opacity: 0.7; }
+
+  /* 组件5：网格卡片墙 */
+  .card-wall { margin: 28px 0; display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .card-wall .cw-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 16px; }
+  .card-wall .cw-card:nth-child(3n) { grid-column: 1 / -1; }
+  .cw-card .cw-icon { font-size: 24px; margin-bottom: 8px; }
+  .cw-card h4 { font-size: 14px; font-weight: 600; color: var(--pri); margin-bottom: 4px; }
+  .cw-card p { font-size: 12px; color: var(--light); line-height: 1.6; text-indent: 0; }
+
+  /* 组件6：引用条幅 */
+  .quote-banner { margin: 28px 0; padding: 24px 28px; background: linear-gradient(135deg, var(--pri), #2d2b28); border-radius: var(--radius); text-align: center; }
+  .quote-banner .qb-mark { font-size: 48px; color: var(--acc2); opacity: 0.3; line-height: 1; margin-bottom: -16px; font-family: Georgia, serif; }
+  .quote-banner .qb-text { font-size: 16px; color: #fafaf7; line-height: 2; letter-spacing: 1px; }
+  .quote-banner .qb-from { font-size: 13px; color: rgba(250,250,247,0.4); margin-top: 10px; }
+
+  /* 组件7：步骤进度条 */
+  .step-progress { margin: 28px 0; display: flex; align-items: center; gap: 0; }
+  .step-progress .sp-dot { width: 16px; height: 16px; border-radius: 50%; background: var(--acc); flex-shrink: 0; position: relative; }
+  .step-progress .sp-dot.done { background: var(--acc); }
+  .step-progress .sp-dot.current { background: var(--pri); box-shadow: 0 0 0 4px rgba(26,24,21,0.1); }
+  .step-progress .sp-dot.pending { background: var(--border); }
+  .step-progress .sp-line { flex: 1; height: 2px; background: var(--acc); margin: 0 4px; }
+  .step-progress .sp-line.pending { background: var(--border); }
+  .step-progress .sp-labels { display: flex; justify-content: space-between; margin-top: 8px; font-size: 11px; color: var(--light); }
+
+  /* 组件8：轮播占位 */
+  .carousel { margin: 28px 0; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .carousel .cr-slide { height: 200px; background: linear-gradient(135deg, #e6e3dd, #d8d5ce); display: flex; align-items: center; justify-content: center; font-size: 48px; }
+  .carousel .cr-dots { display: flex; justify-content: center; gap: 8px; padding: 14px; }
+  .carousel .cr-dots .cr-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); }
+  .carousel .cr-dots .cr-dot.active { background: var(--acc); width: 20px; border-radius: 4px; }
+
+  /* 组件9：要点卡片（横向排列） */
+  .h-points { margin: 28px 0; display: flex; gap: 12px; overflow-x: auto; padding-bottom: 8px; -webkit-overflow-scrolling: touch; }
+  .h-points::-webkit-scrollbar { display: none; }
+  .hp-card { min-width: 200px; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 18px; flex-shrink: 0; }
+  .hp-card .hp-tag { display: inline-block; padding: 2px 10px; background: rgba(107,94,74,0.08); color: var(--acc); font-size: 11px; letter-spacing: 1px; border-radius: 3px; margin-bottom: 10px; }
+  .hp-card h4 { font-size: 15px; font-weight: 600; color: var(--pri); margin-bottom: 6px; }
+  .hp-card p { font-size: 13px; color: var(--light); line-height: 1.7; text-indent: 0; }
+
+  /* 组件10：底部作者卡片 */
+  .author-card { margin: 36px 0 0; padding: 24px; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); display: flex; gap: 16px; align-items: center; }
+  .author-card .ac-avatar { width: 56px; height: 56px; border-radius: 50%; background: linear-gradient(135deg, var(--acc), var(--acc2)); display: flex; align-items: center; justify-content: center; font-size: 24px; color: #fff; flex-shrink: 0; }
+  .author-card .ac-info h4 { font-size: 15px; font-weight: 600; color: var(--pri); }
+  .author-card .ac-info p { font-size: 12px; color: var(--light); line-height: 1.6; text-indent: 0; margin-bottom: 0; }
+
+  .footer { padding: 36px 24px; text-align: center; background: linear-gradient(180deg, var(--bg) 0%, #e8e5df 100%); }
+  .footer .f-mark { width: 40px; height: 3px; background: var(--acc); margin: 0 auto 14px; }
+  .footer h4 { font-size: 15px; color: var(--pri); font-weight: 600; letter-spacing: 2px; }
+  .footer .f-desc { font-size: 12px; color: var(--light); margin-top: 6px; line-height: 1.8; }
+
+  @media (max-width: 480px) {
+    .newspaper { column-count: 1; }
+    .card-wall { grid-template-columns: 1fr; }
+    .card-wall .cw-card:nth-child(3n) { grid-column: auto; }
+    .hero h1 { font-size: 22px; }
+    .h-points { gap: 8px; }
+    .hp-card { min-width: 160px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hero">
+    <div class="stone"></div>
+    <h1>此处为文章主标题<br>可写两行</h1>
+    <div class="sub">—— 副标题或栏目名称 ——</div>
+  </div>
+
+  <div class="content">
+    <div class="lead">此处为引导语，建议 50-80 字，点明文章主旨与阅读价值。可<strong>加粗关键短语</strong>增强视觉层次。引导语是读者决定是否继续阅读的关键节点。</div>
+
+    <!-- 组件1：不规则形状卡片 -->
+    <h2>壹 · 不规则形状卡片</h2>
+    <p>卡片采用不对称圆角——左上右下大圆角、右上左下小圆角，打破传统矩形的呆板感。偶数卡片圆角方向反转，形成交替节奏。顶部悬浮圆形编号作为视觉锚点，适合展示步骤、要点、功能列表。</p>
+    <div class="organic-card">
+      <div class="oc-num">1</div>
+      <h4>此处为卡片标题</h4>
+      <p>此处为卡片描述文字，建议控制在 40-60 字。不规则圆角让卡片看起来更有生命力，适合轻松、创意类内容。卡片之间的圆角方向交替变化，制造视觉节奏。</p>
+    </div>
+    <div class="organic-card">
+      <div class="oc-num">2</div>
+      <h4>此处为卡片标题</h4>
+      <p>此处为卡片描述文字，建议控制在 40-60 字。第二张卡片的圆角方向与第一张相反，形成自然的视觉交替。这种微妙的变化让读者在浏览时不会感到单调。</p>
+    </div>
+    <div class="organic-card">
+      <div class="oc-num">3</div>
+      <h4>此处为卡片标题</h4>
+      <p>此处为卡片描述文字，建议控制在 40-60 字。建议使用 3-5 张卡片，奇数张在视觉上更平衡。每张卡片的内容应保持相近的长度，避免某一张过长或过短。</p>
+    </div>
+
+    <!-- 组件2：报纸分栏 -->
+    <h2>贰 · 报纸分栏</h2>
+    <p>CSS 多列布局实现的报纸式分栏，中间竖线分隔。适合文字量较大的段落，分栏后每行字数减少，阅读更轻松。标题跨栏居中，下方正文自动分两栏流动。</p>
+    <div class="newspaper">
+      <div class="np-header">此 处 为 分 栏 标 题</div>
+      <p>此处为左栏文字内容。报纸分栏适合文字量较大的文章段落，分栏后每行约 15-20 字，是手机阅读最舒适的字数范围。读者视线不需要大幅横向移动，阅读疲劳感显著降低。</p>
+      <p>此处为右栏文字内容。分栏之间的竖线起到视觉引导作用，让读者明确感知到两栏的边界。这种排版方式在传统纸媒中非常经典，移植到移动端同样优雅实用。</p>
+    </div>
+
+    <!-- 组件3：标签页切换 -->
+    <h2>叁 · 标签页切换</h2>
+    <p>模拟标签页切换效果，适合在同一位置展示多组相关内容。读者可通过标签切换查看不同内容，节省页面空间。第一个标签默认激活，用主题色下划线标识。</p>
+    <div class="tabs">
+      <div class="tab-nav">
+        <div class="tab-btn active">标签一</div>
+        <div class="tab-btn">标签二</div>
+        <div class="tab-btn">标签三</div>
+      </div>
+      <div class="tab-panel">此处为标签一对应的内容区域，建议控制在 50-80 字。标签页切换适合展示并列关系的多组信息，如不同版本对比、多个方案介绍、分类内容展示。读者可按需切换查看。</div>
+    </div>
+
+    <!-- 组件4：印章盖印 -->
+    <h2>肆 · 印章盖印</h2>
+    <p>右对齐的圆形印章，旋转 15 度模拟真实盖印效果。适合放在段落末尾作为认证标记、审核通过标识、或文章结尾的署名。半透明效果让印章与正文融合自然。</p>
+    <p>此处为正文段落。印章盖印是一种非常东方的表达方式，在合同、证书、书法作品中常见。用在公众号排版中，可以传递"权威认证""官方出品"的信号。建议在重要声明或文章结尾处使用。</p>
+    <div class="stamp"><div class="stamp-mark">认证</div></div>
+
+    <!-- 组件5：网格卡片墙 -->
+    <h2>伍 · 网格卡片墙</h2>
+    <p>两列网格布局，每第三张卡片横跨全宽。这种不规则的网格排列打破了均分网格的单调，制造视觉惊喜。适合展示产品系列、案例集合、功能矩阵。</p>
+    <div class="card-wall">
+      <div class="cw-card"><div class="cw-icon">📦</div><h4>卡片标题一</h4><p>简短描述文字，控制在 15 字以内</p></div>
+      <div class="cw-card"><div class="cw-icon">🔧</div><h4>卡片标题二</h4><p>简短描述文字，控制在 15 字以内</p></div>
+      <div class="cw-card"><div class="cw-icon">⭐</div><h4>横跨全宽的卡片标题</h4><p>这张卡片横跨两列，可以放置更重要的内容或更长的描述文字，建议控制在 30-40 字。</p></div>
+      <div class="cw-card"><div class="cw-icon">📐</div><h4>卡片标题四</h4><p>简短描述文字，控制在 15 字以内</p></div>
+      <div class="cw-card"><div class="cw-icon">🎯</div><h4>卡片标题五</h4><p>简短描述文字，控制在 15 字以内</p></div>
+    </div>
+
+    <!-- 组件6：引用条幅 -->
+    <h2>陆 · 引用条幅</h2>
+    <p>深色背景+大引号+白色文字，视觉冲击力强。适合放置文章中最重要的一句金句或核心观点。深色背景在浅色页面中形成强烈的视觉中断，让读者停下来思考。</p>
+    <div class="quote-banner">
+      <div class="qb-mark">"</div>
+      <div class="qb-text">此处为引用或金句文字，建议控制在 30-50 字。深色背景让这句话成为整篇文章的视觉焦点。</div>
+      <div class="qb-from">—— 出处或作者</div>
+    </div>
+
+    <!-- 组件7：步骤进度条 -->
+    <h2>柒 · 步骤进度条</h2>
+    <p>横向圆点+连接线展示步骤进度，支持"已完成-进行中-待处理"三种状态。比传统的步骤编号更直观，读者一眼就能看到整体进度和当前位置。</p>
+    <div class="step-progress">
+      <div class="sp-dot done"></div><div class="sp-line"></div>
+      <div class="sp-dot done"></div><div class="sp-line"></div>
+      <div class="sp-dot current"></div><div class="sp-line pending"></div>
+      <div class="sp-dot pending"></div><div class="sp-line pending"></div>
+      <div class="sp-dot pending"></div>
+    </div>
+    <div class="step-progress" style="margin-top:0;">
+      <div class="sp-labels" style="width:100%;">
+        <span>步骤一</span><span>步骤二</span><span>步骤三</span><span>步骤四</span><span>步骤五</span>
+      </div>
+    </div>
+
+    <!-- 组件8：轮播占位 -->
+    <h2>捌 · 轮播展示</h2>
+    <p>图片轮播区域+底部圆点指示器，适合展示多张图片或 Banner。当前激活的圆点会拉长，模拟 iOS 风格的页面指示器。适合放在文章开篇或重要章节。</p>
+    <div class="carousel">
+      <div class="cr-slide">🖼️</div>
+      <div class="cr-dots">
+        <div class="cr-dot active"></div>
+        <div class="cr-dot"></div>
+        <div class="cr-dot"></div>
+        <div class="cr-dot"></div>
+      </div>
+    </div>
+
+    <!-- 组件9：横向要点卡片 -->
+    <h2>玖 · 横向滚动要点</h2>
+    <p>横向滑动的卡片组，每张卡片带分类标签。突破竖屏限制，适合展示并列的多个要点。标签颜色与主题一致，卡片之间有舒适的间距。</p>
+    <div class="h-points">
+      <div class="hp-card"><div class="hp-tag">分类一</div><h4>要点标题</h4><p>此处为要点描述文字，建议控制在 20-30 字。</p></div>
+      <div class="hp-card"><div class="hp-tag">分类二</div><h4>要点标题</h4><p>此处为要点描述文字，建议控制在 20-30 字。</p></div>
+      <div class="hp-card"><div class="hp-tag">分类三</div><h4>要点标题</h4><p>此处为要点描述文字，建议控制在 20-30 字。</p></div>
+      <div class="hp-card"><div class="hp-tag">分类四</div><h4>要点标题</h4><p>此处为要点描述文字，建议控制在 20-30 字。</p></div>
+    </div>
+
+    <!-- 组件10：作者卡片 -->
+    <h2>拾 · 作者卡片</h2>
+    <p>圆形头像+姓名+简介，适合放在文末展示作者信息。比纯文字署名更有人情味，头像让读者对作者产生具体的印象。</p>
+    <div class="author-card">
+      <div class="ac-avatar">👤</div>
+      <div class="ac-info"><h4>作者姓名</h4><p>作者简介或一句话介绍，建议控制在 20-30 字。可包含职位、专业领域等信息。</p></div>
+    </div>
+
+    <p style="text-align:center;color:var(--light);font-size:14px;margin-top:36px;text-indent:0;">—— 全文完 · 感谢阅读 ——</p>
+  </div>
+
+  <div class="footer">
+    <div class="f-mark"></div>
+    <h4>此处放公众号名称</h4>
+    <div class="f-desc">此处放公众号简介<br>长按识别二维码 · 关注我们</div>
+  </div>
+</div>
+</body>
+</html>

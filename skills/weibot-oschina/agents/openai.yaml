@@ -1,0 +1,4 @@
+﻿interface:
+  display_name: "寮€婧愪腑鍥藉彂甯?
+  short_description: "浣跨敤 WEIBOT Node 杩愯鏃朵繚瀛樺紑婧愪腑鍥借崏绋?
+  default_prompt: "Use $wechat-oschina to publish an article draft."

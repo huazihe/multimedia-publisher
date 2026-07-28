@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>公众号通用排版样式</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: #ededed;
+    color: #333;
+    line-height: 1.75;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ===== 文章容器 ===== */
+  .article {
+    max-width: 677px;
+    margin: 0 auto;
+    background: #fff;
+    min-height: 100vh;
+  }
+
+  /* ===== 文章头部 ===== */
+  .header {
+    padding: 24px 24px 16px;
+    border-bottom: 1px solid #f5f5f5;
+  }
+  .title {
+    font-size: 22px;
+    font-weight: 700;
+    color: #1a1a1a;
+    line-height: 1.4;
+    margin-bottom: 12px;
+    letter-spacing: 0.5px;
+  }
+  .meta {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 13px;
+    color: #999;
+  }
+  .meta .author {
+    color: #576b95;
+    font-weight: 500;
+  }
+  .meta .dot { color: #ddd; }
+
+  /* ===== 正文区域 ===== */
+  .content {
+    padding: 20px 24px 40px;
+  }
+
+  /* ===== 段落 ===== */
+  .content p {
+    font-size: 16px;
+    color: #2c2c2c;
+    margin-bottom: 18px;
+    line-height: 1.85;
+    letter-spacing: 0.3px;
+    text-align: justify;
+  }
+
+  /* ===== 二级标题 - 常用样式1：竖线 ===== */
+  h2.style-bar {
+    font-size: 19px;
+    font-weight: 700;
+    color: #1a1a1a;
+    margin: 32px 0 16px;
+    padding-left: 12px;
+    border-left: 4px solid #07c160;
+    line-height: 1.4;
+  }
+
+  /* ===== 二级标题 - 常用样式2：序号块 ===== */
+  h2.style-num {
+    font-size: 19px;
+    font-weight: 700;
+    color: #1a1a1a;
+    margin: 32px 0 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  h2.style-num .num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    background: #1a1a1a;
+    color: #fff;
+    border-radius: 6px;
+    font-size: 16px;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+
+  /* ===== 二级标题 - 常用样式3：底色块 ===== */
+  h2.style-block {
+    font-size: 19px;
+    font-weight: 700;
+    color: #1a1a1a;
+    margin: 32px 0 16px;
+    padding: 8px 16px;
+    background: linear-gradient(90deg, #fff5e6 0%, #ffffff 100%);
+    border-radius: 6px;
+  }
+
+  /* ===== 三级标题 ===== */
+  h3 {
+    font-size: 17px;
+    font-weight: 600;
+    color: #333;
+    margin: 24px 0 10px;
+  }
+
+  /* ===== 重点强调样式 ===== */
+  strong {
+    color: #1a1a1a;
+    font-weight: 600;
+  }
+
+  /* 黄色荧光笔 */
+  .hl-yellow {
+    background: linear-gradient(180deg, transparent 60%, #ffe28a 60%);
+    padding: 0 2px;
+  }
+
+  /* 绿色荧光笔 */
+  .hl-green {
+    background: linear-gradient(180deg, transparent 60%, #b8e6c1 60%);
+    padding: 0 2px;
+  }
+
+  /* 蓝色文字强调 */
+  .em-blue {
+    color: #576b95;
+    font-weight: 600;
+  }
+
+  /* 红色文字强调 */
+  .em-red {
+    color: #d92d20;
+    font-weight: 600;
+  }
+
+  /* ===== 引用块 ===== */
+  blockquote {
+    background: #f7f7f7;
+    border-left: 3px solid #b3b3b3;
+    margin: 20px 0;
+    padding: 14px 18px;
+    border-radius: 0 6px 6px 0;
+  }
+  blockquote p {
+    font-size: 15px;
+    color: #555;
+    margin-bottom: 0;
+    line-height: 1.7;
+  }
+  blockquote .source {
+    display: block;
+    font-size: 13px;
+    color: #999;
+    margin-top: 8px;
+    text-align: right;
+  }
+
+  /* ===== 信息卡片 ===== */
+  .info-card {
+    background: #f7f7f7;
+    border-radius: 10px;
+    padding: 18px 20px;
+    margin: 20px 0;
+  }
+  .info-card .label {
+    font-size: 12px;
+    color: #888;
+    letter-spacing: 1px;
+    margin-bottom: 8px;
+    font-weight: 500;
+  }
+  .info-card .text {
+    font-size: 15px;
+    color: #333;
+    line-height: 1.7;
+  }
+
+  /* ===== 提示框 - 蓝色 ===== */
+  .tip-blue {
+    background: #eef4ff;
+    border: 1px solid #d6e4ff;
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin: 20px 0;
+    font-size: 14px;
+    color: #2c4a8a;
+    line-height: 1.7;
+  }
+
+  /* ===== 提示框 - 黄色 ===== */
+  .tip-yellow {
+    background: #fffbe6;
+    border: 1px solid #ffe58f;
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin: 20px 0;
+    font-size: 14px;
+    color: #874d00;
+    line-height: 1.7;
+  }
+
+  /* ===== 列表 ===== */
+  .content ul, .content ol {
+    margin: 16px 0;
+    padding-left: 24px;
+  }
+  .content li {
+    font-size: 16px;
+    color: #2c2c2c;
+    margin-bottom: 8px;
+    line-height: 1.8;
+  }
+
+  /* 自定义无序列表 */
+  ul.custom-list {
+    list-style: none;
+    padding-left: 0;
+  }
+  ul.custom-list li {
+    padding-left: 24px;
+    position: relative;
+  }
+  ul.custom-list li::before {
+    content: '';
+    position: absolute;
+    left: 8px;
+    top: 14px;
+    width: 6px;
+    height: 6px;
+    background: #07c160;
+    border-radius: 50%;
+  }
+
+  /* ===== 数据指标 ===== */
+  .metrics {
+    display: flex;
+    gap: 12px;
+    margin: 24px 0;
+  }
+  .metric-box {
+    flex: 1;
+    background: #fafafa;
+    border-radius: 10px;
+    padding: 18px 12px;
+    text-align: center;
+  }
+  .metric-num {
+    font-size: 26px;
+    font-weight: 700;
+    color: #07c160;
+    line-height: 1.2;
+    font-family: -apple-system, "Helvetica Neue", sans-serif;
+  }
+  .metric-name {
+    font-size: 12px;
+    color: #888;
+    margin-top: 6px;
+    letter-spacing: 0.5px;
+  }
+
+  /* ===== 标签 ===== */
+  .tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 16px 0;
+  }
+  .tag {
+    display: inline-block;
+    padding: 4px 12px;
+    background: #f0f0f0;
+    color: #666;
+    border-radius: 4px;
+    font-size: 13px;
+  }
+  .tag-primary { background: #e6f7ed; color: #07c160; }
+  .tag-warning { background: #fff7e6; color: #d97706; }
+
+  /* ===== 分隔线 ===== */
+  .divider-dots {
+    text-align: center;
+    margin: 32px 0;
+    color: #ccc;
+    font-size: 18px;
+    letter-spacing: 10px;
+  }
+  .divider-line {
+    height: 1px;
+    background: linear-gradient(90deg, transparent, #ddd, transparent);
+    margin: 32px 0;
+  }
+  .divider-icon {
+    text-align: center;
+    margin: 32px 0;
+    color: #ccc;
+    font-size: 14px;
+    position: relative;
+  }
+  .divider-icon::before,
+  .divider-icon::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    width: 30%;
+    height: 1px;
+    background: #eee;
+  }
+  .divider-icon::before { left: 10%; }
+  .divider-icon::after { right: 10%; }
+
+  /* ===== 图片占位 ===== */
+  .img-box {
+    width: 100%;
+    background: #f5f5f5;
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 18px 0;
+  }
+  .img-placeholder {
+    width: 100%;
+    aspect-ratio: 16/9;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #bbb;
+    font-size: 13px;
+    background: repeating-linear-gradient(
+      45deg,
+      #f5f5f5,
+      #f5f5f5 10px,
+      #efefef 10px,
+      #efefef 20px
+    );
+  }
+  .img-caption {
+    text-align: center;
+    font-size: 13px;
+    color: #999;
+    margin-top: 8px;
+    line-height: 1.5;
+  }
+
+  /* ===== 表格 ===== */
+  .table-wrap {
+    margin: 20px 0;
+    overflow-x: auto;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  thead th {
+    background: #fafafa;
+    padding: 12px 14px;
+    text-align: left;
+    font-weight: 600;
+    color: #1a1a1a;
+    border-bottom: 1px solid #eee;
+  }
+  tbody td {
+    padding: 12px 14px;
+    border-bottom: 1px solid #f5f5f5;
+    color: #555;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: #fafafa; }
+
+  /* ===== 代码块 ===== */
+  .code-block {
+    background: #1e1e1e;
+    color: #e8e8e8;
+    padding: 16px 18px;
+    border-radius: 8px;
+    margin: 18px 0;
+    font-family: "Menlo", "Monaco", "Courier New", monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    overflow-x: auto;
+  }
+  code.inline {
+    background: #f5f5f5;
+    color: #d56161;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: "Menlo", "Monaco", monospace;
+    font-size: 14px;
+  }
+
+  /* ===== 时间轴 ===== */
+  .timeline {
+    margin: 24px 0;
+    padding-left: 24px;
+    border-left: 2px solid #f0f0f0;
+  }
+  .timeline-item {
+    position: relative;
+    padding-bottom: 20px;
+  }
+  .timeline-item::before {
+    content: '';
+    position: absolute;
+    left: -32px;
+    top: 6px;
+    width: 12px;
+    height: 12px;
+    background: #07c160;
+    border-radius: 50%;
+    border: 3px solid #fff;
+    box-shadow: 0 0 0 1px #07c160;
+  }
+  .timeline-date {
+    font-size: 13px;
+    color: #888;
+    margin-bottom: 4px;
+  }
+  .timeline-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: #333;
+    margin-bottom: 4px;
+  }
+  .timeline-desc {
+    font-size: 14px;
+    color: #666;
+    line-height: 1.7;
+  }
+
+  /* ===== 引导关注卡片 ===== */
+  .follow-card {
+    background: linear-gradient(135deg, #07c160 0%, #06ad56 100%);
+    border-radius: 12px;
+    padding: 24px;
+    margin: 32px 0;
+    color: #fff;
+    text-align: center;
+  }
+  .follow-card .icon {
+    font-size: 32px;
+    margin-bottom: 8px;
+  }
+  .follow-card .title {
+    font-size: 18px;
+    font-weight: 700;
+    color: #fff;
+    margin-bottom: 6px;
+  }
+  .follow-card .desc {
+    font-size: 14px;
+    opacity: 0.9;
+    margin-bottom: 16px;
+  }
+  .follow-card .btn {
+    display: inline-block;
+    padding: 8px 28px;
+    background: #fff;
+    color: #07c160;
+    border-radius: 20px;
+    font-size: 14px;
+    font-weight: 600;
+    text-decoration: none;
+  }
+
+  /* ===== 文末签名区 ===== */
+  .signature {
+    margin-top: 40px;
+    padding: 24px;
+    background: #fafafa;
+    border-radius: 10px;
+  }
+  .signature-title {
+    font-size: 14px;
+    color: #999;
+    margin-bottom: 8px;
+  }
+  .signature-text {
+    font-size: 13px;
+    color: #666;
+    line-height: 1.8;
+  }
+
+  /* ===== 文末互动 ===== */
+  .end-action {
+    text-align: center;
+    margin: 40px 0 0;
+    padding: 24px 0;
+    border-top: 1px dashed #e8e8e8;
+  }
+  .end-action .text {
+    font-size: 14px;
+    color: #999;
+    margin-bottom: 12px;
+  }
+  .end-action .actions {
+    display: flex;
+    justify-content: center;
+    gap: 24px;
+  }
+  .end-action .actions span {
+    font-size: 14px;
+    color: #888;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  /* ===== 区块标记 - 用于演示分隔 ===== */
+  .demo-section {
+    border-top: 1px dashed #e8e8e8;
+    margin-top: 32px;
+    padding-top: 8px;
+  }
+  .demo-label {
+    font-size: 11px;
+    color: #ccc;
+    letter-spacing: 2px;
+    margin-bottom: 12px;
+    text-transform: uppercase;
+  }
+
+  /* 响应式 */
+  @media (max-width: 480px) {
+    .header { padding: 20px 16px 14px; }
+    .content { padding: 16px 16px 32px; }
+    .title { font-size: 20px; }
+    .content p { font-size: 15px; }
+    .metric-num { font-size: 22px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="article">
+
+  <!-- 文章头部 -->
+  <div class="header">
+    <h1 class="title">公众号通用排版样式合集</h1>
+    <div class="meta">
+      <span class="author">作者名</span>
+      <span class="dot">·</span>
+      <span>2026-06-07</span>
+      <span class="dot">·</span>
+      <span>阅读 1,234</span>
+    </div>
+  </div>
+
+  <div class="content">
+
+    <!-- 段落示例 -->
+    <p>这是普通段落文字的样式示例。公众号文章的正文一般使用 <strong>16px 字号</strong>、1.85 倍行距，配合两端对齐和适当的字间距，能在手机屏幕上获得最舒适的阅读体验。段落之间留 18px 间距，让眼睛有呼吸感。</p>
+
+    <p>正文里可以使用<span class="hl-yellow">黄色荧光笔高亮</span>来强调关键词，也可以用<span class="hl-green">绿色荧光笔</span>区分不同类型的重点。<span class="em-blue">蓝色文字强调</span>适合品牌或链接相关内容，<span class="em-red">红色文字强调</span>适合警示或核心数据。</p>
+
+    <!-- 二级标题样式1 -->
+    <div class="demo-section">
+      <div class="demo-label">— 二级标题样式 1：左竖线 —</div>
+    </div>
+    <h2 class="style-bar">这是一个左竖线标题</h2>
+    <p>左竖线标题简洁干净，适合大多数文章。绿色竖线呼应公众号的微信调性，也可以替换为品牌色。</p>
+
+    <!-- 二级标题样式2 -->
+    <div class="demo-section">
+      <div class="demo-label">— 二级标题样式 2：序号块 —</div>
+    </div>
+    <h2 class="style-num"><span class="num">01</span>序号块标题</h2>
+    <p>序号块标题适合有逻辑顺序的文章，比如「三个步骤」「五个要点」这类结构化内容，序号一目了然。</p>
+
+    <!-- 二级标题样式3 -->
+    <div class="demo-section">
+      <div class="demo-label">— 二级标题样式 3：渐变底色 —</div>
+    </div>
+    <h2 class="style-block">渐变底色标题</h2>
+    <p>渐变底色标题视觉感更柔和，适合生活类、情感类内容，温度感更强。</p>
+
+    <h3>三级小标题样式</h3>
+    <p>三级标题用来切分二级标题下的子段落，字号 17px，加粗但不喧宾夺主。</p>
+
+    <!-- 引用块 -->
+    <div class="demo-section">
+      <div class="demo-label">— 引用块 —</div>
+    </div>
+    <blockquote>
+      <p>这是引用块的样式，适合放名人名言、用户原话、文献摘录或者你想突出的某段重要文字。灰色背景配左侧灰色竖线，干净不抢戏。</p>
+      <span class="source">—— 引用来源</span>
+    </blockquote>
+
+    <!-- 信息卡片 -->
+    <div class="demo-section">
+      <div class="demo-label">— 信息卡片 —</div>
+    </div>
+    <div class="info-card">
+      <div class="label">关键洞察</div>
+      <div class="text">信息卡片用来突出某个关键观点或核心数据，灰色背景让它从正文中跳出来，又不会太刺眼。</div>
+    </div>
+
+    <!-- 提示框 -->
+    <div class="demo-section">
+      <div class="demo-label">— 提示框（信息/警告）—</div>
+    </div>
+    <div class="tip-blue">
+      💡 <strong>小贴士</strong>：蓝色提示框适合放补充信息、知识点拓展、操作指引等友好内容。
+    </div>
+    <div class="tip-yellow">
+      ⚠️ <strong>注意</strong>：黄色提示框适合放警告、注意事项、避坑提醒。
+    </div>
+
+    <!-- 数据指标 -->
+    <div class="demo-section">
+      <div class="demo-label">— 数据指标卡 —</div>
+    </div>
+    <div class="metrics">
+      <div class="metric-box">
+        <div class="metric-num">98%</div>
+        <div class="metric-name">满意度</div>
+      </div>
+      <div class="metric-box">
+        <div class="metric-num">2.5x</div>
+        <div class="metric-name">效率提升</div>
+      </div>
+      <div class="metric-box">
+        <div class="metric-num">10万+</div>
+        <div class="metric-name">用户数</div>
+      </div>
+    </div>
+
+    <!-- 自定义列表 -->
+    <div class="demo-section">
+      <div class="demo-label">— 自定义无序列表 —</div>
+    </div>
+    <ul class="custom-list">
+      <li>第一个要点：用绿色小圆点替代默认 bullet</li>
+      <li>第二个要点：视觉更有品牌感</li>
+      <li>第三个要点：层次更清晰</li>
+    </ul>
+
+    <!-- 标签 -->
+    <div class="demo-section">
+      <div class="demo-label">— 标签 —</div>
+    </div>
+    <div class="tags">
+      <span class="tag">普通标签</span>
+      <span class="tag tag-primary">主色标签</span>
+      <span class="tag tag-warning">警示标签</span>
+      <span class="tag">关键词</span>
+    </div>
+
+    <!-- 表格 -->
+    <div class="demo-section">
+      <div class="demo-label">— 表格 —</div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>方案</th><th>优点</th><th>缺点</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>方案 A</td><td>实现简单</td><td>扩展性弱</td></tr>
+          <tr><td>方案 B</td><td>性能优秀</td><td>成本较高</td></tr>
+          <tr><td>方案 C</td><td>性价比高</td><td>需要培训</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- 时间轴 -->
+    <div class="demo-section">
+      <div class="demo-label">— 时间轴 —</div>
+    </div>
+    <div class="timeline">
+      <div class="timeline-item">
+        <div class="timeline-date">2026.01</div>
+        <div class="timeline-title">第一阶段</div>
+        <div class="timeline-desc">完成产品原型设计与早期用户验证。</div>
+      </div>
+      <div class="timeline-item">
+        <div class="timeline-date">2026.04</div>
+        <div class="timeline-title">第二阶段</div>
+        <div class="timeline-desc">正式发布上线，启动种子用户运营。</div>
+      </div>
+      <div class="timeline-item">
+        <div class="timeline-date">2026.07</div>
+        <div class="timeline-title">第三阶段</div>
+        <div class="timeline-desc">规模化推广，达成核心数据指标。</div>
+      </div>
+    </div>
+
+    <!-- 图片占位 -->
+    <div class="demo-section">
+      <div class="demo-label">— 图片 + 图注 —</div>
+    </div>
+    <div class="img-box">
+      <div class="img-placeholder">[图片占位 16:9]</div>
+    </div>
+    <div class="img-caption">图片下方可以配文字说明，灰色字号13px。</div>
+
+    <!-- 代码块 -->
+    <div class="demo-section">
+      <div class="demo-label">— 代码块 —</div>
+    </div>
+    <p>正文中可以用 <code class="inline">行内代码</code> 标记技术名词。</p>
+    <div class="code-block">
+// 代码块用深色背景<br>
+function hello() {<br>
+&nbsp;&nbsp;return "公众号也能放代码";<br>
+}
+    </div>
+
+    <!-- 分隔线 -->
+    <div class="demo-section">
+      <div class="demo-label">— 分隔线（三种）—</div>
+    </div>
+    <div class="divider-dots">· · ·</div>
+    <p style="text-align:center;color:#999;font-size:13px;">三点分隔线</p>
+    <div class="divider-line"></div>
+    <p style="text-align:center;color:#999;font-size:13px;">渐变线分隔</p>
+    <div class="divider-icon">· END ·</div>
+    <p style="text-align:center;color:#999;font-size:13px;">带文字的分隔线</p>
+
+    <!-- 引导关注 -->
+    <div class="demo-section">
+      <div class="demo-label">— 引导关注卡片 —</div>
+    </div>
+    <div class="follow-card">
+      <div class="icon">👋</div>
+      <div class="title">喜欢这篇文章？</div>
+      <div class="desc">关注公众号，每周收到优质内容</div>
+      <a href="#" class="btn">立即关注</a>
+    </div>
+
+    <!-- 签名区 -->
+    <div class="signature">
+      <div class="signature-title">作者简介</div>
+      <div class="signature-text">这里写作者一两句话简介，让读者了解你是谁、你写什么。可以配合二维码或链接引导关注。</div>
+    </div>
+
+    <!-- 文末互动 -->
+    <div class="end-action">
+      <div class="text">看完有什么想说的？欢迎留言交流</div>
+      <div class="actions">
+        <span>👍 点赞</span>
+        <span>💬 留言</span>
+        <span>🔁 转发</span>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+</body>
+</html>
