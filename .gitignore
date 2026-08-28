@@ -10,6 +10,7 @@ dist
 coverage
 *.zip
 publisher-dashboard/data/
+.superpowers/
 
 # Local authentication state and session data — never publish
 cookies.json
