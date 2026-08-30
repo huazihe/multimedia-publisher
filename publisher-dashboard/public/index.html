@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>内容运营工作台</title>
-  <link rel="stylesheet" href="/styles.css?v=20260723-original-reference">
+  <link rel="stylesheet" href="/styles.css?v=20260830-dynamic-content-center">
 </head>
 <body>
   <div class="app-shell">
@@ -125,6 +125,71 @@
     <div id="layout-dialog-body"></div>
   </dialog>
 
-  <script src="/app.js?v=20260723-nous-flat"></script>
+  <dialog id="import-dialog" class="import-dialog" aria-labelledby="import-dialog-title" aria-describedby="import-dialog-description">
+    <div class="dialog-head">
+      <div>
+        <strong id="import-dialog-title">导入文章</strong>
+        <span id="import-dialog-description">粘贴正文，或在本机读取一个文本文件</span>
+      </div>
+      <button class="icon-btn" type="button" data-action="cancel-import" aria-label="关闭导入文章对话框" title="关闭">×</button>
+    </div>
+    <div class="dialog-form import-dialog-form">
+      <label class="span-2" for="import-title-input">
+        <span>文章标题（可选）</span>
+        <input id="import-title-input" type="text" maxlength="200" autocomplete="off" placeholder="留空时将从正文或文件名推断">
+      </label>
+
+      <div class="import-tabs span-2" role="tablist" aria-label="导入方式">
+        <button id="import-paste-tab" class="import-tab active" type="button" role="tab" data-action="select-import-tab" data-import-tab="paste" aria-controls="import-paste-panel" aria-selected="true">粘贴正文</button>
+        <button id="import-file-tab" class="import-tab" type="button" role="tab" data-action="select-import-tab" data-import-tab="file" aria-controls="import-file-panel" aria-selected="false">读取文件</button>
+      </div>
+
+      <section id="import-paste-panel" class="import-tab-panel span-2" role="tabpanel" aria-labelledby="import-paste-tab">
+        <label for="import-content-input"><span>文章正文</span></label>
+        <textarea id="import-content-input" rows="13" data-user-editable spellcheck="false" placeholder="支持 Markdown、HTML 或纯文本"></textarea>
+      </section>
+
+      <section id="import-file-panel" class="import-tab-panel span-2" role="tabpanel" aria-labelledby="import-file-tab" hidden>
+        <label class="import-file-picker" for="import-file-input">
+          <strong>选择本地文章文件</strong>
+          <span>支持 .md、.markdown、.html、.htm、.txt，最大 5 MiB</span>
+        </label>
+        <input id="import-file-input" class="visually-hidden" type="file" tabindex="-1" accept=".md,.markdown,.html,.htm,.txt" aria-describedby="import-file-note import-file-status">
+        <button class="secondary import-file-trigger" type="button" data-action="choose-import-file">浏览本机文件</button>
+        <p id="import-file-note" class="field-note">文件只通过 FileReader 在当前浏览器中读取，原始文件不会上传。</p>
+        <output id="import-file-status" class="import-file-status" aria-live="polite">尚未选择文件</output>
+      </section>
+
+      <div id="import-dialog-feedback" class="dialog-feedback span-2" role="status" aria-live="assertive"></div>
+      <div class="dialog-actions">
+        <button class="secondary" type="button" data-action="cancel-import">取消</button>
+        <button class="primary" type="button" data-action="submit-import">导入并打开</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="platform-publish-dialog" class="platform-publish-dialog" aria-labelledby="platform-publish-dialog-title" aria-describedby="platform-publish-dialog-description">
+    <div class="dialog-head">
+      <div>
+        <strong id="platform-publish-dialog-title">确认平台操作</strong>
+        <span id="platform-publish-dialog-description">请核对文章、平台和发布模式后再执行</span>
+      </div>
+      <button class="icon-btn" type="button" data-action="cancel-single-publish" aria-label="关闭平台发布确认对话框" title="关闭">×</button>
+    </div>
+    <div class="single-publish-summary">
+      <dl>
+        <div><dt>文章</dt><dd id="single-publish-article">-</dd></div>
+        <div><dt>平台</dt><dd id="single-publish-platform">-</dd></div>
+        <div><dt>模式</dt><dd id="single-publish-mode">-</dd></div>
+      </dl>
+      <div id="single-publish-feedback" class="dialog-feedback" role="status" aria-live="assertive"></div>
+    </div>
+    <div class="dialog-actions single-publish-actions">
+      <button class="secondary" type="button" data-action="cancel-single-publish">取消</button>
+      <button class="primary" type="button" data-action="confirm-single-publish">确认执行</button>
+    </div>
+  </dialog>
+
+  <script src="/app.js?v=20260830-dynamic-content-center"></script>
 </body>
 </html>
