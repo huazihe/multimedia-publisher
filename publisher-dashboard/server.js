@@ -2,6 +2,7 @@
 
 const http = require('http');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { randomBytes } = require('node:crypto');
 const { execFile, spawn } = require('child_process');
@@ -1974,6 +1975,52 @@ function contentToMarkdown(content) {
   return `---\ntitle: ${content.title}\n---\n\n# ${content.title}\n\n${body}\n`;
 }
 
+async function previewContentForPlatform(contentId, platform, options = {}) {
+  const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
+  if (!content) throw statusError('内容不存在', 404);
+
+  const platformId = String(platform || '').trim().toLowerCase();
+  if (!platformId) throw statusError('缺少平台参数', 400);
+  const knownPlatform = one('SELECT id FROM platforms WHERE id = ?', platformId);
+  if (!knownPlatform || RETIRED_PLATFORM_IDS.includes(platformId)) {
+    throw statusError(`平台不存在: ${platformId}`, 400);
+  }
+
+  const previewDir = fs.mkdtempSync(path.join(os.tmpdir(), 'publisher-dashboard-preview-'));
+  const markdownFile = path.join(previewDir, 'content.md');
+  try {
+    fs.writeFileSync(markdownFile, contentToMarkdown(content), 'utf8');
+
+    const runner = options.runner || runWeibotCli;
+    const result = await runner(['preview', markdownFile, '-p', platformId], options.timeout || 30000);
+    if (result && typeof result === 'object'
+      && (result.error || (result.code !== undefined && result.code !== 0))) {
+      throw statusError('平台预览命令执行失败', 502);
+    }
+
+    const stdout = typeof result === 'string'
+      ? result
+      : (typeof result?.stdout === 'string' ? result.stdout : result?.output);
+    const cleanOutput = String(stdout || '').trim();
+    const lines = cleanOutput ? cleanOutput.split(/\r?\n/) : [];
+    if (lines.length !== 1) {
+      throw statusError('平台预览命令必须返回一行 JSON 对象', 502);
+    }
+
+    try {
+      const preview = JSON.parse(lines[0]);
+      if (!preview || typeof preview !== 'object' || Array.isArray(preview)) {
+        throw new Error('not an object');
+      }
+      return preview;
+    } catch {
+      throw statusError('平台预览命令返回的 JSON 无效', 502);
+    }
+  } finally {
+    fs.rmSync(previewDir, { recursive: true, force: true });
+  }
+}
+
 function readPlatformSessionFile(platform) {
   const platformId = String(platform || '').trim().toLowerCase();
   if (!platformId) return null;
@@ -2113,6 +2160,16 @@ function normalizeStoredPublishResult(platform, info) {
   return info;
 }
 
+function publishSnapshotName(jobId, contentId) {
+  const safeIdPattern = /^[A-Za-z0-9_-]+$/;
+  const job = String(jobId || '');
+  const content = String(contentId || '');
+  if (!safeIdPattern.test(job) || !safeIdPattern.test(content)) {
+    throw new Error('发布快照 ID 无效');
+  }
+  return `${job}-${content}.md`;
+}
+
 async function publishContent(contentId, platforms = [], options = {}) {
   const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
   if (!content) throw new Error('内容不存在');
@@ -2127,20 +2184,22 @@ async function publishContent(contentId, platforms = [], options = {}) {
     VALUES (?, ?, ?, 'running', ?, ?, ?)
   `).run(jobId, contentId, content.title, encodeJson(selected), now(), now());
 
-  const markdownFile = path.join(DRAFTS_DIR, `${contentId}.md`);
+  const markdownFile = path.join(DRAFTS_DIR, publishSnapshotName(jobId, contentId));
   fs.writeFileSync(markdownFile, contentToMarkdown(content), 'utf8');
 
   const finalResults = {};
   const rawOutputs = [];
+  const preflight = options.preflight || browserSessionFailureForPublish;
+  const platformPublisher = options.platformPublisher || publishOnePlatform;
   for (const platform of selected) {
-    const preflightFailure = await browserSessionFailureForPublish(platform);
+    const preflightFailure = await preflight(platform);
     if (preflightFailure) {
       finalResults[platform] = { status: 'failed', error: preflightFailure };
       rawOutputs.push(`[${platform}] ${preflightFailure}`);
       continue;
     }
 
-    const single = await publishOnePlatform(markdownFile, platform, content.title, options.publishMode || 'direct');
+    const single = await platformPublisher(markdownFile, platform, content.title, options.publishMode || 'direct');
     finalResults[platform] = single.info;
     rawOutputs.push(single.output);
   }
@@ -2392,7 +2451,13 @@ function sendLayoutPreview(res, contentId) {
   res.end(previewDocument(content));
 }
 
-const server = http.createServer(async (req, res) => {
+function createDashboardServer(options = {}) {
+  const previewOptions = options.previewRunner
+    ? { runner: options.previewRunner, timeout: options.previewTimeout }
+    : undefined;
+  const publisher = options.publisher || publishContent;
+
+  return http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -2595,6 +2660,17 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    const platformPreviewMatch = url.pathname.match(/^\/api\/content\/([^/]+)\/platform-preview$/);
+    if (platformPreviewMatch && req.method === 'GET') {
+      const preview = await previewContentForPlatform(
+        platformPreviewMatch[1],
+        url.searchParams.get('platform'),
+        previewOptions
+      );
+      sendJson(res, { ok: true, preview });
+      return;
+    }
+
     const contentUpdateMatch = url.pathname.match(/^\/api\/content\/([^/]+)$/);
     if (contentUpdateMatch && req.method === 'POST') {
       const body = await readBody(req);
@@ -2623,9 +2699,40 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    const singlePlatformPublishMatch = url.pathname.match(/^\/api\/content\/([^/]+)\/publish-platform$/);
+    if (singlePlatformPublishMatch && req.method === 'POST') {
+      const body = await readBody(req, { invalidJsonStatusCode: 400 });
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        throw statusError('请求体必须是 JSON 对象', 400);
+      }
+
+      if (typeof body.platform !== 'string'
+        || !body.platform.trim()
+        || body.platform.includes(',')) {
+        throw statusError('platform 必须且只能指定一个平台', 400);
+      }
+      const platform = body.platform.trim().toLowerCase();
+      const knownPlatform = one('SELECT id FROM platforms WHERE id = ?', platform);
+      if (!knownPlatform || RETIRED_PLATFORM_IDS.includes(platform)) {
+        throw statusError(`平台不存在: ${platform}`, 400);
+      }
+
+      if (body.publishMode !== 'draft' && body.publishMode !== 'direct') {
+        throw statusError('publishMode 必须是 draft 或 direct', 400);
+      }
+      const contentId = singlePlatformPublishMatch[1];
+      if (!one('SELECT id FROM contents WHERE id = ?', contentId)) {
+        throw statusError('内容不存在', 404);
+      }
+
+      const result = await publisher(contentId, [platform], { publishMode: body.publishMode });
+      sendJson(res, { ok: true, ...result });
+      return;
+    }
+
     if (url.pathname === '/api/publish' && req.method === 'POST') {
       const body = await readBody(req);
-      const result = await publishContent(body.contentId, body.platforms || [], {
+      const result = await publisher(body.contentId, body.platforms || [], {
         publishMode: body.publishMode || 'direct',
       });
       sendJson(res, { ok: true, ...result });
@@ -2653,7 +2760,10 @@ const server = http.createServer(async (req, res) => {
     const statusCode = Number.isInteger(error.statusCode) ? error.statusCode : 500;
     sendJson(res, { ok: false, error: error.message }, statusCode);
   }
-});
+  });
+}
+
+const server = createDashboardServer();
 
 function listenWithFallback(port, attempts = 20) {
   const onListening = () => {
@@ -2688,6 +2798,7 @@ module.exports = {
   DRAFTS_DIR,
   CLI_PATH,
   server,
+  createDashboardServer,
   db,
   parsePlatformOutput,
   parseSyncResults,
@@ -2702,6 +2813,9 @@ module.exports = {
   layoutContent,
   saveLocalDraft,
   contentToMarkdown,
+  previewContentForPlatform,
+  publishSnapshotName,
+  publishContent,
   getDashboardData,
   listenWithFallback,
 };

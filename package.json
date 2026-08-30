@@ -11,8 +11,8 @@
     "build": "npm run build:core && npm run build:cli",
     "build:core": "npx -y pnpm@9.15.9 --filter @weibot/core build",
     "build:cli": "npx -y pnpm@9.15.9 --filter @weibot/cli build",
-    "dashboard": "npm --prefix publisher-dashboard start",
-    "dashboard:test": "npm --prefix publisher-dashboard test",
+    "dashboard": "npm run build && npm --prefix publisher-dashboard start",
+    "dashboard:test": "npm run build && npm --prefix publisher-dashboard test",
     "test": "npm run dashboard:test",
     "typecheck": "npx -y pnpm@9.15.9 --filter @weibot/core typecheck && npx -y pnpm@9.15.9 --filter @weibot/cli typecheck",
     "clean": "npx -y pnpm@9.15.9 --filter @weibot/core clean && npx -y pnpm@9.15.9 --filter @weibot/cli clean"

@@ -18,7 +18,12 @@ const {
   generateContent,
   updateContent,
   importContent,
+  previewContentForPlatform,
+  publishSnapshotName,
+  publishContent,
+  createDashboardServer,
   getDashboardData,
+  DRAFTS_DIR,
   server,
   db,
 } = require('../server');
@@ -35,6 +40,42 @@ function cleanupImportedContent(content) {
   if (!content?.id) return;
   db.prepare("DELETE FROM activity WHERE target_type = 'content' AND target_id = ?").run(content.id);
   db.prepare('DELETE FROM contents WHERE id = ?').run(content.id);
+}
+
+function databaseSnapshot() {
+  const tables = [
+    'platforms',
+    'weekly_plans',
+    'candidates',
+    'contents',
+    'publish_jobs',
+    'publish_results',
+    'ai_commands',
+    'activity',
+  ];
+  return Object.fromEntries(tables.map(table => [
+    table,
+    db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all(),
+  ]));
+}
+
+async function listenOnRandomPort(testServer) {
+  await new Promise((resolve, reject) => {
+    const onError = error => reject(error);
+    testServer.once('error', onError);
+    testServer.listen(0, '127.0.0.1', () => {
+      testServer.off('error', onError);
+      resolve();
+    });
+  });
+  return testServer.address().port;
+}
+
+async function closeServer(testServer) {
+  if (!testServer?.listening) return;
+  await new Promise((resolve, reject) => {
+    testServer.close(error => error ? reject(error) : resolve());
+  });
 }
 
 test('parsePlatformOutput reads CLI platform list', () => {
@@ -119,6 +160,478 @@ test('contentToMarkdown includes front matter and h1', () => {
   assert.match(markdown, /title: Test Title/);
   assert.match(markdown, /# Test Title/);
   assert.match(markdown, /Body text/);
+});
+
+test('platform preview serializes canonical content and runs only the injected CLI preview command', async () => {
+  let content;
+  let previewFile;
+  const calls = [];
+  try {
+    content = importContent({
+      filename: 'platform-preview.html',
+      body: '<h1>平台预览母稿</h1><p>当前正文</p>',
+    });
+    const before = databaseSnapshot();
+    const expected = {
+      platform: 'xiaohongshu',
+      title: '平台预览母稿',
+      format: 'text',
+      content: '当前正文',
+    };
+
+    const preview = await previewContentForPlatform(content.id, 'xiaohongshu', {
+      runner: async (args, timeout) => {
+        calls.push({ args, timeout });
+        previewFile = args[1];
+        const source = fs.readFileSync(previewFile, 'utf8');
+        assert.match(source, /title: 平台预览母稿/);
+        assert.match(source, /# 平台预览母稿/);
+        assert.match(source, /当前正文/);
+        assert.doesNotMatch(source, /<h1>|<p>/);
+        return {
+          code: 0,
+          stdout: `${JSON.stringify(expected)}\n`,
+          stderr: '',
+          output: `${JSON.stringify(expected)}\n`,
+        };
+      },
+    });
+
+    assert.deepEqual(preview, expected);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].args.slice(0, 1), ['preview']);
+    assert.deepEqual(calls[0].args.slice(2), ['-p', 'xiaohongshu']);
+    assert.equal(path.extname(calls[0].args[1]), '.md');
+    assert.deepEqual(databaseSnapshot(), before);
+    assert.equal(fs.existsSync(previewFile), false);
+  } finally {
+    cleanupImportedContent(content);
+    if (previewFile && fs.existsSync(previewFile)) {
+      fs.rmSync(path.dirname(previewFile), { recursive: true, force: true });
+    }
+  }
+});
+
+test('platform preview rejects missing and unknown platforms before invoking the CLI', async () => {
+  let content;
+  let runnerCalls = 0;
+  const runner = async () => {
+    runnerCalls++;
+    return { code: 0, stdout: '{}\n', stderr: '', output: '{}\n' };
+  };
+  try {
+    content = importContent({ filename: 'preview-validation.md', body: '# 预览校验\n\n正文' });
+
+    await assert.rejects(
+      () => previewContentForPlatform(content.id, '', { runner }),
+      error => {
+        assert.equal(error.statusCode, 400);
+        assert.match(error.message, /缺少平台/);
+        return true;
+      }
+    );
+    await assert.rejects(
+      () => previewContentForPlatform(content.id, 'unknown-platform', { runner }),
+      error => {
+        assert.equal(error.statusCode, 400);
+        assert.match(error.message, /平台不存在: unknown-platform/);
+        return true;
+      }
+    );
+    assert.equal(runnerCalls, 0);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('platform preview returns 404 for unknown content before invoking the CLI', async () => {
+  const tempEntriesBefore = new Set(fs.readdirSync(os.tmpdir()));
+  let runnerCalls = 0;
+  try {
+    await assert.rejects(
+      () => previewContentForPlatform('../missing-content', 'xiaohongshu', {
+        runner: async () => {
+          runnerCalls++;
+          return { code: 0, stdout: '{}\n', stderr: '', output: '{}\n' };
+        },
+      }),
+      error => {
+        assert.equal(error.statusCode, 404);
+        assert.match(error.message, /内容不存在/);
+        return true;
+      }
+    );
+    assert.equal(runnerCalls, 0);
+  } finally {
+    for (const entry of fs.readdirSync(os.tmpdir())) {
+      if (!tempEntriesBefore.has(entry) && entry.startsWith('publisher-dashboard-preview-')) {
+        fs.rmSync(path.join(os.tmpdir(), entry), { recursive: true, force: true });
+      }
+    }
+  }
+});
+
+test('platform preview rejects malformed or multiple CLI JSON results and cleans temporary files', async () => {
+  let content;
+  const malformedOutputs = ['not-json\n', '{}\n{}\n', '[]\n'];
+  try {
+    content = importContent({ filename: 'preview-json.md', body: '# JSON 预览\n\n正文' });
+
+    for (const stdout of malformedOutputs) {
+      let previewFile;
+      try {
+        await assert.rejects(
+          () => previewContentForPlatform(content.id, 'xiaohongshu', {
+            runner: async args => {
+              previewFile = args[1];
+              return { code: 0, stdout, stderr: '', output: stdout };
+            },
+          }),
+          error => {
+            assert.equal(error.statusCode, 502);
+            assert.match(error.message, /平台预览.*JSON/);
+            return true;
+          }
+        );
+        assert.equal(fs.existsSync(previewFile), false);
+      } finally {
+        if (previewFile && fs.existsSync(previewFile)) {
+          fs.rmSync(path.dirname(previewFile), { recursive: true, force: true });
+        }
+      }
+    }
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('GET platform-preview returns the injected CLI preview result', async () => {
+  let content;
+  let testServer;
+  const expected = {
+    platform: 'xiaohongshu',
+    title: '预览端点母稿',
+    format: 'text',
+    content: '端点正文',
+  };
+  const calls = [];
+  try {
+    content = importContent({ filename: 'preview-endpoint.md', body: '# 预览端点母稿\n\n端点正文' });
+    testServer = createDashboardServer({
+      previewRunner: async args => {
+        calls.push(args);
+        return {
+          code: 0,
+          stdout: `${JSON.stringify(expected)}\n`,
+          stderr: '',
+          output: `${JSON.stringify(expected)}\n`,
+        };
+      },
+    });
+    const port = await listenOnRandomPort(testServer);
+    const response = await fetch(
+      `http://127.0.0.1:${port}/api/content/${encodeURIComponent(content.id)}/platform-preview?platform=xiaohongshu`
+    );
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true, preview: expected });
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].slice(0, 1), ['preview']);
+    assert.deepEqual(calls[0].slice(2), ['-p', 'xiaohongshu']);
+  } finally {
+    await closeServer(testServer);
+    cleanupImportedContent(content);
+  }
+});
+
+test('GET platform-preview maps platform validation to 400 and missing content to 404', async () => {
+  let content;
+  let testServer;
+  let runnerCalls = 0;
+  try {
+    content = importContent({ filename: 'preview-endpoint-errors.md', body: '# 预览端点校验\n\n正文' });
+    testServer = createDashboardServer({
+      previewRunner: async () => {
+        runnerCalls++;
+        return { code: 0, stdout: '{}\n', stderr: '', output: '{}\n' };
+      },
+    });
+    const port = await listenOnRandomPort(testServer);
+    const base = `http://127.0.0.1:${port}/api/content`;
+
+    let response = await fetch(`${base}/${encodeURIComponent(content.id)}/platform-preview`);
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /缺少平台/);
+
+    response = await fetch(`${base}/${encodeURIComponent(content.id)}/platform-preview?platform=unknown-platform`);
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /平台不存在/);
+
+    response = await fetch(`${base}/missing-content/platform-preview?platform=xiaohongshu`);
+    assert.equal(response.status, 404);
+    assert.match((await response.json()).error, /内容不存在/);
+    assert.equal(runnerCalls, 0);
+  } finally {
+    await closeServer(testServer);
+    cleanupImportedContent(content);
+  }
+});
+
+test('publish snapshot names include safe job and content ids', () => {
+  assert.equal(publishSnapshotName('job_1', 'content_1'), 'job_1-content_1.md');
+
+  for (const ids of [
+    ['', 'content_1'],
+    ['job_1', ''],
+    ['../job_1', 'content_1'],
+    ['job_1', '../../content_1'],
+    ['job/1', 'content_1'],
+    ['job_1', 'content 1'],
+  ]) {
+    assert.throws(() => publishSnapshotName(...ids), /快照 ID 无效/);
+  }
+});
+
+test('repeated publish jobs keep different job-specific snapshots', async () => {
+  let content;
+  const jobIds = [];
+  const snapshotFiles = [];
+  const publisherCalls = [];
+  try {
+    content = importContent({ filename: 'repeat-publish.md', body: '# 重复发布母稿\n\n不能被覆盖的正文' });
+    const platformPublisher = async (markdownFile, platform, title, publishMode) => {
+      snapshotFiles.push(markdownFile);
+      publisherCalls.push({ platform, title, publishMode });
+      assert.match(fs.readFileSync(markdownFile, 'utf8'), /不能被覆盖的正文/);
+      return {
+        output: '',
+        info: { status: 'success', message: '本地 stub 发布成功' },
+      };
+    };
+    const options = {
+      publishMode: 'draft',
+      preflight: async () => null,
+      platformPublisher,
+    };
+
+    const first = await publishContent(content.id, ['zhihu'], options);
+    const second = await publishContent(content.id, ['zhihu'], options);
+    jobIds.push(first.job.id, second.job.id);
+
+    assert.notEqual(first.job.id, second.job.id);
+    assert.deepEqual(snapshotFiles.map(file => path.basename(file)), [
+      publishSnapshotName(first.job.id, content.id),
+      publishSnapshotName(second.job.id, content.id),
+    ]);
+    assert.notEqual(snapshotFiles[0], snapshotFiles[1]);
+    assert.equal(snapshotFiles.every(file => fs.existsSync(file)), true);
+    assert.equal(fs.existsSync(path.join(DRAFTS_DIR, `${content.id}.md`)), false);
+    assert.deepEqual(publisherCalls, [
+      { platform: 'zhihu', title: '重复发布母稿', publishMode: 'draft' },
+      { platform: 'zhihu', title: '重复发布母稿', publishMode: 'draft' },
+    ]);
+  } finally {
+    for (const jobId of jobIds) {
+      db.prepare("DELETE FROM activity WHERE target_type = 'publish_job' AND target_id = ?").run(jobId);
+      db.prepare('DELETE FROM publish_results WHERE job_id = ?').run(jobId);
+      db.prepare('DELETE FROM publish_jobs WHERE id = ?').run(jobId);
+    }
+    cleanupImportedContent(content);
+    for (const snapshotFile of snapshotFiles) {
+      fs.rmSync(snapshotFile, { force: true });
+    }
+  }
+});
+
+test('POST publish-platform delegates exactly one platform and the requested mode', async () => {
+  let content;
+  let testServer;
+  const calls = [];
+  try {
+    content = importContent({ filename: 'single-platform.md', body: '# 单平台发布\n\n正文' });
+    db.prepare('UPDATE contents SET selected_platforms = ? WHERE id = ?')
+      .run(JSON.stringify(['juejin', 'weixin']), content.id);
+    testServer = createDashboardServer({
+      publisher: async (contentId, platforms, options) => {
+        calls.push({ contentId, platforms, options });
+        return {
+          job: {
+            id: `stub-job-${calls.length}`,
+            content_id: contentId,
+            status: 'published',
+            platforms,
+            results: [],
+          },
+          rawOutput: '',
+        };
+      },
+    });
+    const port = await listenOnRandomPort(testServer);
+    const endpoint = `http://127.0.0.1:${port}/api/content/${encodeURIComponent(content.id)}/publish-platform`;
+
+    let response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform: ' ZHIHU ', publishMode: 'draft' }),
+    });
+    assert.equal(response.status, 200);
+    let result = await response.json();
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.job.platforms, ['zhihu']);
+
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform: 'juejin', publishMode: 'direct' }),
+    });
+    assert.equal(response.status, 200);
+    result = await response.json();
+    assert.deepEqual(result.job.platforms, ['juejin']);
+
+    assert.deepEqual(calls, [
+      { contentId: content.id, platforms: ['zhihu'], options: { publishMode: 'draft' } },
+      { contentId: content.id, platforms: ['juejin'], options: { publishMode: 'direct' } },
+    ]);
+  } finally {
+    await closeServer(testServer);
+    cleanupImportedContent(content);
+  }
+});
+
+test('POST publish-platform validates one known platform, mode, body, and content', async () => {
+  let content;
+  let testServer;
+  let publisherCalls = 0;
+  try {
+    content = importContent({ filename: 'single-platform-validation.md', body: '# 单平台校验\n\n正文' });
+    testServer = createDashboardServer({
+      publisher: async () => {
+        publisherCalls++;
+        return { job: {}, rawOutput: '' };
+      },
+    });
+    const port = await listenOnRandomPort(testServer);
+    const endpoint = `http://127.0.0.1:${port}/api/content/${encodeURIComponent(content.id)}/publish-platform`;
+    const invalidCases = [
+      [{ publishMode: 'draft' }, /必须且只能指定一个平台/],
+      [{ platform: ['zhihu'], publishMode: 'draft' }, /必须且只能指定一个平台/],
+      [{ platform: 'zhihu,juejin', publishMode: 'draft' }, /必须且只能指定一个平台/],
+      [{ platform: 'unknown-platform', publishMode: 'draft' }, /平台不存在/],
+      [{ platform: 'zhihu' }, /publishMode.*draft.*direct/],
+      [{ platform: 'zhihu', publishMode: 'scheduled' }, /publishMode.*draft.*direct/],
+      [[], /JSON 对象/],
+    ];
+
+    for (const [body, messagePattern] of invalidCases) {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      assert.equal(response.status, 400);
+      assert.match((await response.json()).error, messagePattern);
+    }
+
+    const malformedResponse = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{"platform":',
+    });
+    assert.equal(malformedResponse.status, 400);
+    assert.match((await malformedResponse.json()).error, /JSON 格式无效/);
+
+    const missingResponse = await fetch(
+      `http://127.0.0.1:${port}/api/content/missing-content/publish-platform`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct' }),
+      }
+    );
+    assert.equal(missingResponse.status, 404);
+    assert.match((await missingResponse.json()).error, /内容不存在/);
+    assert.equal(publisherCalls, 0);
+  } finally {
+    await closeServer(testServer);
+    cleanupImportedContent(content);
+  }
+});
+
+test('POST /api/publish keeps the existing batch publisher contract', async () => {
+  let testServer;
+  const calls = [];
+  try {
+    testServer = createDashboardServer({
+      publisher: async (contentId, platforms, options) => {
+        calls.push({ contentId, platforms, options });
+        return {
+          job: { id: 'batch-stub-job', content_id: contentId, platforms, results: [] },
+          rawOutput: 'batch-stub-output',
+        };
+      },
+    });
+    const port = await listenOnRandomPort(testServer);
+    let response = await fetch(`http://127.0.0.1:${port}/api/publish`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contentId: 'batch-contract-content',
+        platforms: ['zhihu', 'juejin'],
+        publishMode: 'draft',
+      }),
+    });
+    let result = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(result, {
+      ok: true,
+      job: {
+        id: 'batch-stub-job',
+        content_id: 'batch-contract-content',
+        platforms: ['zhihu', 'juejin'],
+        results: [],
+      },
+      rawOutput: 'batch-stub-output',
+    });
+    response = await fetch(`http://127.0.0.1:${port}/api/publish`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contentId: 'batch-default-mode-content',
+        platforms: ['weixin'],
+      }),
+    });
+    result = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(result.ok, true);
+
+    assert.deepEqual(calls, [
+      {
+        contentId: 'batch-contract-content',
+        platforms: ['zhihu', 'juejin'],
+        options: { publishMode: 'draft' },
+      },
+      {
+        contentId: 'batch-default-mode-content',
+        platforms: ['weixin'],
+        options: { publishMode: 'direct' },
+      },
+    ]);
+  } finally {
+    await closeServer(testServer);
+  }
+});
+
+test('root dashboard scripts build core and CLI without recursive test scripts', () => {
+  const rootPackagePath = path.resolve(__dirname, '..', '..', 'package.json');
+  const rootPackage = JSON.parse(fs.readFileSync(rootPackagePath, 'utf8'));
+
+  assert.equal(rootPackage.scripts.build, 'npm run build:core && npm run build:cli');
+  assert.equal(rootPackage.scripts.dashboard, 'npm run build && npm --prefix publisher-dashboard start');
+  assert.equal(rootPackage.scripts['dashboard:test'], 'npm run build && npm --prefix publisher-dashboard test');
+  assert.equal(rootPackage.scripts.test, 'npm run dashboard:test');
+  assert.doesNotMatch(rootPackage.scripts['dashboard:test'], /npm (?:run )?test(?:\s|$)/);
+  assert.doesNotMatch(rootPackage.scripts['dashboard:test'], /dashboard:test/);
 });
 
 test('plans can be created in range and edited', () => {
