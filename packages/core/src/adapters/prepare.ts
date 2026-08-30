@@ -1,0 +1,505 @@
+import { parseHTML } from 'linkedom'
+import { htmlToMarkdown, markdownToHtml } from '../lib/turndown'
+import type { Article, PlatformMeta } from '../types'
+import { createDefaultAdapterEntries } from './defaults'
+import { DEFAULT_PREPROCESS_CONFIG, type PreprocessConfig } from './types'
+
+export type PreparedFormat = 'html' | 'markdown' | 'text'
+
+export interface PlatformPreparedArticle {
+  platform: string
+  title: string
+  format: PreparedFormat
+  content: string
+  htmlPreview: string
+  imageCount: number
+  warnings: string[]
+  limits: {
+    maxImages?: number
+    maxTitleLength?: number
+  }
+  article: Article
+}
+
+const TEXT_PLATFORM_IDS = new Set([
+  'douyin',
+  'toutiao',
+  'xiaohongshu',
+  'douban',
+  'qiehao',
+  'china-vision',
+  'bjx-club',
+  'elecfans',
+  'eet-china',
+  'eeworld',
+  'ca800',
+  'b2b168',
+  'app17',
+  'huangye88',
+  '51sole',
+])
+
+const PLATFORM_LIMITS: Record<string, PlatformPreparedArticle['limits']> = {
+  douyin: { maxTitleLength: 30 },
+  xiaohongshu: { maxImages: 9, maxTitleLength: 38 },
+}
+
+const SPECIAL_TAG_NAMES = [
+  'mpvoice',
+  'mpprofile',
+  'qqmusic',
+  'mpcps',
+  'mpvideo',
+  'mpvideosnap',
+  'mp-common-profile',
+  'mp-miniprogram',
+  'mp-weapp',
+  'mp-poi',
+]
+
+const URL_ATTRIBUTE_NAMES = new Set([
+  'action',
+  'background',
+  'cite',
+  'data',
+  'formaction',
+  'href',
+  'poster',
+  'src',
+  'xlink:href',
+])
+
+interface ParsedFragment {
+  document: Document
+  root: HTMLElement
+}
+
+function parseFragment(html: string): ParsedFragment {
+  const document = parseHTML('<!doctype html><html><head></head><body></body></html>').document
+  const root = document.createElement('div')
+  root.innerHTML = html
+  return { document, root }
+}
+
+function removeElements(root: ParentNode, selector: string): void {
+  for (const element of Array.from(root.querySelectorAll(selector))) {
+    element.remove()
+  }
+}
+
+function removeComments(node: Node): void {
+  for (const child of Array.from(node.childNodes)) {
+    if (child.nodeType === 8) {
+      child.parentNode?.removeChild(child)
+    } else {
+      removeComments(child)
+    }
+  }
+}
+
+function normalizedProtocolValue(value: string): string {
+  return value.replace(/[\u0000-\u0020\u007f-\u009f]/g, '').toLowerCase()
+}
+
+function isUnsafeUrl(value: string, attributeName: string): boolean {
+  const normalized = normalizedProtocolValue(value)
+  if (/^(?:javascript|vbscript):/.test(normalized)) return true
+  if (!normalized.startsWith('data:')) return false
+
+  return !(
+    (attributeName === 'src' || attributeName === 'poster')
+    && /^data:image\/(?:avif|gif|jpe?g|png|webp);base64,/i.test(value.trim())
+  )
+}
+
+function sanitizeAttributes(root: ParentNode): void {
+  for (const element of Array.from(root.querySelectorAll('*'))) {
+    for (const attribute of Array.from(element.attributes)) {
+      const name = attribute.name.toLowerCase()
+      const value = attribute.value
+
+      if (name.startsWith('on') || name === 'srcdoc') {
+        element.removeAttribute(attribute.name)
+        continue
+      }
+
+      if (URL_ATTRIBUTE_NAMES.has(name) && isUnsafeUrl(value, name)) {
+        element.removeAttribute(attribute.name)
+        continue
+      }
+
+      if (
+        name === 'srcset'
+        && /(?:^|,)\s*(?:javascript|vbscript|data:text\/html)\s*:/i.test(value)
+      ) {
+        element.removeAttribute(attribute.name)
+        continue
+      }
+
+      if (
+        name === 'style'
+        && /(?:expression\s*\(|(?:javascript|vbscript|data:text\/html)\s*:)/i.test(value)
+      ) {
+        element.removeAttribute(attribute.name)
+      }
+    }
+  }
+}
+
+function isSvgSource(src: string): boolean {
+  return /^data:image\/svg\+xml/i.test(src.trim()) || /\.svg(?:[?#]|$)/i.test(src)
+}
+
+function processImages(root: ParentNode, config: PreprocessConfig): void {
+  for (const image of Array.from(root.querySelectorAll('img'))) {
+    if (config.processLazyImages) {
+      const lazySource = [
+        'data-src',
+        'data-original',
+        'data-lazy-src',
+        'data-actualsrc',
+        'data-url',
+      ].map(name => image.getAttribute(name)?.trim()).find(Boolean)
+      const currentSource = image.getAttribute('src')?.trim() || ''
+
+      if (
+        lazySource
+        && (!currentSource || isSvgSource(currentSource))
+        && !isUnsafeUrl(lazySource, 'src')
+      ) {
+        image.setAttribute('src', lazySource)
+      }
+    }
+
+    const src = image.getAttribute('src')?.trim() || ''
+    if (config.removeSvgImages && src && isSvgSource(src)) {
+      image.remove()
+      continue
+    }
+
+    if (config.removeEmptyImages && !src) image.remove()
+  }
+
+  if (config.removeSvgImages) removeElements(root, 'svg')
+}
+
+function removeConfiguredAttributes(root: ParentNode, config: PreprocessConfig): void {
+  for (const element of Array.from(root.querySelectorAll('*'))) {
+    for (const attribute of Array.from(element.attributes)) {
+      const name = attribute.name.toLowerCase()
+      if (config.removeDataAttributes && name.startsWith('data-')) {
+        element.removeAttribute(attribute.name)
+      } else if (config.removeSrcset && name === 'srcset') {
+        element.removeAttribute(attribute.name)
+      } else if (config.removeSizes && name === 'sizes') {
+        element.removeAttribute(attribute.name)
+      }
+    }
+  }
+}
+
+function replaceElementTag(element: Element, tagName: string, document: Document): void {
+  const replacement = document.createElement(tagName)
+  for (const attribute of Array.from(element.attributes)) {
+    replacement.setAttribute(attribute.name, attribute.value)
+  }
+  while (element.firstChild) replacement.appendChild(element.firstChild)
+  element.replaceWith(replacement)
+}
+
+function convertSections(root: ParentNode, document: Document, config: PreprocessConfig): void {
+  const targetTag = config.convertSectionToP
+    ? 'p'
+    : config.convertSectionToDiv
+      ? 'div'
+      : null
+  if (!targetTag) return
+
+  for (const section of Array.from(root.querySelectorAll('section'))) {
+    replaceElementTag(section, targetTag, document)
+  }
+}
+
+function unwrap(element: Element): void {
+  const parent = element.parentNode
+  if (!parent) return
+  while (element.firstChild) parent.insertBefore(element.firstChild, element)
+  parent.removeChild(element)
+}
+
+function isRelativeOrFragmentLink(href: string): boolean {
+  return /^(?:#|\/|\.\/|\.\.\/|\?)/.test(href.trim())
+}
+
+function isKeptDomain(href: string, domains: string[]): boolean {
+  if (isRelativeOrFragmentLink(href)) return true
+  try {
+    const hostname = new URL(href).hostname.toLowerCase()
+    return domains.some(domain => {
+      const normalizedDomain = domain.trim().replace(/^\./, '').toLowerCase()
+      return hostname === normalizedDomain || hostname.endsWith(`.${normalizedDomain}`)
+    })
+  } catch {
+    return false
+  }
+}
+
+function removeExternalLinks(root: ParentNode, config: PreprocessConfig): void {
+  if (!config.removeLinks) return
+  const keepDomains = config.keepLinkDomains || []
+
+  for (const link of Array.from(root.querySelectorAll('a'))) {
+    const href = link.getAttribute('href') || ''
+    if (keepDomains.length > 0 && href && isKeptDomain(href, keepDomains)) continue
+    unwrap(link)
+  }
+}
+
+function removeSpecialTags(root: ParentNode, config: PreprocessConfig): void {
+  if (!config.removeSpecialTags) return
+
+  for (const element of Array.from(root.querySelectorAll(SPECIAL_TAG_NAMES.join(',')))) {
+    const parent = element.parentElement
+    if (
+      config.removeSpecialTagsWithParent
+      && parent
+      && parent !== root
+      && !['BODY', 'HTML'].includes(parent.tagName)
+    ) {
+      parent.remove()
+    } else {
+      element.remove()
+    }
+  }
+}
+
+function removeTrailingBreaks(root: ParentNode): void {
+  for (const block of Array.from(root.querySelectorAll('p,div,section,li,blockquote'))) {
+    while (block.lastElementChild?.tagName === 'BR') {
+      block.lastElementChild.remove()
+    }
+  }
+}
+
+function unwrapConfiguredContainers(root: ParentNode, config: PreprocessConfig): void {
+  if (config.unwrapNestedFigures) {
+    for (const figure of Array.from(root.querySelectorAll('figure figure'))) unwrap(figure)
+  }
+
+  if (config.unwrapSingleChildSpans) {
+    for (const span of Array.from(root.querySelectorAll('span > span:only-child'))) unwrap(span)
+  }
+
+  if (config.flattenNestedBold) {
+    for (const bold of Array.from(root.querySelectorAll('b b,strong strong,b strong,strong b'))) {
+      unwrap(bold)
+    }
+  }
+
+  if (config.unwrapSingleChildContainers) {
+    const containers = Array.from(root.querySelectorAll('div,section')).reverse()
+    for (const container of containers) {
+      const nonWhitespaceText = Array.from(container.childNodes)
+        .filter(node => node.nodeType === 3)
+        .some(node => Boolean(node.textContent?.trim()))
+      if (container.attributes.length === 0 && container.children.length === 1 && !nonWhitespaceText) {
+        unwrap(container)
+      }
+    }
+  }
+}
+
+function processCodeBlocks(root: ParentNode, config: PreprocessConfig): void {
+  if (!config.processCodeBlocks) return
+  removeElements(root, 'ul.code-snippet__line-index,ul[class*="code-snippet__line-index"]')
+}
+
+function isVisuallyEmpty(element: Element): boolean {
+  const text = (element.textContent || '').replace(/[\s\u00a0\u200b]/g, '')
+  if (text) return false
+  return !element.querySelector('img,video,audio,canvas,table,pre,code,hr')
+}
+
+function removeEmptyElements(root: ParentNode, config: PreprocessConfig): void {
+  const selectors = new Set<string>()
+  if (config.removeEmptyElements) {
+    for (const selector of [
+      'p', 'div', 'section', 'span', 'blockquote', 'figure', 'figcaption',
+      'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+    ]) selectors.add(selector)
+  }
+  if (config.removeEmptyLines) selectors.add('p')
+  if (config.removeEmptyDivs) selectors.add('div')
+  if (config.removeNestedEmptyContainers) {
+    selectors.add('div')
+    selectors.add('section')
+  }
+  if (selectors.size === 0) return
+
+  let removed = true
+  while (removed) {
+    removed = false
+    const elements = Array.from(root.querySelectorAll(Array.from(selectors).join(','))).reverse()
+    for (const element of elements) {
+      if (!element.parentNode || !isVisuallyEmpty(element)) continue
+      element.remove()
+      removed = true
+    }
+  }
+}
+
+function bodyContent(root: HTMLElement, config: PreprocessConfig): string {
+  const body = root.querySelector('html > body')
+  if (!body) return root.innerHTML
+
+  const styles = config.keepStyles
+    ? Array.from(root.querySelectorAll('html > head style')).map(style => style.outerHTML).join('')
+    : ''
+  return styles + body.innerHTML
+}
+
+function sanitizeHtml(html: string, config: PreprocessConfig): string {
+  const { document, root } = parseFragment(html)
+
+  removeElements(root, 'script,object,embed,base')
+  if (!config.keepStyles) removeElements(root, 'style,link[rel="stylesheet"]')
+  if (config.removeIframes) removeElements(root, 'iframe')
+  if (config.removeComments) removeComments(root)
+
+  sanitizeAttributes(root)
+  removeSpecialTags(root, config)
+  processCodeBlocks(root, config)
+  processImages(root, config)
+  removeConfiguredAttributes(root, config)
+  convertSections(root, document, config)
+  removeExternalLinks(root, config)
+  if (config.removeTrailingBr) removeTrailingBreaks(root)
+  unwrapConfiguredContainers(root, config)
+  removeEmptyElements(root, config)
+
+  const result = bodyContent(root, config).trim()
+  return config.compactHtml ? result.replace(/>\s+</g, '><') : result
+}
+
+function stripMarkup(markdown: string): string {
+  return markdown
+    .replace(/!\[[^\]]*]\([^)]*\)/g, '')
+    .replace(/\[([^\]]+)]\([^)]*\)/g, '$1')
+    .replace(/```[^\n]*\n([\s\S]*?)```/g, '$1')
+    .replace(/~~~[^\n]*\n([\s\S]*?)~~~/g, '$1')
+    .replace(/^\s{0,3}#{1,6}[ \t]+/gm, '')
+    .replace(/^\s{0,3}>[ \t]?/gm, '')
+    .replace(/^\s{0,3}(?:[-+*]|\d+[.)])[ \t]+/gm, '')
+    .replace(/^\s{0,3}(?:[-*_][ \t]*){3,}$/gm, '')
+    .replace(/`([^`\n]+)`/g, '$1')
+    .replace(/(\*\*|__)(.*?)\1/g, '$2')
+    .replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, '$1')
+    .replace(/(?<!_)_([^_\n]+)_(?!_)/g, '$1')
+    .replace(/~~(.*?)~~/g, '$1')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\\([\\`*_[\]{}()#+\-.!>])/g, '$1')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, character => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[character] || character)
+}
+
+function textToHtml(text: string): string {
+  if (!text) return ''
+  return text
+    .split(/\n{2,}/)
+    .map(paragraph => `<p>${escapeHtml(paragraph).replace(/\n/g, '<br>')}</p>`)
+    .join('')
+}
+
+function countImages(html: string, cover?: string): number {
+  const { root } = parseFragment(html)
+  const sources = new Set<string>()
+  if (cover?.trim()) sources.add(cover.trim())
+  for (const image of Array.from(root.querySelectorAll('img'))) {
+    const src = image.getAttribute('src')?.trim()
+    if (src) sources.add(src)
+  }
+  return sources.size
+}
+
+function buildWarnings(
+  title: string,
+  imageCount: number,
+  limits: PlatformPreparedArticle['limits']
+): string[] {
+  const warnings: string[] = []
+  if (limits.maxTitleLength && Array.from(title).length > limits.maxTitleLength) {
+    warnings.push(`标题超过平台上限 ${limits.maxTitleLength} 字`)
+  }
+  if (limits.maxImages && imageCount > limits.maxImages) {
+    warnings.push(`图片数量超过平台上限 ${limits.maxImages} 张`)
+  }
+  return warnings
+}
+
+function previewHtml(
+  format: PreparedFormat,
+  content: string,
+  html: string,
+  config: PreprocessConfig
+): string {
+  if (format === 'html') return html
+  if (format === 'text') return textToHtml(content)
+  return sanitizeHtml(markdownToHtml(content), config)
+}
+
+function resolveFormat(platform: PlatformMeta, config: PreprocessConfig): PreparedFormat {
+  return TEXT_PLATFORM_IDS.has(platform.id) ? 'text' : config.outputFormat
+}
+
+export function prepareArticleForPlatform(
+  article: Article,
+  platformId: string
+): PlatformPreparedArticle {
+  const entry = createDefaultAdapterEntries().find(item => item.meta.id === platformId)
+  if (!entry) throw new Error(`平台不存在: ${platformId}`)
+
+  const config: PreprocessConfig = {
+    ...DEFAULT_PREPROCESS_CONFIG,
+    ...(entry.preprocessConfig || {}),
+  }
+  const format = resolveFormat(entry.meta, config)
+  const canonicalHtml = article.html?.trim()
+    ? article.html
+    : markdownToHtml(article.markdown || '')
+  const html = sanitizeHtml(canonicalHtml, config)
+  const markdown = htmlToMarkdown(html)
+  const content = format === 'html'
+    ? html
+    : format === 'markdown'
+      ? markdown
+      : stripMarkup(markdown)
+  const imageCount = countImages(html, article.cover)
+  const limits = { ...(PLATFORM_LIMITS[platformId] || {}) }
+
+  return {
+    platform: entry.meta.id,
+    title: article.title,
+    format,
+    content,
+    htmlPreview: previewHtml(format, content, html, config),
+    imageCount,
+    warnings: buildWarnings(article.title, imageCount, limits),
+    limits,
+    article: {
+      ...article,
+      html,
+      markdown: format === 'text' ? content : markdown,
+    },
+  }
+}
