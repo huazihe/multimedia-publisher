@@ -123,6 +123,18 @@ test('infers all supported HTML fragments without confusing Markdown autolinks o
     '<section>章节</section>',
     '<div>容器</div>',
     '<p>段落</p>',
+    '<strong>加粗</strong>',
+    '<em>强调</em>',
+    '<b>粗体</b>',
+    '<i>斜体</i>',
+    '<u>下划线</u>',
+    '<s>删除</s>',
+    '<del>删除</del>',
+    '<span>行内容器</span>',
+    '<caption>表题</caption>',
+    '<colgroup></colgroup>',
+    '<col>',
+    '<tfoot></tfoot>',
   ];
   for (const fragment of htmlFragments) {
     assert.equal(inferImportFormat('', fragment), 'html', fragment);
@@ -212,7 +224,85 @@ test('implements roving tabindex and keyboard navigation for import and platform
   assert.match(appSource, /class="platform-preview-tabs" role="tablist"/);
   assert.match(appSource, /role="tab"[^>]+aria-controls="platform-preview-panel"[^>]+aria-selected=[^>]+tabindex=/);
   assert.match(appSource, /id="platform-preview-panel"[^>]+role="tabpanel"[^>]+aria-labelledby=/);
-  assert.match(appSource, /focusedPlatform[\s\S]*?\?\.focus\(\)/);
+});
+
+function renderPlatformWorkspace(activePlatform) {
+  const source = extractFunctionSource(appSource, 'platformAdaptationHtml', 'platformPaneFocusKey');
+  assert.ok(source);
+  const featured = ['weixin', 'zhihu', 'juejin', 'xiaohongshu', 'toutiao'];
+  const platforms = [...featured, 'csdn'].map(id => ({ id, name: id === 'csdn' ? 'CSDN' : id }));
+  const render = vm.runInNewContext(`(${source})`, {
+    state: { activePreviewPlatform: activePlatform, data: { platforms }, previewDevice: 'desktop' },
+    FEATURED_PREVIEW_PLATFORMS: featured,
+    ensureActivePreviewPlatform: () => {},
+    previewPlatformRecord: id => platforms.find(platform => platform.id === id),
+    platformTabId: id => `platform-preview-tab-${id}`,
+    platformName: id => platforms.find(platform => platform.id === id)?.name || id,
+    escapeHtml: value => String(value ?? ''),
+    platformAvatar: () => '',
+    wechatTemplateControls: () => '<div>微信模板</div>',
+    platformPreviewResult: () => '<div>预览</div>',
+  });
+  return parseHTML(`<main>${render({ id: 'content-1' })}</main>`).document;
+}
+
+test('keeps exactly five featured platform tabs when another platform is selected', () => {
+  const featured = ['weixin', 'zhihu', 'juejin', 'xiaohongshu', 'toutiao'];
+  const documentWithOther = renderPlatformWorkspace('csdn');
+  const tabs = [...documentWithOther.querySelectorAll('.platform-preview-tabs [role="tab"]')];
+  assert.deepEqual(tabs.map(tab => tab.dataset.platform), featured);
+  assert.equal(tabs.length, 5);
+  assert.equal(tabs.filter(tab => tab.getAttribute('aria-selected') === 'true').length, 0);
+  assert.deepEqual(tabs.filter(tab => tab.getAttribute('tabindex') === '0').map(tab => tab.dataset.platform), ['weixin']);
+  assert.equal(documentWithOther.querySelector('[data-platform-preview-select] option[selected]')?.value, 'csdn');
+  assert.match(documentWithOther.querySelector('.platform-adaptation-head h2').textContent, /CSDN/);
+  assert.equal(documentWithOther.querySelector('#platform-preview-panel').getAttribute('aria-label'), 'CSDN 平台适配预览');
+
+  const documentWithFeatured = renderPlatformWorkspace('zhihu');
+  const featuredTabs = [...documentWithFeatured.querySelectorAll('.platform-preview-tabs [role="tab"]')];
+  assert.equal(featuredTabs.length, 5);
+  assert.deepEqual(featuredTabs.filter(tab => tab.getAttribute('aria-selected') === 'true').map(tab => tab.dataset.platform), ['zhihu']);
+  assert.deepEqual(featuredTabs.filter(tab => tab.getAttribute('tabindex') === '0').map(tab => tab.dataset.platform), ['zhihu']);
+  assert.equal(documentWithFeatured.querySelector('#platform-preview-panel').getAttribute('aria-labelledby'), 'platform-preview-tab-zhihu');
+});
+
+test('restores focus for platform selector, device controls, and featured tabs after rerender', () => {
+  const keySource = extractFunctionSource(appSource, 'platformPaneFocusKey', 'restorePlatformPaneFocus');
+  const restoreSource = extractFunctionSource(appSource, 'restorePlatformPaneFocus', 'renderPlatformAdaptationPane');
+  assert.ok(keySource, '缺少稳定焦点键读取函数');
+  assert.ok(restoreSource, '缺少重绘后焦点恢复函数');
+  const platformPaneFocusKey = vm.runInNewContext(`(${keySource})`);
+  const restorePlatformPaneFocus = vm.runInNewContext(`(${restoreSource})`);
+  const { document: focusDocument } = parseHTML(`
+    <section id="focus-host">
+      <select data-platform-focus-key="selector"><option>CSDN</option></select>
+      <button data-platform-focus-key="device:desktop">桌面</button>
+      <button data-platform-focus-key="device:mobile">手机</button>
+      <button role="tab" data-platform-focus-key="tab:weixin">微信</button>
+    </section>
+    <button id="outside">外部</button>
+  `);
+  const host = focusDocument.querySelector('#focus-host');
+  const controls = [...host.querySelectorAll('[data-platform-focus-key]')];
+  assert.deepEqual(controls.map(control => platformPaneFocusKey(control, host)), [
+    'selector',
+    'device:desktop',
+    'device:mobile',
+    'tab:weixin',
+  ]);
+  assert.equal(platformPaneFocusKey(focusDocument.querySelector('#outside'), host), '');
+
+  let restored = '';
+  controls.forEach(control => {
+    control.focus = () => { restored = control.dataset.platformFocusKey; };
+  });
+  for (const key of ['selector', 'device:desktop', 'device:mobile', 'tab:weixin']) {
+    restored = '';
+    restorePlatformPaneFocus(host, key);
+    assert.equal(restored, key);
+  }
+  assert.match(appSource, /const focusKey\s*=\s*platformPaneFocusKey\(document\.activeElement, host\)/);
+  assert.match(appSource, /restorePlatformPaneFocus\(host, focusKey\)/);
 });
 
 test('defines an explicit article/platform/mode publish confirmation dialog', () => {

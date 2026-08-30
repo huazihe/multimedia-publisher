@@ -1007,10 +1007,8 @@ function platformAdaptationHtml(content) {
   const platform = state.activePreviewPlatform;
   const allPlatforms = state.data?.platforms || [];
   const featured = FEATURED_PREVIEW_PLATFORMS.map(id => previewPlatformRecord(id));
-  const tabPlatforms = featured.some(item => item.id === platform)
-    ? featured
-    : [...featured, previewPlatformRecord(platform)];
-  const activeTabId = platformTabId(platform);
+  const activeIsFeatured = FEATURED_PREVIEW_PLATFORMS.includes(platform);
+  const rovingTabPlatform = activeIsFeatured ? platform : FEATURED_PREVIEW_PLATFORMS[0];
   return `
     <div class="platform-adaptation-head">
       <div>
@@ -1018,14 +1016,14 @@ function platformAdaptationHtml(content) {
         <h2>${escapeHtml(platformName(platform))} 预览</h2>
       </div>
       <div class="preview-device-control" role="group" aria-label="预览设备">
-        <button type="button" data-action="select-preview-device" data-preview-device="desktop" class="${state.previewDevice === 'desktop' ? 'active' : ''}" aria-pressed="${state.previewDevice === 'desktop'}">桌面</button>
-        <button type="button" data-action="select-preview-device" data-preview-device="mobile" class="${state.previewDevice === 'mobile' ? 'active' : ''}" aria-pressed="${state.previewDevice === 'mobile'}">手机</button>
+        <button type="button" data-action="select-preview-device" data-preview-device="desktop" data-platform-focus-key="device:desktop" class="${state.previewDevice === 'desktop' ? 'active' : ''}" aria-pressed="${state.previewDevice === 'desktop'}">桌面</button>
+        <button type="button" data-action="select-preview-device" data-preview-device="mobile" data-platform-focus-key="device:mobile" class="${state.previewDevice === 'mobile' ? 'active' : ''}" aria-pressed="${state.previewDevice === 'mobile'}">手机</button>
       </div>
     </div>
 
     <div class="platform-preview-tabs" role="tablist" aria-label="常用平台">
-      ${tabPlatforms.map(item => `
-        <button id="${escapeHtml(platformTabId(item.id))}" type="button" role="tab" aria-controls="platform-preview-panel" aria-selected="${platform === item.id}" tabindex="${platform === item.id ? '0' : '-1'}" class="platform-preview-tab ${platform === item.id ? 'active' : ''}" data-action="select-preview-platform" data-platform="${escapeHtml(item.id)}">
+      ${featured.map(item => `
+        <button id="${escapeHtml(platformTabId(item.id))}" type="button" role="tab" aria-controls="platform-preview-panel" aria-selected="${platform === item.id}" tabindex="${rovingTabPlatform === item.id ? '0' : '-1'}" class="platform-preview-tab ${platform === item.id ? 'active' : ''}" data-action="select-preview-platform" data-platform="${escapeHtml(item.id)}" data-platform-focus-key="tab:${escapeHtml(item.id)}">
           ${platformAvatar(item)}
           <span>${escapeHtml(item.name)}</span>
         </button>
@@ -1034,12 +1032,12 @@ function platformAdaptationHtml(content) {
 
     <label class="all-platform-selector" for="platform-preview-select">
       <span>全部平台</span>
-      <select id="platform-preview-select" data-platform-preview-select>
+      <select id="platform-preview-select" data-platform-preview-select data-platform-focus-key="selector">
         ${allPlatforms.map(item => `<option value="${escapeHtml(item.id)}" ${platform === item.id ? 'selected' : ''}>${escapeHtml(item.name || item.id)}</option>`).join('')}
       </select>
     </label>
 
-    <div id="platform-preview-panel" class="platform-preview-panel" role="tabpanel" aria-labelledby="${escapeHtml(activeTabId)}">
+    <div id="platform-preview-panel" class="platform-preview-panel" role="tabpanel" ${activeIsFeatured ? `aria-labelledby="${escapeHtml(platformTabId(platform))}"` : `aria-label="${escapeHtml(platformName(platform))} 平台适配预览"`}>
       ${platform === 'weixin' ? wechatTemplateControls(content) : ''}
 
       <div class="platform-preview-live" data-platform-preview-live>
@@ -1054,19 +1052,25 @@ function platformAdaptationHtml(content) {
   `;
 }
 
+function platformPaneFocusKey(element, host) {
+  if (!element || !host?.contains(element)) return '';
+  return element.closest?.('[data-platform-focus-key]')?.dataset.platformFocusKey || '';
+}
+
+function restorePlatformPaneFocus(host, focusKey) {
+  if (!host || !focusKey) return;
+  [...host.querySelectorAll('[data-platform-focus-key]')]
+    .find(control => control.dataset.platformFocusKey === focusKey)
+    ?.focus();
+}
+
 function renderPlatformAdaptationPane() {
   const host = $('[data-platform-adaptation-pane]');
   const content = getSelectedContent();
   if (!host || !content || host.dataset.contentId !== String(content.id)) return;
-  const focusedPlatform = host.contains(document.activeElement)
-    ? document.activeElement?.closest?.('[role="tab"][data-platform]')?.dataset.platform
-    : '';
+  const focusKey = platformPaneFocusKey(document.activeElement, host);
   host.innerHTML = platformAdaptationHtml(content);
-  if (focusedPlatform) {
-    [...host.querySelectorAll('[role="tab"][data-platform]')]
-      .find(tab => tab.dataset.platform === focusedPlatform)
-      ?.focus();
-  }
+  restorePlatformPaneFocus(host, focusKey);
 }
 
 function renderContent() {
@@ -1761,7 +1765,7 @@ function inferImportFormat(filename, content) {
     .replace(/^(?: {4}|\t).+$/gm, '')
     .replace(/(`+)([\s\S]*?)\1/g, '')
     .replace(markdownAutolink, '');
-  const htmlElement = /<!doctype\s+html\b|<\s*\/?\s*(?:html|head|body|main|article|section|div|p|h[1-6]|ul|ol|li|blockquote|table|thead|tbody|tr|th|td|figure|figcaption|pre|code|hr|br|img|a)(?=\s|\/?>)[^>]*>/i;
+  const htmlElement = /<!doctype\s+html\b|<\s*\/?\s*(?:html|head|body|main|article|section|div|p|h[1-6]|ul|ol|li|blockquote|table|thead|tbody|tfoot|tr|th|td|caption|colgroup|col|figure|figcaption|pre|code|hr|br|img|a|strong|em|b|i|u|s|del|span)(?=\s|\/?>)[^>]*>/i;
   if (htmlElement.test(htmlProbe)) return 'html';
   const markdownSyntax = /^\s*(?:#{1,6}\s+|[-*+]\s+|>\s+|```|~~~)|^(?: {4}|\t)\S|\[[^\]]+\]\([^)]+\)|<(?:[a-z][a-z0-9+.-]{1,31}:[^<>\s]+|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})>|`+/im;
   if (markdownSyntax.test(source)) return 'markdown';
