@@ -7,6 +7,7 @@ const { randomBytes } = require('node:crypto');
 const { execFile, spawn } = require('child_process');
 const net = require('net');
 const { DatabaseSync } = require('node:sqlite');
+const { listLayoutTemplates, renderLayoutTemplate } = require('./layout-templates');
 
 const ROOT = __dirname;
 const REPO_ROOT = path.resolve(ROOT, '..');
@@ -1916,10 +1917,17 @@ function generateContent(planDate, explicitTopic) {
   return normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
 }
 
-function layoutContent(contentId) {
+function layoutContent(contentId, template) {
   const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
   if (!content) throw new Error('内容不存在');
-  const html = buildLayoutHtml(content.title, content.body);
+  const hasTemplate = template !== undefined && template !== null && template !== '';
+  const html = hasTemplate
+    ? renderLayoutTemplate(template, {
+      title: content.title,
+      summary: content.summary || '',
+      body: content.body,
+    })
+    : buildLayoutHtml(content.title, content.body);
   db.prepare("UPDATE contents SET layout_html = ?, status = '已排版', updated_at = ? WHERE id = ?")
     .run(html, now(), contentId);
   if (content.plan_date) {
@@ -2409,6 +2417,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === '/api/layout-templates' && req.method === 'GET') {
+      sendJson(res, { ok: true, templates: listLayoutTemplates() });
+      return;
+    }
+
     if (url.pathname === '/api/platforms' && req.method === 'GET') {
       const refresh = url.searchParams.get('refresh') === '1';
       if (refresh) {
@@ -2588,7 +2601,8 @@ const server = http.createServer(async (req, res) => {
 
     const layoutMatch = url.pathname.match(/^\/api\/content\/([^/]+)\/layout$/);
     if (layoutMatch && req.method === 'POST') {
-      sendJson(res, { ok: true, content: layoutContent(layoutMatch[1]) });
+      const body = await readBody(req);
+      sendJson(res, { ok: true, content: layoutContent(layoutMatch[1], body.template) });
       return;
     }
 

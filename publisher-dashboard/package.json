@@ -7,6 +7,9 @@
     "start": "node server.js",
     "test": "node --test"
   },
+  "dependencies": {
+    "linkedom": "^0.18.12"
+  },
   "engines": {
     "node": ">=22.5.0"
   }
