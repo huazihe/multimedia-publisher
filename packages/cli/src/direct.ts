@@ -8,8 +8,10 @@ import {
   adapterRegistry,
   htmlToMarkdown,
   markdownToHtml,
+  prepareArticleForPlatform,
   registerDefaultAdapters,
   type Article,
+  type PlatformPreparedArticle,
   type SyncResult,
 } from '@weibot/core'
 import { createNodeRuntime } from '@weibot/core/runtime/node'
@@ -41,6 +43,14 @@ interface DirectSyncOptions {
   dryRun?: boolean
   direct?: boolean
 }
+
+export interface DirectPreviewOptions {
+  platform: string
+  title?: string
+  cover?: string
+}
+
+type DirectArticleOptions = Pick<DirectPreviewOptions, 'title' | 'cover'>
 
 interface LocalImage {
   originalRef: string
@@ -408,13 +418,17 @@ function resolveLocalImagePath(localPath: string, basePath: string): string {
   return path.resolve(basePath, localPath)
 }
 
-function convertLocalImagesToDataUri(content: string, basePath: string): string {
+function convertLocalImagesToDataUri(
+  content: string,
+  basePath: string,
+  onMissingImage?: (localPath: string) => void
+): string {
   let processedContent = content
   for (const image of findLocalImages(content, basePath)) {
     const absolutePath = resolveLocalImagePath(image.localPath, basePath)
     const dataUri = readImageAsDataUri(absolutePath)
     if (!dataUri) {
-      console.log(chalk.yellow(`  璺宠繃鏈湴鍥剧墖: ${image.localPath}`))
+      onMissingImage?.(image.localPath)
       continue
     }
     processedContent = processedContent.replace(image.localPath, dataUri)
@@ -430,7 +444,11 @@ function resolveCover(cover: string | undefined, basePath: string): string | und
   return dataUri
 }
 
-function buildArticle(filePath: string, options: DirectSyncOptions): Article {
+function buildArticle(
+  filePath: string,
+  options: DirectArticleOptions,
+  onMissingImage?: (localPath: string) => void
+): Article {
   const parsed = parseFileContent(filePath)
   const title = options.title || parsed.title
   if (!title) {
@@ -439,11 +457,11 @@ function buildArticle(filePath: string, options: DirectSyncOptions): Article {
 
   const basePath = path.dirname(filePath)
   const markdown = parsed.format === 'markdown'
-    ? convertLocalImagesToDataUri(parsed.content, basePath)
-    : htmlToMarkdown(convertLocalImagesToDataUri(parsed.content, basePath))
+    ? convertLocalImagesToDataUri(parsed.content, basePath, onMissingImage)
+    : htmlToMarkdown(convertLocalImagesToDataUri(parsed.content, basePath, onMissingImage))
   const html = parsed.format === 'html'
-    ? convertLocalImagesToDataUri(parsed.content, basePath)
-    : convertLocalImagesToDataUri(markdownToHtml(parsed.content), basePath)
+    ? convertLocalImagesToDataUri(parsed.content, basePath, onMissingImage)
+    : convertLocalImagesToDataUri(markdownToHtml(parsed.content), basePath, onMissingImage)
 
   return {
     title,
@@ -452,6 +470,23 @@ function buildArticle(filePath: string, options: DirectSyncOptions): Article {
     cover: resolveCover(options.cover || parsed.cover, basePath),
     summary: parsed.summary,
   }
+}
+
+export function buildPlatformPreview(
+  file: string,
+  platform: string,
+  options: Pick<DirectPreviewOptions, 'title' | 'cover'> = {}
+): PlatformPreparedArticle {
+  const article = buildArticle(path.resolve(file), options)
+  return prepareArticleForPlatform(article, platform.trim().toLowerCase())
+}
+
+export async function runDirectPreview(
+  file: string,
+  options: DirectPreviewOptions
+): Promise<void> {
+  const preview = buildPlatformPreview(file, options.platform, options)
+  console.log(JSON.stringify(preview))
 }
 
 function printResults(results: SyncResult[]): void {
@@ -492,7 +527,9 @@ export async function runDirectSync(
     process.exit(1)
   }
 
-  const article = buildArticle(filePath, options)
+  const article = buildArticle(filePath, options, localPath => {
+    console.log(chalk.yellow(`  璺宠繃鏈湴鍥剧墖: ${localPath}`))
+  })
   const directMode = Boolean(options.direct)
 
   console.log()
@@ -528,7 +565,8 @@ export async function runDirectSync(
 
     const spinner = ora(`${directMode ? '发布到' : '同步到'} ${platform}...`).start()
     try {
-      const result = await adapter.publish(article, {
+      const prepared = prepareArticleForPlatform(article, platform)
+      const result = await adapter.publish(prepared.article, {
         draftOnly: true,
         publishMode: directMode ? 'direct' : 'draft',
       })

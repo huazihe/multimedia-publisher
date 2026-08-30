@@ -2,12 +2,13 @@ import { Command } from 'commander'
 import {
   runDirectAuth,
   runDirectPlatforms,
+  runDirectPreview,
   runDirectSync,
   type DirectRuntimeOptions,
 } from './direct'
 import { runDirectLogin } from './login'
 
-const program = new Command()
+export const program = new Command()
 
 function parseRuntimeOptions(): DirectRuntimeOptions {
   const options = program.opts()
@@ -73,6 +74,16 @@ program
   .option('--dry-run', '仅显示将要执行的操作，不实际同步')
   .action(async (file: string, options) => {
     await runDirectSync(file, options, parseRuntimeOptions()).catch(handleError)
+  })
+
+program
+  .command('preview <file>')
+  .description('预览 Markdown/HTML 的平台适配结果')
+  .requiredOption('-p, --platform <platform>', '目标平台')
+  .option('-t, --title <title>', '文章标题，默认从文件提取')
+  .option('--cover <url>', '封面图 URL 或本地路径')
+  .action(async (file: string, options) => {
+    await runDirectPreview(file, options).catch(handleError)
   })
 
 program
