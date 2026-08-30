@@ -475,6 +475,35 @@ test('removes dangerous imported HTML while preserving safe article markup', () 
   }
 });
 
+test('removes paired and self-closing style elements while preserving article structure', () => {
+  let content;
+  try {
+    content = importContent({
+      filename: 'style-attack.html',
+      body: [
+        '<article>',
+        '<style>',
+        String.raw`.encoded { background-image: url(\6a avascript:alert(1)); }`,
+        '.spaced { background-image: url(',
+        '  javascript:alert(2)',
+        '); }',
+        '.data { background-image: url("data:text/html,%3Cscript%3Ealert(3)%3C/script%3E"); }',
+        '</style>',
+        '<style data-source="remove-me" />',
+        '<h2>安全标题</h2><p>安全正文</p>',
+        '<table><tr><td>安全表格</td></tr></table>',
+        '</article>',
+      ].join('\n'),
+    });
+
+    assert.doesNotMatch(content.body, /<style\b|background-image|javascript\s*:|data\s*:\s*text\/html/i);
+    assert.match(content.body, /<h2>安全标题<\/h2><p>安全正文<\/p>/);
+    assert.match(content.body, /<table><tr><td>安全表格<\/td><\/tr><\/table>/);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
 test('sanitizes a pasted HTML fragment without a filename', () => {
   let content;
   try {

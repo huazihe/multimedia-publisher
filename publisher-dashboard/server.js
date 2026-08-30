@@ -1285,7 +1285,7 @@ function titleFromMarkdown(body, fallback = '未命名内容') {
 }
 
 const IMPORT_BLOCKED_ELEMENTS = new Set([
-  'script', 'iframe', 'object', 'embed', 'meta', 'link',
+  'script', 'style', 'iframe', 'object', 'embed', 'meta', 'link',
   'svg', 'animate', 'animatemotion', 'animatetransform', 'set', 'use', 'image', 'foreignobject',
   'mpath', 'feimage', 'symbol', 'defs', 'pattern', 'mask', 'clippath', 'lineargradient',
   'radialgradient', 'filter', 'marker',
@@ -1339,7 +1339,7 @@ function sanitizeImportedTag(tag) {
 
 function sanitizeImportedHtml(value) {
   let sanitized = String(value || '');
-  for (const tagName of ['script', 'iframe', 'object', 'svg']) {
+  for (const tagName of ['script', 'style', 'iframe', 'object', 'svg']) {
     const pairedElement = new RegExp(`<\\s*${tagName}\\b[^>]*>[\\s\\S]*?<\\s*\\/\\s*${tagName}\\s*>`, 'gi');
     let previous;
     do {
@@ -1466,7 +1466,7 @@ function importedHtmlMode(filename, body, format) {
     || /^<html[\s>]/i.test(source)) return 'explicit';
 
   const probe = importedHtmlDetectionProbe(source);
-  return /<\s*\/?\s*(?:head|body|article|section|main|aside|nav|header|footer|div|p|h[1-6]|table|thead|tbody|tfoot|tr|th|td|ul|ol|li|blockquote|img|figure|figcaption|pre|code|br|hr|a|form|input|button|video|audio|source|canvas|script|iframe|object|embed|meta|link|svg)\b/i.test(probe)
+  return /<\s*\/?\s*(?:head|body|article|section|main|aside|nav|header|footer|div|p|h[1-6]|table|thead|tbody|tfoot|tr|th|td|ul|ol|li|blockquote|img|figure|figcaption|pre|code|br|hr|a|form|input|button|video|audio|source|canvas|style|script|iframe|object|embed|meta|link|svg)\b/i.test(probe)
     ? 'mixed'
     : '';
 }
