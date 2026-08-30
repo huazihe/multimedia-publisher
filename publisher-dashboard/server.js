@@ -1329,9 +1329,8 @@ function sanitizeImportedTag(tag) {
   for (const match of rawAttributes.matchAll(attributePattern)) {
     const attributeName = match[1].toLowerCase();
     const attributeValue = match[2] ?? match[3] ?? match[4] ?? '';
-    if (attributeName.startsWith('on') || attributeName === 'srcdoc') continue;
+    if (attributeName.startsWith('on') || attributeName === 'srcdoc' || attributeName === 'style') continue;
     if (IMPORT_URL_ATTRIBUTES.has(attributeName) && isDangerousImportedUrl(attributeValue, attributeName)) continue;
-    if (attributeName === 'style' && /(?:expression\s*\(|javascript\s*:|data\s*:\s*text\/html)/i.test(decodeImportedUrl(attributeValue))) continue;
     safeAttributes.push(match[0].trim());
   }
   return `<${tagName}${safeAttributes.length ? ` ${safeAttributes.join(' ')}` : ''}${selfClosing ? ' /' : ''}>`;

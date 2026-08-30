@@ -504,6 +504,28 @@ test('removes paired and self-closing style elements while preserving article st
   }
 });
 
+test('removes every inline style attribute while preserving safe attributes', () => {
+  let content;
+  try {
+    content = importContent({
+      filename: 'inline-style-attack.html',
+      body: [
+        String.raw`<article id="root" class="story" data-kind="article" style="background:url(\6a avascript:alert(1))">`,
+        String.raw`<p class="lead" title="安全提示" style="background:url(d\61 ta:text/html;%3Cscript%3E)">安全正文</p>`,
+        '<img src="https://safe.example/image.png" alt="安全图片" width="640" style="color:red">',
+        '</article>',
+      ].join(''),
+    });
+
+    assert.doesNotMatch(content.body, /\sstyle\s*=|url\s*\(/i);
+    assert.match(content.body, /<article id="root" class="story" data-kind="article">/);
+    assert.match(content.body, /<p class="lead" title="安全提示">安全正文<\/p>/);
+    assert.match(content.body, /<img src="https:\/\/safe\.example\/image\.png" alt="安全图片" width="640">/);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
 test('sanitizes a pasted HTML fragment without a filename', () => {
   let content;
   try {
