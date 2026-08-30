@@ -206,6 +206,41 @@ test('preserves a script element inside a Markdown code fence as text', () => {
   }
 });
 
+test('sanitizes mixed HTML while restoring protected Markdown literals byte-for-byte', () => {
+  let content;
+  try {
+    const autolink = '<https://safe.example/path>';
+    const fencedBlock = [
+      '```html',
+      '<script>alert("示例")</script>',
+      '```',
+    ].join('\n');
+    const forgedToken = '__WEIBOT_IMPORT_PROTECTED_deadbeef_0__';
+    const body = [
+      '# 混合文章',
+      '',
+      '<article onclick="alert(1)">',
+      '<script>alert("危险")</script>',
+      '<p><a href="javascript:alert(1)">保留正文</a></p>',
+      `<p>${forgedToken}</p>`,
+      '</article>',
+      '',
+      `访问 ${autolink}`,
+      '',
+      fencedBlock,
+    ].join('\n');
+    content = importContent({ filename: 'mixed.md', body });
+
+    assert.doesNotMatch(content.body, /onclick\s*=|href="javascript:|alert\("危险"\)/i);
+    assert.match(content.body, /<article>\s*<p><a>保留正文<\/a><\/p>/);
+    assert.ok(content.body.includes(autolink));
+    assert.equal(content.body.slice(content.body.indexOf('```html')), fencedBlock);
+    assert.ok(content.body.includes(forgedToken));
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
 test('explicit imported title wins over the Markdown heading', () => {
   let content;
   try {

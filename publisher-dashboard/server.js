@@ -3,6 +3,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { randomBytes } = require('node:crypto');
 const { execFile, spawn } = require('child_process');
 const net = require('net');
 const { DatabaseSync } = require('node:sqlite');
@@ -1381,6 +1382,77 @@ function importedHtmlDetectionProbe(body) {
   }).join('\n');
 }
 
+function protectImportedFencedCode(body, protect) {
+  const source = String(body || '');
+  const linePattern = /[^\r\n]*(?:\r\n|\r|\n|$)/g;
+  let output = '';
+  let cursor = 0;
+  let fenceStart = -1;
+  let fenceCharacter = '';
+  let fenceLength = 0;
+  let match;
+
+  while ((match = linePattern.exec(source))) {
+    const fullLine = match[0];
+    if (!fullLine) break;
+    const line = fullLine.replace(/(?:\r\n|\r|\n)$/, '');
+
+    if (fenceStart === -1) {
+      const openingFence = line.match(/^[ \t]{0,3}(`{3,}|~{3,})/);
+      if (!openingFence) continue;
+      fenceStart = match.index;
+      fenceCharacter = openingFence[1][0];
+      fenceLength = openingFence[1].length;
+      continue;
+    }
+
+    const closingFence = line.match(/^[ \t]{0,3}(`+|~+)[ \t]*$/);
+    if (!closingFence
+      || closingFence[1][0] !== fenceCharacter
+      || closingFence[1].length < fenceLength) continue;
+
+    const fenceEnd = match.index + fullLine.length;
+    output += source.slice(cursor, fenceStart);
+    output += protect(source.slice(fenceStart, fenceEnd));
+    cursor = fenceEnd;
+    fenceStart = -1;
+    fenceCharacter = '';
+    fenceLength = 0;
+  }
+
+  if (fenceStart !== -1) {
+    output += source.slice(cursor, fenceStart);
+    output += protect(source.slice(fenceStart));
+    cursor = source.length;
+  }
+  return output + source.slice(cursor);
+}
+
+function protectImportedMarkdownLiterals(body) {
+  const source = String(body || '');
+  let namespace;
+  do {
+    namespace = `__WEIBOT_IMPORT_PROTECTED_${randomBytes(18).toString('hex')}_`;
+  } while (source.includes(namespace));
+
+  const literals = [];
+  const protect = literal => {
+    const token = `${namespace}${literals.length}__`;
+    literals.push(literal);
+    return token;
+  };
+  const protectedFences = protectImportedFencedCode(source, protect);
+  const protectedBody = protectedFences.replace(/<https?:\/\/[^\s<>]+>/gi, protect);
+  const tokenPattern = new RegExp(`${namespace}(\\d+)__`, 'g');
+
+  return {
+    body: protectedBody,
+    restore(value) {
+      return String(value || '').replace(tokenPattern, (token, index) => literals[Number(index)] ?? token);
+    },
+  };
+}
+
 function isImportedHtml(filename, body) {
   if (/\.(?:html|htm)$/i.test(String(filename || ''))) return true;
   const probe = importedHtmlDetectionProbe(body).replace(/^\uFEFF/, '').trimStart();
@@ -1419,9 +1491,11 @@ function importContent(payload = {}) {
     throw new Error('文件格式不支持，仅支持 .md、.markdown、.html、.htm、.txt');
   }
   const trimmedBody = rawBody.trim();
-  const body = isImportedHtml(filename, trimmedBody)
-    ? sanitizeImportedHtml(trimmedBody).trim()
-    : trimmedBody;
+  let body = trimmedBody;
+  if (isImportedHtml(filename, trimmedBody)) {
+    const protectedMarkdown = protectImportedMarkdownLiterals(trimmedBody);
+    body = protectedMarkdown.restore(sanitizeImportedHtml(protectedMarkdown.body).trim());
+  }
   if (!body.trim()) throw new Error('导入正文不能为空');
   const title = String(payload.title || '').trim() || titleFromImportedBody(body, filename);
   const summary = String(payload.summary ?? '').trim()
