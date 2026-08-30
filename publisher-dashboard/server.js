@@ -166,7 +166,7 @@ const RETIRED_PLATFORM_IDS = ['cnaiplus', 'zhike', 'cechina', 'sensorexpert'];
 const CONTENT_TYPES = ['行业分析', '案例复盘', '方法论', '清单指南', '热点解读'];
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 const MAX_IMPORTED_BODY_BYTES = 5 * 1024 * 1024;
-const MAX_IMPORT_REQUEST_BYTES = 6 * 1024 * 1024;
+const MAX_IMPORT_REQUEST_BYTES = 32 * 1024 * 1024;
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(DRAFTS_DIR, { recursive: true });
@@ -456,7 +456,125 @@ function buildArticleBody(topic, type = '行业分析', audience = '内容运营
   ].join('\n');
 }
 
-function markdownToHtml(markdown) {
+function renderImportedMarkdownInline(value) {
+  const source = String(value || '');
+  let namespace;
+  do {
+    namespace = `__WEIBOT_INLINE_${randomBytes(18).toString('hex')}_`;
+  } while (source.includes(namespace));
+
+  const replacements = [];
+  const protect = html => {
+    const token = `${namespace}${replacements.length}__`;
+    replacements.push(html);
+    return token;
+  };
+  let rendered = protectImportedInlineCode(source, literal => {
+    const markerLength = literal.match(/^`+/)?.[0].length || 1;
+    return protect(`<code>${escapeHtml(literal.slice(markerLength, -markerLength))}</code>`);
+  });
+  rendered = replaceImportedMarkdownAutolinks(rendered, autolink => {
+    const label = autolink.slice(1, -1);
+    const href = label.includes(':') ? label : `mailto:${label}`;
+    return protect(`<a href="${escapeHtml(href)}">${escapeHtml(label)}</a>`);
+  }, () => '');
+  rendered = rendered.replace(/<[^>]+>/g, tag => protect(tag));
+  rendered = escapeHtml(rendered);
+  const tokenPattern = new RegExp(`${namespace}(\\d+)__`, 'g');
+  return rendered.replace(tokenPattern, (token, index) => replacements[Number(index)] ?? token);
+}
+
+function markdownToImportedHtml(markdown) {
+  const lines = String(markdown || '').split(/\r?\n/);
+  const output = [];
+  let paragraph = [];
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    output.push(`<p>${paragraph.map(renderImportedMarkdownInline).join('<br>')}</p>`);
+    paragraph = [];
+  };
+
+  for (let index = 0; index < lines.length;) {
+    const line = lines[index];
+    const openingFence = line.match(/^[ \t]{0,3}(`{3,}|~{3,})/);
+    if (openingFence) {
+      flushParagraph();
+      const fenceCharacter = openingFence[1][0];
+      const fenceLength = openingFence[1].length;
+      const codeLines = [];
+      index++;
+      while (index < lines.length) {
+        const closingFence = lines[index].match(/^[ \t]{0,3}(`+|~+)[ \t]*$/);
+        if (closingFence
+          && closingFence[1][0] === fenceCharacter
+          && closingFence[1].length >= fenceLength) {
+          index++;
+          break;
+        }
+        codeLines.push(lines[index]);
+        index++;
+      }
+      output.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+      continue;
+    }
+
+    if (/^(?: {4}|\t)/.test(line)) {
+      flushParagraph();
+      const codeLines = [];
+      while (index < lines.length && /^(?: {4}|\t)/.test(lines[index])) {
+        codeLines.push(lines[index].startsWith('\t') ? lines[index].slice(1) : lines[index].slice(4));
+        index++;
+      }
+      output.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+      continue;
+    }
+
+    if (!line.trim()) {
+      flushParagraph();
+      index++;
+      continue;
+    }
+
+    const heading = line.match(/^[ \t]{0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/);
+    if (heading) {
+      flushParagraph();
+      output.push(`<h${heading[1].length}>${renderImportedMarkdownInline(heading[2])}</h${heading[1].length}>`);
+      index++;
+      continue;
+    }
+
+    const image = line.match(/^[ \t]*!\[([^\]]*)\]\(([^)]+)\)[ \t]*$/);
+    if (image) {
+      flushParagraph();
+      output.push(`<figure><img src="${escapeHtml(image[2])}" alt="${escapeHtml(image[1])}"></figure>`);
+      index++;
+      continue;
+    }
+
+    if (/^[ \t]*<\/?[A-Za-z][^>]*>/.test(line)) {
+      flushParagraph();
+      output.push(renderImportedMarkdownInline(line));
+      index++;
+      continue;
+    }
+
+    paragraph.push(line);
+    index++;
+  }
+  flushParagraph();
+  return output.join('\n');
+}
+
+function textToImportedHtml(text) {
+  return String(text || '')
+    .split(/(?:\r?\n){2,}/)
+    .map(paragraph => `<p>${escapeHtml(paragraph).replace(/\r?\n/g, '<br>')}</p>`)
+    .join('\n');
+}
+
+function markdownToHtml(markdown, options = {}) {
+  if (options.imported) return markdownToImportedHtml(markdown);
   if (isHtmlBody(markdown)) return String(markdown || '');
   return String(markdown || '')
     .split(/\r?\n/)
@@ -1527,33 +1645,6 @@ function replaceImportedMarkdownAutolinks(body, replaceSafe, replaceDangerous) {
   });
 }
 
-function protectImportedMarkdownLiterals(body) {
-  const source = String(body || '');
-  let namespace;
-  do {
-    namespace = `__WEIBOT_IMPORT_PROTECTED_${randomBytes(18).toString('hex')}_`;
-  } while (source.includes(namespace));
-
-  const literals = [];
-  const protect = literal => {
-    const token = `${namespace}${literals.length}__`;
-    literals.push(literal);
-    return token;
-  };
-  let protectedBody = protectImportedFencedCode(source, protect);
-  protectedBody = protectImportedIndentedCode(protectedBody, protect);
-  protectedBody = protectImportedInlineCode(protectedBody, protect);
-  protectedBody = replaceImportedMarkdownAutolinks(protectedBody, protect, () => '');
-  const tokenPattern = new RegExp(`${namespace}(\\d+)__`, 'g');
-
-  return {
-    body: protectedBody,
-    restore(value) {
-      return String(value || '').replace(tokenPattern, (token, index) => literals[Number(index)] ?? token);
-    },
-  };
-}
-
 function containsImportedHtml(body) {
   return /<\s*\/?\s*(?:html|head|title|body|article|section|main|aside|nav|header|footer|div|p|h[1-6]|table|caption|colgroup|col|thead|tbody|tfoot|tr|th|td|ul|ol|li|blockquote|figure|figcaption|pre|code|strong|em|b|i|u|s|a|img|br|hr|form|input|button|select|option|textarea|dialog|details|summary|video|audio|source|canvas|style|script|iframe|object|embed|meta|link|base|template|svg)\b/i.test(String(body || ''));
 }
@@ -1578,13 +1669,30 @@ function importedContentFormat(filename, body, format) {
   return 'text';
 }
 
+function importedHtmlMetadataProbe(body) {
+  let probe = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
+  for (const tagName of IMPORT_BLOCKED_CONTENT_ELEMENTS) {
+    if (tagName === 'head') continue;
+    const pairedElement = new RegExp(`<\\s*${tagName}\\b[^>]*>[\\s\\S]*?<\\s*\\/\\s*${tagName}\\s*>`, 'gi');
+    let previous;
+    do {
+      previous = probe;
+      probe = probe.replace(pairedElement, '');
+    } while (probe !== previous);
+  }
+  return probe.replace(/<\s*\/?\s*(?:meta|link|base)\b[^>]*>/gi, '');
+}
+
 function titleFromImportedBody(body, filename = '', format = 'text', fallback = '未命名文章') {
   const raw = String(body || '');
-  const markdownHeading = raw.match(/^[ \t]{0,3}#[ \t]+(.+?)[ \t]*#*[ \t]*$/m)?.[1];
-  const htmlTitle = raw.match(/<title\b[^>]*>([\s\S]*?)<\/title\s*>/i)?.[1];
-  const htmlHeading = raw.match(/<h1\b[^>]*>([\s\S]*?)<\/h1\s*>/i)?.[1];
+  const markdownProbe = importedHtmlDetectionProbe(raw);
+  const htmlProbe = importedHtmlMetadataProbe(raw);
+  const markdownHeading = markdownProbe.match(/^[ \t]{0,3}#[ \t]+(.+?)[ \t]*#*[ \t]*$/m)?.[1];
+  const htmlTitle = htmlProbe.match(/<title\b[^>]*>([\s\S]*?)<\/title\s*>/i)?.[1];
+  const htmlHeading = htmlProbe.match(/<h1\b[^>]*>([\s\S]*?)<\/h1\s*>/i)?.[1];
   const firstPlainLine = raw.split(/\r?\n/).map(line => line.trim()).find(Boolean);
-  const firstReadableLine = raw.split(/\r?\n/)
+  const readableSource = format === 'html' ? htmlProbe : markdownProbe;
+  const firstReadableLine = readableSource.split(/\r?\n/)
     .map(line => {
       const markdownImage = line.match(/^[ \t]*!\[([^\]]*)\]\([^)]+\)[ \t]*$/);
       return stripHtml(markdownImage ? markdownImage[1] : line).trim();
@@ -1606,32 +1714,49 @@ function titleFromImportedBody(body, filename = '', format = 'text', fallback = 
   return fallback;
 }
 
-function importContent(payload = {}) {
-  const rawBody = String(payload.body ?? '');
+function validateImportPayload(payload) {
+  const prototype = payload && typeof payload === 'object' ? Object.getPrototypeOf(payload) : null;
+  if (payload === null
+    || typeof payload !== 'object'
+    || Array.isArray(payload)
+    || (prototype !== Object.prototype && prototype !== null)) {
+    throw statusError('导入请求必须是 JSON 对象', 400);
+  }
+  for (const field of ['title', 'body', 'summary', 'type', 'filename', 'format']) {
+    if (Object.prototype.hasOwnProperty.call(payload, field) && typeof payload[field] !== 'string') {
+      throw statusError(`导入字段 ${field} 必须是字符串`, 400);
+    }
+  }
+  return payload;
+}
+
+function importContent(payload) {
+  const input = validateImportPayload(payload);
+  const rawBody = input.body ?? '';
   if (!rawBody.trim()) throw statusError('导入正文不能为空', 400);
   if (Buffer.byteLength(rawBody, 'utf8') > MAX_IMPORTED_BODY_BYTES) {
     throw statusError('导入正文不能超过 5 MiB', 400);
   }
-  const filename = String(payload.filename ?? '').trim();
+  const filename = (input.filename ?? '').trim();
   if (filename && !/\.(?:md|markdown|html|htm|txt)$/i.test(filename)) {
     throw statusError('文件格式不支持，仅支持 .md、.markdown、.html、.htm、.txt', 415);
   }
   const trimmedBody = rawBody.trim();
-  const format = importedContentFormat(filename, trimmedBody, payload.format);
-  const title = String(payload.title || '').trim()
+  const format = importedContentFormat(filename, trimmedBody, input.format);
+  const title = (input.title || '').trim()
     || titleFromImportedBody(trimmedBody, filename, format);
-  let body = trimmedBody;
+  let body;
   if (format === 'html') {
     body = sanitizeImportedHtml(trimmedBody).trim();
-  } else if (format === 'mixed'
-    || (format === 'markdown' && containsImportedHtml(importedHtmlDetectionProbe(trimmedBody)))) {
-    const protectedMarkdown = protectImportedMarkdownLiterals(trimmedBody);
-    body = protectedMarkdown.restore(sanitizeImportedHtml(protectedMarkdown.body).trim());
+  } else if (format === 'markdown' || format === 'mixed') {
+    body = sanitizeImportedHtml(markdownToHtml(trimmedBody, { imported: true })).trim();
+  } else {
+    body = sanitizeImportedHtml(textToImportedHtml(trimmedBody)).trim();
   }
   if (!body.trim()) throw statusError('导入正文不能为空', 400);
-  const summary = String(payload.summary ?? '').trim()
+  const summary = (input.summary ?? '').trim()
     || Array.from(readableImportedText(body)).slice(0, 120).join('');
-  const type = String(payload.type ?? '').trim() || '导入文章';
+  const type = (input.type ?? '').trim() || '导入文章';
   const contentId = makeId('content');
   const timestamp = now();
   return runTransaction(() => {

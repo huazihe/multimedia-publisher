@@ -165,27 +165,27 @@ test('imports Markdown title and body with imported status', () => {
     content = importContent({ filename: 'article.md', body });
 
     assert.equal(content.title, '导入标题');
-    assert.equal(content.body, body);
+    assert.match(content.body, /<h1>导入标题<\/h1>/);
+    assert.match(content.body, /<p>正文内容<\/p>/);
     assert.equal(content.status, '已导入');
   } finally {
     cleanupImportedContent(content);
   }
 });
 
-test('preserves a Markdown autolink verbatim', () => {
+test('renders a Markdown autolink as a safe anchor', () => {
   let content;
   try {
     const body = '\n# 链接文章\n\n访问 <https://safe.example/path>\n';
     content = importContent({ filename: 'autolink.md', body });
 
-    assert.equal(content.body, body.trim());
-    assert.match(content.body, /<https:\/\/safe\.example\/path>/);
+    assert.match(content.body, /<a href="https:\/\/safe\.example\/path">https:\/\/safe\.example\/path<\/a>/);
   } finally {
     cleanupImportedContent(content);
   }
 });
 
-test('preserves a script element inside a Markdown code fence as text', () => {
+test('renders fenced Markdown markup as escaped code nodes', () => {
   let content;
   try {
     const body = [
@@ -193,20 +193,21 @@ test('preserves a script element inside a Markdown code fence as text', () => {
       '# 代码示例',
       '',
       '```html',
-      '<script>alert("示例")</script>',
+      '<article data-action="publish"><script>alert("示例")</script></article>',
       '```',
       '',
     ].join('\n');
     content = importContent({ filename: 'code-example.markdown', body });
 
-    assert.equal(content.body, body.trim());
-    assert.match(content.body, /<script>alert\("示例"\)<\/script>/);
+    assert.match(content.body, /<h1>代码示例<\/h1>/);
+    assert.match(content.body, /<pre><code>&lt;article data-action=&quot;publish&quot;&gt;&lt;script&gt;alert\(&quot;示例&quot;\)&lt;\/script&gt;&lt;\/article&gt;<\/code><\/pre>/);
+    assert.doesNotMatch(content.body, /<script\b|<[^>]+\sdata-action\s*=/i);
   } finally {
     cleanupImportedContent(content);
   }
 });
 
-test('sanitizes mixed HTML while restoring protected Markdown literals byte-for-byte', () => {
+test('sanitizes mixed HTML while rendering protected Markdown literals safely', () => {
   let content;
   try {
     const autolink = '<https://safe.example/path>';
@@ -233,8 +234,8 @@ test('sanitizes mixed HTML while restoring protected Markdown literals byte-for-
 
     assert.doesNotMatch(content.body, /onclick\s*=|href="javascript:|alert\("危险"\)/i);
     assert.match(content.body, /<article>\s*<p><a>保留正文<\/a><\/p>/);
-    assert.ok(content.body.includes(autolink));
-    assert.equal(content.body.slice(content.body.indexOf('```html')), fencedBlock);
+    assert.match(content.body, /<a href="https:\/\/safe\.example\/path">https:\/\/safe\.example\/path<\/a>/);
+    assert.match(content.body, /<pre><code>&lt;script&gt;alert\(&quot;示例&quot;\)&lt;\/script&gt;<\/code><\/pre>/);
     assert.ok(content.body.includes(forgedToken));
   } finally {
     cleanupImportedContent(content);
@@ -256,7 +257,14 @@ test('preserves safe URI-scheme Markdown autolinks in mixed content', () => {
     });
 
     assert.doesNotMatch(content.body, /onclick\s*=/i);
-    for (const autolink of autolinks) assert.ok(content.body.includes(autolink));
+    const ftpUrl = autolinks[0].slice(1, -1);
+    assert.ok(content.body.includes(`<a>${ftpUrl}</a>`));
+    assert.ok(!content.body.includes(`href="${ftpUrl}"`));
+    for (const autolink of autolinks.slice(1)) {
+      const url = autolink.slice(1, -1);
+      assert.ok(content.body.includes(`href="${url}"`));
+      assert.ok(content.body.includes(`>${url}</a>`));
+    }
   } finally {
     cleanupImportedContent(content);
   }
@@ -272,7 +280,8 @@ test('preserves an email Markdown autolink in mixed content', () => {
     });
 
     assert.doesNotMatch(content.body, /onload\s*=/i);
-    assert.ok(content.body.includes(autolink));
+    assert.ok(content.body.includes('href="mailto:editor.name+tag@example.co.uk"'));
+    assert.ok(content.body.includes('>editor.name+tag@example.co.uk</a>'));
   } finally {
     cleanupImportedContent(content);
   }
@@ -385,13 +394,14 @@ test('keeps .txt imports as verbatim text with a plain-text title', () => {
     content = importContent({ filename: 'literal.txt', body });
 
     assert.equal(content.title, '# 纯文本标题');
-    assert.equal(content.body, body);
+    assert.match(content.body, /<p># 纯文本标题<br>&lt;article data-action=&quot;publish&quot;&gt;按文本保留&lt;\/article&gt;<\/p>/);
+    assert.doesNotMatch(content.body, /<article\b|<[^>]+\sdata-action\s*=/i);
   } finally {
     cleanupImportedContent(content);
   }
 });
 
-test('protects inline and indented Markdown code during unnamed mixed inference', () => {
+test('renders inline and indented Markdown code safely during unnamed mixed inference', () => {
   let content;
   try {
     const inlineCode = '`<button data-action="inline">行内按钮</button>`';
@@ -408,9 +418,9 @@ test('protects inline and indented Markdown code during unnamed mixed inference'
     content = importContent({ body });
 
     assert.equal(content.title, '普通标题');
-    assert.ok(content.body.includes(inlineCode));
-    assert.ok(content.body.includes(indentedCode));
-    assert.ok(content.body.includes(autolink));
+    assert.match(content.body, /<code>&lt;button data-action=&quot;inline&quot;&gt;行内按钮&lt;\/button&gt;<\/code>/);
+    assert.match(content.body, /<pre><code>&lt;script&gt;alert\(&quot;缩进代码&quot;\)&lt;\/script&gt;<\/code><\/pre>/);
+    assert.match(content.body, /<a href="https:\/\/safe\.example\/path">https:\/\/safe\.example\/path<\/a>/);
     assert.match(content.body, /<article>外部按钮<p>外部正文<\/p><\/article>/);
   } finally {
     cleanupImportedContent(content);
@@ -449,6 +459,49 @@ test('payload format html forces HTML title precedence and sanitization', () => 
     assert.equal(content.title, '格式指定标题');
     assert.doesNotMatch(content.body, /<title\b|data-action/i);
     assert.match(content.body, /<article><p>正文<\/p><\/article>/);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('ignores Markdown headings inside fenced, indented, and inline code', () => {
+  let content;
+  try {
+    content = importContent({
+      filename: 'metadata.md',
+      body: [
+        '```markdown',
+        '# 围栏伪标题',
+        '```',
+        '    # 缩进伪标题',
+        '`# 行内伪标题`',
+        '# 真实 Markdown 标题',
+        '正文',
+      ].join('\n'),
+    });
+
+    assert.equal(content.title, '真实 Markdown 标题');
+    assert.match(content.body, /<h1>真实 Markdown 标题<\/h1>/);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('ignores HTML titles and headings inside comments and blocked elements', () => {
+  let content;
+  try {
+    content = importContent({
+      filename: 'metadata.html',
+      body: [
+        '<!-- <title>评论伪标题</title><h1>评论伪标题</h1> -->',
+        '<script><title>脚本伪标题</title><h1>脚本伪标题</h1></script>',
+        '<template><title>模板伪标题</title></template>',
+        '<article><h1>真实 HTML 标题</h1><p>正文</p></article>',
+      ].join(''),
+    });
+
+    assert.equal(content.title, '真实 HTML 标题');
+    assert.doesNotMatch(content.body, /评论伪标题|脚本伪标题|模板伪标题/);
   } finally {
     cleanupImportedContent(content);
   }
@@ -498,6 +551,25 @@ test('rejects empty or whitespace-only imported content', () => {
     }, /导入正文不能为空/);
   } finally {
     cleanupImportedContent(insertedContent);
+  }
+});
+
+test('rejects non-object import payloads and non-string schema fields', () => {
+  for (const payload of [null, [], '正文', 42, true]) {
+    assert.throws(() => importContent(payload), error => {
+      assert.equal(error.statusCode, 400);
+      assert.match(error.message, /JSON 对象/);
+      return true;
+    });
+  }
+
+  for (const field of ['title', 'body', 'summary', 'type', 'filename', 'format']) {
+    const payload = { body: '有效正文', [field]: 42 };
+    assert.throws(() => importContent(payload), error => {
+      assert.equal(error.statusCode, 400);
+      assert.match(error.message, new RegExp(`${field}.*字符串`));
+      return true;
+    });
   }
 });
 
@@ -856,6 +928,7 @@ test('POST /api/content/import returns validation and request-size status codes'
   const titles = [
     `无效扩展-${Date.now()}`,
     `超大正文-${Date.now()}`,
+    `高转义正文-${Date.now()}`,
     `超大请求-${Date.now()}`,
   ];
   await new Promise((resolve, reject) => {
@@ -892,7 +965,19 @@ test('POST /api/content/import returns validation and request-size status codes'
     assert.equal(response.status, 400);
     assert.match((await response.json()).error, /JSON 格式无效/);
 
-    response = await post(endpoint, JSON.stringify({ filename: 'envelope.txt', title: titles[2], body: 'a'.repeat(6 * 1024 * 1024 + 1) }));
+    for (const invalidPayload of ['null', '[]', JSON.stringify({ body: 123 })]) {
+      response = await post(endpoint, invalidPayload);
+      assert.equal(response.status, 400);
+      assert.match((await response.json()).error, /JSON 对象|字符串/);
+    }
+
+    const highlyEscapedBody = '\u0001'.repeat(1024 * 1024 + 64);
+    response = await post(endpoint, JSON.stringify({ filename: 'escaped.txt', title: titles[2], body: highlyEscapedBody }));
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).content.title, titles[2]);
+
+    const oversizedEnvelope = `${JSON.stringify({ filename: 'envelope.txt', title: titles[3], body: '正文' })}${' '.repeat(32 * 1024 * 1024 + 1)}`;
+    response = await post(endpoint, oversizedEnvelope);
     assert.equal(response.status, 413);
     assert.match((await response.json()).error, /请求内容过大/);
 
