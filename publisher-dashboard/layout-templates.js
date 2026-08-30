@@ -119,6 +119,12 @@ function listLayoutTemplates() {
     .sort((left, right) => compareFilenames(left.filename, right.filename));
 }
 
+function templateStatusError(message, statusCode) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
 function safeTemplatePath(filename) {
   if (typeof filename !== 'string'
     || !filename
@@ -126,7 +132,7 @@ function safeTemplatePath(filename) {
     || filename !== path.basename(filename)
     || filename !== path.win32.basename(filename)
     || !filename.endsWith('.html')) {
-    throw new Error('模板名称无效');
+    throw templateStatusError('模板名称无效', 400);
   }
 
   const target = path.join(TEMPLATE_DIR, filename);
@@ -134,10 +140,10 @@ function safeTemplatePath(filename) {
   try {
     stat = fs.lstatSync(target);
   } catch (error) {
-    if (error?.code === 'ENOENT') throw new Error('模板不存在');
+    if (error?.code === 'ENOENT') throw templateStatusError('模板不存在', 404);
     throw error;
   }
-  if (!stat.isFile()) throw new Error('模板不是普通文件');
+  if (!stat.isFile()) throw templateStatusError('模板不是普通文件', 400);
   return target;
 }
 
@@ -400,9 +406,38 @@ function numericStyleValue(element, property) {
   return attribute ? Number(attribute) : 0;
 }
 
-function findTitlePrototype(root) {
+function findNestedTitlePrototype(content) {
+  const directChildren = [...content.children].slice(0, 4);
+  let best = null;
+  let bestScore = -1;
+  for (let index = 0; index < directChildren.length; index++) {
+    const shell = directChildren[index];
+    for (const candidate of shell.querySelectorAll('h1,h2,h3,p,text,[class~="title"]')) {
+      const text = normalizedText(candidate.textContent);
+      if (text.length < 2 || text.length > 120) continue;
+      if (/替换|图片|配图|logo|photo/i.test(text)) continue;
+      const size = numericStyleValue(candidate, 'font-size');
+      const style = String(candidate.getAttribute('style') || candidate.getAttribute('font-weight') || '');
+      let score = size * 2 + Math.max(0, 80 - index * 20);
+      if (candidate.localName === 'h1') score += 200;
+      if (candidate.classList?.contains('title')) score += 160;
+      if (/文章主标题|主标题|标题区域|title/i.test(text)) score += 140;
+      if (/font-weight\s*:\s*(?:bold|[6-9]00)|^[6-9]00$|bold/i.test(style)) score += 20;
+      if (text.length >= 4) score += 20;
+      if (score > bestScore) {
+        best = candidate;
+        bestScore = score;
+      }
+    }
+  }
+  return best;
+}
+
+function findTitlePrototype(root, content) {
   const preferred = root.querySelector('h1,.rich_media_title,.hero .title,.header .title,.cover .title');
   if (preferred) return preferred;
+  const nested = findNestedTitlePrototype(content);
+  if (nested) return nested;
 
   let best = null;
   let bestScore = -1;
@@ -464,13 +499,74 @@ function findHeadingPrototype(content, titlePrototype) {
   return best;
 }
 
+const FOOTER_CLASS_PRIORITY = [
+  'footer',
+  'follow-section',
+  'follow',
+  'account-footer',
+  'account',
+  'ending',
+  'subscription',
+  'subscribe',
+  'brand-footer',
+  'footer-card',
+  'signature',
+];
+const FOOTER_FORBIDDEN_CLASS_TOKENS = new Set([
+  'pending',
+  'progress',
+  'step-progress',
+  'timeline',
+  'carousel',
+  'widget',
+  'content-widget',
+]);
+
+function directFooterCandidates(root, content) {
+  const containers = root === content ? [root] : [root, content];
+  const candidates = [];
+  for (const container of containers) {
+    for (const child of container.children) {
+      if (!candidates.includes(child)) candidates.push(child);
+    }
+  }
+  return { containers, candidates };
+}
+
+function isValidDirectFooterCandidate(candidate, containers) {
+  return containers.includes(candidate.parentElement)
+    && ![...candidate.classList].some(token => FOOTER_FORBIDDEN_CLASS_TOKENS.has(token));
+}
+
+function isValidatedLastFooter(candidate, container) {
+  if (!candidate || candidate !== container.lastElementChild) return false;
+  if ([...candidate.classList].some(token => FOOTER_FORBIDDEN_CLASS_TOKENS.has(token))) return false;
+  const text = normalizedText(candidate.textContent);
+  const style = String(candidate.getAttribute('style') || '');
+  const footerCue = /公众号|关注|二维码|订阅|每周.*更新|读到这里|business insight/i.test(text);
+  const footerLayout = /text-align\s*:\s*center/i.test(style)
+    && /(?:border-top|padding-top|margin-top)\s*:/i.test(style);
+  return text.length >= 4 && text.length <= 320 && footerCue && footerLayout;
+}
+
 function findFooterPrototype(root, content) {
-  const explicit = root.querySelector('footer,.footer,[class*="footer"],[class*="follow"],[class*="account"],[class*="ending"]');
-  if (explicit) return explicit;
-  return [...content.children].reverse().find(child => {
-    const text = String(child.textContent || '').replace(/\s+/g, ' ').trim();
-    return text.length <= 320 && /公众号|关注|二维码|每周.*更新|读到这里|business insight/i.test(text);
-  }) || null;
+  const { containers, candidates } = directFooterCandidates(root, content);
+  const semanticFooter = candidates.find(candidate => candidate.localName === 'footer'
+    && isValidDirectFooterCandidate(candidate, containers));
+  if (semanticFooter) return semanticFooter;
+
+  for (const token of FOOTER_CLASS_PRIORITY) {
+    const exactClassMatch = candidates.find(candidate => candidate.classList.contains(token)
+      && isValidDirectFooterCandidate(candidate, containers));
+    if (exactClassMatch) return exactClassMatch;
+  }
+
+  for (const container of [content, root]) {
+    if (containers.includes(container) && isValidatedLastFooter(container.lastElementChild, container)) {
+      return container.lastElementChild;
+    }
+  }
+  return null;
 }
 
 function directChildContaining(ancestor, descendant) {
@@ -480,7 +576,7 @@ function directChildContaining(ancestor, descendant) {
 }
 
 function createProfile(document, root, content) {
-  const title = findTitlePrototype(root);
+  const title = findTitlePrototype(root, content);
   const lead = findLeadPrototype(content);
   const paragraph = findParagraphPrototype(content);
   const heading = findHeadingPrototype(content, title);
@@ -491,9 +587,8 @@ function createProfile(document, root, content) {
     paragraph,
     heading,
     footer,
-    footerName: footer?.querySelector('.big,.title,.author-name,[class*="account-name"],h2,h3,h4,strong,p') || null,
-    footerDescription: footer?.querySelector('p:last-child,.f-desc,[class*="desc"]') || null,
-    titleShell: directChildContaining(root, title),
+    footerName: footer?.querySelector('.big,.title,.author-name,.account-name,h2,h3,h4,strong,p') || null,
+    footerDescription: footer?.querySelector('p:last-child,.f-desc,.desc,.account-description') || null,
   };
 }
 
@@ -519,7 +614,7 @@ function createSummary(document, profile, summary) {
 }
 
 function applyArticlePresentation(root, profile) {
-  for (const heading of root.querySelectorAll('h2,h3,h4,h5,h6')) {
+  for (const heading of root.querySelectorAll('h1,h2,h3,h4,h5,h6')) {
     copyPresentation(profile.heading, heading);
     withDefaultStyle(heading, DEFAULT_STYLES.heading);
   }
@@ -534,23 +629,33 @@ function applyArticlePresentation(root, profile) {
   for (const pre of root.querySelectorAll('pre')) withDefaultStyle(pre, DEFAULT_STYLES.pre);
 }
 
-function createArticleNodes(document, body, profile) {
+function normalizedText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function createArticleNodes(document, body, profile, title) {
   const html = looksLikeHtml(body) ? htmlBodyFragment(body) : markdownToHtml(body);
   const holder = document.createElement('template');
   holder.innerHTML = html;
   sanitizeTree(holder.content, { article: true });
 
-  const firstHeading = holder.content.querySelector('h1');
-  if (firstHeading) firstHeading.remove();
+  const topLevelElements = [...holder.content.children];
+  const articleRoot = topLevelElements.length === 1
+    && ['article', 'main'].includes(topLevelElements[0].localName)
+    ? topLevelElements[0]
+    : holder.content;
+  const leadingNode = [...articleRoot.childNodes].find(node => node.nodeType === 1
+    || (node.nodeType === 3 && normalizedText(node.textContent)));
+  if (leadingNode?.nodeType === 1
+    && leadingNode.localName === 'h1'
+    && normalizedText(leadingNode.textContent) === normalizedText(title)) {
+    leadingNode.remove();
+  }
   applyArticlePresentation(holder.content, profile);
 
-  const topLevel = [...holder.content.childNodes];
-  if (topLevel.length === 1
-    && topLevel[0].nodeType === 1
-    && ['article', 'main'].includes(topLevel[0].localName)) {
-    return [...topLevel[0].childNodes];
-  }
-  return topLevel;
+  return articleRoot === holder.content
+    ? [...holder.content.childNodes]
+    : [...articleRoot.childNodes];
 }
 
 function createFooter(document, profile, accountName, accountDescription) {
@@ -657,7 +762,7 @@ function normalizeTemplateDocument(document, values) {
   const structure = findTemplateStructure(document);
   const profile = createProfile(document, structure.root, structure.content);
   const summary = createSummary(document, profile, values.summary);
-  const articleNodes = createArticleNodes(document, values.body, profile);
+  const articleNodes = createArticleNodes(document, values.body, profile, values.title);
   const footer = updateFooterInPlace(document, profile, values.accountName, values.accountDescription);
   const footerInsideContent = profile.footer && structure.content.contains(profile.footer);
   const footerCarrier = footerInsideContent
@@ -668,11 +773,21 @@ function normalizeTemplateDocument(document, values) {
 
   if (structure.richMedia) {
     const outsideTitle = profile.title && !structure.content.contains(profile.title) ? profile.title : null;
+    const nestedTitle = profile.title && structure.content.contains(profile.title) ? profile.title : null;
     if (outsideTitle) {
       updateTitleInPlace(outsideTitle, values.title);
     }
-    clearElement(structure.content);
-    if (!outsideTitle) structure.content.append(createTitle(document, profile, values.title));
+    const titleCarrier = nestedTitle ? directChildContaining(structure.content, nestedTitle) : null;
+    if (titleCarrier) {
+      for (const child of [...structure.content.children]) {
+        if (child !== titleCarrier) child.remove();
+      }
+      clearTextExcept(titleCarrier, [nestedTitle]);
+      updateTitleInPlace(nestedTitle, values.title);
+    } else {
+      clearElement(structure.content);
+      if (!outsideTitle) structure.content.append(createTitle(document, profile, values.title));
+    }
     structure.content.append(summary, ...articleNodes);
     if (footerCarrier) structure.content.append(footerCarrier);
     else if (!profile.footer) structure.content.append(footer);

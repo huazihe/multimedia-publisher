@@ -77,6 +77,17 @@ function visualStyleSignature(html) {
   return `${styleBlocks}::${inlineStyles}`;
 }
 
+function renderedBodyH1Texts(body, title = '正文主标题') {
+  const html = renderLayoutTemplate('style_10.html', {
+    title,
+    summary: '标题去重导语',
+    body,
+  });
+  const { document } = parseHTML(html);
+  return [...document.querySelectorAll('#js_content h1:not([data-wechat-slot="title"])')]
+    .map(element => element.textContent.replace(/\s+/g, ' ').trim());
+}
+
 test('discovers exactly 40 templates with stable safe metadata', () => {
   const first = listLayoutTemplates();
   const second = listLayoutTemplates();
@@ -116,9 +127,17 @@ test('rejects traversal, missing files, and non-template names', () => {
     'package.json',
     '',
   ]) {
-    assert.throws(() => renderLayoutTemplate(filename, input), /模板名称无效/);
+    assert.throws(() => renderLayoutTemplate(filename, input), error => {
+      assert.equal(error.statusCode, 400);
+      assert.match(error.message, /模板名称无效/);
+      return true;
+    });
   }
-  assert.throws(() => renderLayoutTemplate('missing-template.html', input), /模板不存在/);
+  assert.throws(() => renderLayoutTemplate('missing-template.html', input), error => {
+    assert.equal(error.statusCode, 404);
+    assert.match(error.message, /模板不存在/);
+    return true;
+  });
 });
 
 test('renders all 40 templates with only the requested article and account copy', () => {
@@ -207,6 +226,95 @@ test('preserves standard hero decorations and footer position around replaced co
   assert.match(footer.textContent, /标准嵌套账号/);
 });
 
+test('uses exact footer candidates for earth-tone and rich-media regression templates', () => {
+  const cases = [
+    {
+      filename: '砚石·大地色系.html',
+      footerSelector: '.wrap > .footer[data-wechat-account="true"]',
+    },
+    {
+      filename: 'style_7.html',
+      footerSelector: '#js_content > [data-wechat-account="true"]',
+    },
+    {
+      filename: 'template_style11_杂志分栏风.html',
+      footerSelector: '#js_content > [data-wechat-account="true"]',
+    },
+  ];
+
+  for (const { filename, footerSelector } of cases) {
+    const html = renderLayoutTemplate(filename, {
+      title: 'Footer 回归标题',
+      summary: 'Footer 回归导语',
+      body: '<p>Footer 回归正文</p>',
+      accountName: 'Footer 回归账号',
+      accountDescription: 'Footer 回归说明',
+    });
+    const { document } = parseHTML(html);
+    const footer = document.querySelector(footerSelector);
+
+    assert.ok(footer, `${filename} footer 位置错误`);
+    assert.equal(footer.classList.contains('pending'), false, `${filename} 将 pending 误判为 ending`);
+    assert.match(footer.textContent, /Footer 回归账号/);
+  }
+});
+
+test('places all 40 account footers outside progress and article widgets', () => {
+  const forbiddenTokens = new Set([
+    'pending',
+    'progress',
+    'step-progress',
+    'timeline',
+    'carousel',
+    'widget',
+    'content-widget',
+  ]);
+
+  for (const { filename } of listLayoutTemplates()) {
+    const html = renderLayoutTemplate(filename, {
+      title: '全量 Footer 标题',
+      summary: '全量 Footer 导语',
+      body: '<p>全量 Footer 正文</p>',
+    });
+    const { document } = parseHTML(html);
+    const root = document.querySelector('[data-wechat-template-root="true"]');
+    const content = root?.querySelector('#js_content,.rich_media_content,.content-section,.content') || root;
+    const footer = root?.querySelector('[data-wechat-account="true"]');
+
+    assert.ok(footer, `${filename} 缺少 footer`);
+    assert.ok(footer.parentElement === root || footer.parentElement === content, `${filename} footer 未位于根或正文直属层`);
+    for (const element of [footer, footer.parentElement]) {
+      for (const token of element?.classList || []) {
+        assert.equal(forbiddenTokens.has(token), false, `${filename} footer 位于 ${token} 组件中`);
+      }
+    }
+  }
+});
+
+test('preserves the rich-media SVG title shell but removes unrelated sample diagrams', () => {
+  const html = renderLayoutTemplate('style_4.html', {
+    title: 'SVG 主题真实标题',
+    summary: 'SVG 主题真实导语',
+    body: '<h2>SVG 主题小节</h2><p>SVG 主题真实正文</p>',
+    accountName: 'SVG 主题账号',
+    accountDescription: 'SVG 主题说明',
+  });
+  const { document } = parseHTML(html);
+  const content = document.querySelector('#js_content');
+  const title = content?.querySelector(':scope > section svg [data-wechat-slot="title"]');
+  const titleShell = title?.closest('section');
+
+  assert.ok(content);
+  assert.ok(titleShell);
+  assert.equal(titleShell.parentElement, content);
+  assert.equal(title.localName, 'text');
+  assert.equal(title.textContent, 'SVG 主题真实标题');
+  assert.ok(titleShell.querySelector('svg circle'), '首屏 SVG 圆形装饰被删除');
+  assert.equal(content.querySelectorAll('svg').length, 1, '保留了正文中的无关示例 SVG');
+  assert.match(content.textContent, /SVG 主题真实正文/);
+  assert.doesNotMatch(html, /刀具磨损显微图|旧工艺方案|新工艺方案|PROCESS ENGINEERING|TC4钛合金/);
+});
+
 test('renders generated Markdown as article HTML', () => {
   const html = renderLayoutTemplate('style_10.html', {
     title: 'Markdown 标题',
@@ -227,6 +335,29 @@ test('renders generated Markdown as article HTML', () => {
   assert.match(html, /<p\b[^>]*>第一段正文。<\/p>/);
   assert.match(html, /<li\b[^>]*>清单甲<\/li>/);
   assert.equal((html.match(/Markdown 标题/g) || []).length, 2, '标题应只出现在文档 title 和文章主标题');
+});
+
+test('removes only a leading top-level article H1 whose normalized text matches the title', () => {
+  const headings = renderedBodyH1Texts([
+    '<article>',
+    '  <h1> 正文主标题\n    </h1>',
+    '  <p>匹配标题后的正文</p>',
+    '</article>',
+  ].join(''));
+
+  assert.deepEqual(headings, []);
+});
+
+test('preserves a leading top-level article H1 when it does not match the title', () => {
+  const headings = renderedBodyH1Texts('<article><h1>独立章节标题</h1><p>章节正文</p></article>');
+
+  assert.deepEqual(headings, ['独立章节标题']);
+});
+
+test('preserves a non-leading article H1 even when it matches the title', () => {
+  const headings = renderedBodyH1Texts('<article><p>前置正文</p><h1>正文主标题</h1><p>后续正文</p></article>');
+
+  assert.deepEqual(headings, ['正文主标题']);
 });
 
 test('removes unsafe resources and actions from article content and the final document', () => {
@@ -382,6 +513,39 @@ test('POST layout falls back only when template is omitted and rejects explicit 
       assert.equal(response.status, 400, `template=${JSON.stringify(template)}`);
       assert.match(result.error, /template.*非空字符串/);
     }
+  } finally {
+    cleanupContent(content);
+  }
+});
+
+test('POST layout returns 400 for malformed template paths and 404 for absent files', async () => {
+  const { importContent } = dashboard();
+  let content;
+  const port = await listenOnRandomPort();
+  try {
+    content = importContent({
+      filename: 'layout-template-errors.md',
+      title: '模板错误标题',
+      body: '# 模板错误标题\n\n模板错误正文',
+    });
+    const endpoint = `http://127.0.0.1:${port}/api/content/${content.id}/layout`;
+    const postTemplate = template => fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ template }),
+    });
+
+    for (const malformed of ['../style_10.html', 'nested/style_10.html', 'style_10.txt', 'style_10.HTML']) {
+      const response = await postTemplate(malformed);
+      const result = await response.json();
+      assert.equal(response.status, 400, malformed);
+      assert.match(result.error, /模板名称无效/);
+    }
+
+    const response = await postTemplate('missing-template.html');
+    const result = await response.json();
+    assert.equal(response.status, 404);
+    assert.match(result.error, /模板不存在/);
   } finally {
     cleanupContent(content);
   }
