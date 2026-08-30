@@ -498,6 +498,21 @@ test('ignores Markdown headings inside fenced, indented, and inline code', () =>
   }
 });
 
+test('ignores Markdown headings inside raw HTML pre and code blocks', () => {
+  let content;
+  try {
+    content = importContent({
+      filename: 'raw-code-metadata.md',
+      body: '<pre><code>\n# Raw code fake\n</code></pre>\n# Real title\n正文',
+    });
+
+    assert.equal(content.title, 'Real title');
+    assert.match(content.body, /<h1>Real title<\/h1>/);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
 test('preserves inline and fenced code through import and contentToMarkdown', () => {
   let content;
   try {

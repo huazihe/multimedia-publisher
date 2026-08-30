@@ -1752,7 +1752,7 @@ function importedHtmlMetadataProbe(body) {
 
 function importedMarkdownMetadataProbe(body) {
   let probe = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
-  const blockedBlocks = [...IMPORT_BLOCKED_CONTENT_ELEMENTS, 'embed', 'meta', 'link', 'base'];
+  const blockedBlocks = [...IMPORT_BLOCKED_CONTENT_ELEMENTS, 'embed', 'meta', 'link', 'base', 'pre', 'code'];
   for (const tagName of blockedBlocks) {
     const pairedElement = new RegExp(`<\\s*${tagName}\\b[^>]*>[\\s\\S]*?<\\s*\\/\\s*${tagName}\\s*>`, 'gi');
     let previous;
