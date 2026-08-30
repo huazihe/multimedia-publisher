@@ -425,7 +425,7 @@ test('platform preview rejects malformed or multiple CLI JSON results and cleans
           error => {
             assert.equal(error.statusCode, 502);
             assert.equal(error.apiCode, 'PREVIEW_INVALID_RESPONSE');
-            assert.match(error.message, /平台预览.*JSON/);
+            assert.equal(error.message, '平台预览结果无效，请重试');
             return true;
           }
         );
@@ -474,7 +474,7 @@ test('platform preview rejects incomplete, mismatched, and mistyped CLI JSON sch
         error => {
           assert.equal(error.statusCode, 502);
           assert.equal(error.apiCode, 'PREVIEW_INVALID_RESPONSE');
-          assert.match(error.message, /平台预览.*(?:结构|字段)/);
+          assert.equal(error.message, '平台预览结果无效，请重试');
           return true;
         }
       );
@@ -489,6 +489,15 @@ test('platform preview rejects incomplete, mismatched, and mistyped CLI JSON sch
 test('platform preview maps timeout, unavailable CLI, nonzero exit, and thrown runner failures', async () => {
   let content;
   const tempRoot = createPreviewTempRoot('preview-runner-errors');
+  const consoleCalls = [];
+  const originalConsole = {
+    log: console.log,
+    warn: console.warn,
+    error: console.error,
+  };
+  console.log = (...args) => consoleCalls.push(['log', ...args]);
+  console.warn = (...args) => consoleCalls.push(['warn', ...args]);
+  console.error = (...args) => consoleCalls.push(['error', ...args]);
   try {
     content = importContent({ filename: 'preview-runner-errors.md', body: '# Runner 错误\n\n正文' });
 
@@ -533,7 +542,17 @@ test('platform preview maps timeout, unavailable CLI, nonzero exit, and thrown r
       }
     );
 
-    const sensitiveFailure = `Adapter exploded at /Users/private/article.md token=super-secret ${'x'.repeat(500)}`;
+    const sensitiveFailure = [
+      'adapter rejected article',
+      'Authorization: Bearer bearer-token-value',
+      'Proxy-Authorization: Basic YmFzaWMtdG9rZW4=',
+      'api_key=api-key-value',
+      'api secret=api-secret-value',
+      'Cookie: SID=cookie-value',
+      'session=session-value',
+      '/Users/Private User/preview article.md',
+      'C:\\Users\\Private User\\preview article.md',
+    ].join(' | ');
     await assert.rejects(
       () => previewContentForPlatform(content.id, 'xiaohongshu', {
         tempRoot,
@@ -547,9 +566,8 @@ test('platform preview maps timeout, unavailable CLI, nonzero exit, and thrown r
       error => {
         assert.equal(error.statusCode, 502);
         assert.equal(error.apiCode, 'PREVIEW_CLI_FAILED');
-        assert.match(error.message, /Adapter exploded/);
-        assert.doesNotMatch(error.message, /\/Users\/private|super-secret/);
-        assert.ok(error.message.length <= 260);
+        assert.equal(error.message, '平台预览失败，请重试');
+        assert.doesNotMatch(error.message, /Bearer|Basic|api[_ ]?(?:key|secret)|Cookie|session|\/Users|C:\\/i);
         return true;
       }
     );
@@ -558,31 +576,47 @@ test('platform preview maps timeout, unavailable CLI, nonzero exit, and thrown r
       () => previewContentForPlatform(content.id, 'xiaohongshu', {
         tempRoot,
         runner: async () => {
-          throw new Error('adapter preparation failed');
+          throw new Error(sensitiveFailure);
         },
       }),
       error => {
         assert.equal(error.statusCode, 502);
         assert.equal(error.apiCode, 'PREVIEW_CLI_FAILED');
-        assert.match(error.message, /adapter preparation failed/);
+        assert.equal(error.message, '平台预览失败，请重试');
+        assert.doesNotMatch(error.message, /Bearer|Basic|api[_ ]?(?:key|secret)|Cookie|session|\/Users|C:\\/i);
         return true;
       }
     );
     assert.deepEqual(fs.readdirSync(tempRoot), []);
   } finally {
+    console.log = originalConsole.log;
+    console.warn = originalConsole.warn;
+    console.error = originalConsole.error;
     cleanupImportedContent(content);
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
+  assert.deepEqual(consoleCalls, []);
 });
 
 test('GET platform-preview returns structured 504, 503, and 502 errors', async () => {
   let content;
   let testServer;
   const tempRoot = createPreviewTempRoot('preview-route-errors');
+  const sensitiveFailure = [
+    'Authorization: Bearer route-bearer-value',
+    'Authorization: Basic cm91dGUtYmFzaWM=',
+    'api_key=route-api-key',
+    'secret=route-secret',
+    'Cookie: SID=route-cookie',
+    'session=route-session',
+    '/Users/Private User/route preview.md',
+    'C:\\Users\\Private User\\route preview.md',
+  ].join(' | ');
   const outcomes = [
     () => Promise.reject(Object.assign(new Error('runner timeout'), { code: 'ETIMEDOUT' })),
     () => Promise.reject(new Error(`CLI 尚未构建: ${CLI_PATH}`)),
-    () => Promise.resolve({ code: 1, stdout: '', stderr: 'adapter rejected the article' }),
+    () => Promise.resolve({ code: 1, stdout: '', stderr: sensitiveFailure }),
+    () => Promise.reject(new Error(sensitiveFailure)),
     () => Promise.resolve({ code: 0, stdout: '{}\n', stderr: '' }),
   ];
   try {
@@ -594,19 +628,21 @@ test('GET platform-preview returns structured 504, 503, and 502 errors', async (
     const port = await listenOnRandomPort(testServer);
     const endpoint = `http://127.0.0.1:${port}/api/content/${encodeURIComponent(content.id)}/platform-preview?platform=xiaohongshu`;
     const expected = [
-      [504, 'PREVIEW_TIMEOUT'],
-      [503, 'PREVIEW_CLI_UNAVAILABLE'],
-      [502, 'PREVIEW_CLI_FAILED'],
-      [502, 'PREVIEW_INVALID_RESPONSE'],
+      [504, 'PREVIEW_TIMEOUT', '平台预览超时，请重试'],
+      [503, 'PREVIEW_CLI_UNAVAILABLE', '平台预览服务尚未构建，请先运行 npm run build'],
+      [502, 'PREVIEW_CLI_FAILED', '平台预览失败，请重试'],
+      [502, 'PREVIEW_CLI_FAILED', '平台预览失败，请重试'],
+      [502, 'PREVIEW_INVALID_RESPONSE', '平台预览结果无效，请重试'],
     ];
 
-    for (const [status, code] of expected) {
+    for (const [status, code, message] of expected) {
       const response = await fetch(endpoint);
       const body = await response.json();
       assert.equal(response.status, status);
       assert.equal(body.ok, false);
       assert.equal(body.code, code);
-      assert.equal(typeof body.error, 'string');
+      assert.equal(body.error, message);
+      assert.doesNotMatch(JSON.stringify(body), /Bearer|Basic|api[_ ]?(?:key|secret)|Cookie|session|\/Users|C:\\/i);
     }
     assert.deepEqual(fs.readdirSync(tempRoot), []);
   } finally {

@@ -1981,15 +1981,12 @@ function previewApiError(message, statusCode, apiCode) {
   return error;
 }
 
-function sanitizePreviewErrorDetail(value) {
-  return stripAnsi(String(value || ''))
-    .replace(/\r?\n+/g, ' ')
-    .replace(/\b(cookie|token|authorization|password)\s*[:=]\s*(?:"[^"]*"|'[^']*'|\S+)/gi, '$1=[redacted]')
-    .replace(/(?:[A-Za-z]:[\\/]\S+|\/\S+)/g, '[path]')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 200);
-}
+const PREVIEW_ERROR_MESSAGES = {
+  timeout: '平台预览超时，请重试',
+  unavailable: '平台预览服务尚未构建，请先运行 npm run build',
+  failed: '平台预览失败，请重试',
+  invalidResponse: '平台预览结果无效，请重试',
+};
 
 function isPreviewTimeout(error) {
   const code = String(error?.code || '').toUpperCase();
@@ -2006,20 +2003,19 @@ function isPreviewCliUnavailable(error) {
     || /CLI\s+尚未构建|Cannot find module.+packages[\\/]cli[\\/]dist/i.test(message);
 }
 
-function mapPreviewExecutionError(error, detail) {
+function mapPreviewExecutionError(error) {
   if (isPreviewTimeout(error)) {
-    return previewApiError('平台预览超时，请重试', 504, 'PREVIEW_TIMEOUT');
+    return previewApiError(PREVIEW_ERROR_MESSAGES.timeout, 504, 'PREVIEW_TIMEOUT');
   }
   if (isPreviewCliUnavailable(error)) {
     return previewApiError(
-      '平台预览服务尚未构建，请先运行 npm run build',
+      PREVIEW_ERROR_MESSAGES.unavailable,
       503,
       'PREVIEW_CLI_UNAVAILABLE'
     );
   }
-  const safeDetail = sanitizePreviewErrorDetail(detail || error?.message);
   return previewApiError(
-    safeDetail ? `平台预览失败：${safeDetail}` : '平台预览失败',
+    PREVIEW_ERROR_MESSAGES.failed,
     502,
     'PREVIEW_CLI_FAILED'
   );
@@ -2044,7 +2040,7 @@ function validatePlatformPreviewResult(preview, platformId) {
       || (preview.limits !== null && typeof preview.limits === 'object' && !Array.isArray(preview.limits)));
   if (!valid) {
     throw previewApiError(
-      '平台预览返回的字段结构无效',
+      PREVIEW_ERROR_MESSAGES.invalidResponse,
       502,
       'PREVIEW_INVALID_RESPONSE'
     );
@@ -2080,9 +2076,8 @@ async function previewContentForPlatform(contentId, platform, options = {}) {
       && (result.error || (result.code !== undefined && result.code !== 0))) {
       const executionError = result.error || {
         code: result.code,
-        message: result.stderr,
       };
-      throw mapPreviewExecutionError(executionError, result.stderr);
+      throw mapPreviewExecutionError(executionError);
     }
 
     const stdout = typeof result === 'string'
@@ -2092,7 +2087,7 @@ async function previewContentForPlatform(contentId, platform, options = {}) {
     const lines = cleanOutput ? cleanOutput.split(/\r?\n/) : [];
     if (lines.length !== 1) {
       throw previewApiError(
-        '平台预览命令必须返回一行 JSON 对象',
+        PREVIEW_ERROR_MESSAGES.invalidResponse,
         502,
         'PREVIEW_INVALID_RESPONSE'
       );
@@ -2103,7 +2098,7 @@ async function previewContentForPlatform(contentId, platform, options = {}) {
       preview = JSON.parse(lines[0]);
     } catch {
       throw previewApiError(
-        '平台预览命令返回的 JSON 无效',
+        PREVIEW_ERROR_MESSAGES.invalidResponse,
         502,
         'PREVIEW_INVALID_RESPONSE'
       );
