@@ -164,6 +164,7 @@ const RETIRED_PLATFORM_IDS = ['cnaiplus', 'zhike', 'cechina', 'sensorexpert'];
 
 const CONTENT_TYPES = ['行业分析', '案例复盘', '方法论', '清单指南', '热点解读'];
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+const MAX_IMPORTED_BODY_BYTES = 5 * 1024 * 1024;
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(DRAFTS_DIR, { recursive: true });
@@ -1282,6 +1283,130 @@ function titleFromMarkdown(body, fallback = '未命名内容') {
   return cleanHeading || fallback;
 }
 
+const IMPORT_BLOCKED_ELEMENTS = new Set(['script', 'iframe', 'object', 'embed', 'meta', 'link']);
+const IMPORT_URL_ATTRIBUTES = new Set([
+  'href', 'src', 'srcset', 'xlink:href', 'action', 'formaction', 'poster', 'background', 'cite',
+]);
+
+function decodeImportedUrl(value) {
+  let decoded = String(value || '');
+  for (let i = 0; i < 3; i++) {
+    const next = decoded
+      .replace(/&#x([0-9a-f]+);?/gi, (_, code) => String.fromCodePoint(Number.parseInt(code, 16)))
+      .replace(/&#([0-9]+);?/g, (_, code) => String.fromCodePoint(Number.parseInt(code, 10)))
+      .replace(/&(colon|tab|newline|amp);/gi, (_, name) => ({ colon: ':', tab: '\t', newline: '\n', amp: '&' })[name.toLowerCase()]);
+    if (next === decoded) break;
+    decoded = next;
+  }
+  return decoded;
+}
+
+function isDangerousImportedUrl(value, attributeName) {
+  const compact = decodeImportedUrl(value).replace(/[\u0000-\u0020\u007f-\u009f]+/g, '').toLowerCase();
+  if (attributeName === 'srcset') {
+    return compact.includes('javascript:') || compact.includes('data:text/html');
+  }
+  return compact.startsWith('javascript:') || compact.startsWith('data:text/html');
+}
+
+function sanitizeImportedTag(tag) {
+  const closing = tag.match(/^<\s*\/\s*([a-z][\w:-]*)[^>]*>$/i);
+  if (closing) return IMPORT_BLOCKED_ELEMENTS.has(closing[1].toLowerCase()) ? '' : `</${closing[1]}>`;
+
+  const opening = tag.match(/^<\s*([a-z][\w:-]*)([\s\S]*?)(\/?)>$/i);
+  if (!opening) return /^<!--/.test(tag) ? '' : tag;
+  const [, tagName, rawAttributes, selfClosing] = opening;
+  if (IMPORT_BLOCKED_ELEMENTS.has(tagName.toLowerCase())) return '';
+
+  const attributePattern = /\s+([^\s"'<>\/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+  const safeAttributes = [];
+  for (const match of rawAttributes.matchAll(attributePattern)) {
+    const attributeName = match[1].toLowerCase();
+    const attributeValue = match[2] ?? match[3] ?? match[4] ?? '';
+    if (attributeName.startsWith('on') || attributeName === 'srcdoc') continue;
+    if (IMPORT_URL_ATTRIBUTES.has(attributeName) && isDangerousImportedUrl(attributeValue, attributeName)) continue;
+    if (attributeName === 'style' && /(?:expression\s*\(|javascript\s*:|data\s*:\s*text\/html)/i.test(decodeImportedUrl(attributeValue))) continue;
+    safeAttributes.push(match[0].trim());
+  }
+  return `<${tagName}${safeAttributes.length ? ` ${safeAttributes.join(' ')}` : ''}${selfClosing ? ' /' : ''}>`;
+}
+
+function sanitizeImportedHtml(value) {
+  let sanitized = String(value || '');
+  for (const tagName of ['script', 'iframe', 'object']) {
+    const pairedElement = new RegExp(`<\\s*${tagName}\\b[^>]*>[\\s\\S]*?<\\s*\\/\\s*${tagName}\\s*>`, 'gi');
+    let previous;
+    do {
+      previous = sanitized;
+      sanitized = sanitized.replace(pairedElement, '');
+    } while (sanitized !== previous);
+  }
+  return sanitized.replace(/<!--[\s\S]*?-->|<[^>]*>/g, sanitizeImportedTag);
+}
+
+function readableImportedText(value) {
+  const markdownWithoutSyntax = String(value || '')
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/^[ \t]{0,3}(?:#{1,6}[ \t]+|>[ \t]*|[-+*][ \t]+|\d+[.)][ \t]+)/gm, '')
+    .replace(/```[^\n]*|~~|[*_`]/g, '');
+  return stripHtml(markdownWithoutSyntax).replace(/\s+/g, ' ').trim();
+}
+
+function titleFromImportedBody(body, filename = '', fallback = '未命名文章') {
+  const raw = String(body || '');
+  const markdownHeading = raw.match(/^[ \t]{0,3}#[ \t]+(.+?)[ \t]*#*[ \t]*$/m)?.[1];
+  const htmlTitle = raw.match(/<title\b[^>]*>([\s\S]*?)<\/title\s*>/i)?.[1];
+  const htmlHeading = raw.match(/<h1\b[^>]*>([\s\S]*?)<\/h1\s*>/i)?.[1];
+  const firstReadableLine = raw.split(/\r?\n/)
+    .map(line => stripHtml(line).trim())
+    .find(Boolean);
+  const filenameTitle = path.basename(String(filename || '').trim())
+    .replace(/\.(?:md|markdown|html?|txt)$/i, '');
+  for (const candidate of [markdownHeading, htmlTitle, htmlHeading, firstReadableLine, filenameTitle]) {
+    const title = stripHtml(candidate || '').trim();
+    if (title) return title;
+  }
+  return fallback;
+}
+
+function importContent(payload = {}) {
+  const rawBody = String(payload.body ?? '');
+  if (!rawBody.trim()) throw new Error('导入正文不能为空');
+  if (Buffer.byteLength(rawBody, 'utf8') > MAX_IMPORTED_BODY_BYTES) {
+    throw new Error('导入正文不能超过 5 MiB');
+  }
+  const filename = String(payload.filename ?? '').trim();
+  if (filename && !/\.(?:md|markdown|html|htm|txt)$/i.test(filename)) {
+    throw new Error('文件格式不支持，仅支持 .md、.markdown、.html、.htm、.txt');
+  }
+  const body = sanitizeImportedHtml(rawBody);
+  if (!body.trim()) throw new Error('导入正文不能为空');
+  const title = String(payload.title || '').trim() || titleFromImportedBody(body, filename);
+  const summary = String(payload.summary ?? '').trim()
+    || Array.from(readableImportedText(body)).slice(0, 120).join('');
+  const type = String(payload.type ?? '').trim() || '导入文章';
+  const contentId = makeId('content');
+  const timestamp = now();
+  db.prepare(`
+    INSERT INTO contents
+      (id, title, summary, body, type, plan_date, status, layout_html, images, selected_platforms, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, NULL, '已导入', '', ?, ?, ?, ?)
+  `).run(
+    contentId,
+    title,
+    summary,
+    body,
+    type,
+    encodeJson([]),
+    encodeJson([]),
+    timestamp,
+    timestamp
+  );
+  addActivity(`导入文章《${title}》`, 'content', contentId, '用户');
+  return normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
+}
+
 function updateContent(contentId, payload = {}) {
   const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
   if (!content) throw new Error('内容不存在');
@@ -1952,6 +2077,12 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === '/api/content/import' && req.method === 'POST') {
+      const body = await readBody(req);
+      sendJson(res, { ok: true, content: importContent(body) });
+      return;
+    }
+
     const contentUpdateMatch = url.pathname.match(/^\/api\/content\/([^/]+)$/);
     if (contentUpdateMatch && req.method === 'POST') {
       const body = await readBody(req);
@@ -2045,6 +2176,7 @@ module.exports = {
   createPlansRange,
   updatePlan,
   generateContent,
+  importContent,
   updateContent,
   layoutContent,
   saveLocalDraft,

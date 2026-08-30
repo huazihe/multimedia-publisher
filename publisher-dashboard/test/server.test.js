@@ -1,5 +1,11 @@
 const assert = require('node:assert/strict');
-const test = require('node:test');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { after, test } = require('node:test');
+
+const testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'publisher-dashboard-test-'));
+process.env.PUBLISHER_DB = path.join(testDataDir, 'publisher.sqlite');
 
 const {
   parsePlatformOutput,
@@ -11,8 +17,25 @@ const {
   contentToMarkdown,
   generateContent,
   updateContent,
+  importContent,
+  getDashboardData,
+  server,
   db,
 } = require('../server');
+
+after(async () => {
+  if (server.listening) {
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+  db.close();
+  fs.rmSync(testDataDir, { recursive: true, force: true });
+});
+
+function cleanupImportedContent(content) {
+  if (!content?.id) return;
+  db.prepare("DELETE FROM activity WHERE target_type = 'content' AND target_id = ?").run(content.id);
+  db.prepare('DELETE FROM contents WHERE id = ?').run(content.id);
+}
 
 test('parsePlatformOutput reads CLI platform list', () => {
   const output = [
@@ -132,5 +155,262 @@ test('content body can be updated', () => {
   } finally {
     if (content?.id) db.prepare('DELETE FROM contents WHERE id = ?').run(content.id);
     db.prepare("DELETE FROM weekly_plans WHERE date = '2099-02-02'").run();
+  }
+});
+
+test('imports Markdown title and body with imported status', () => {
+  let content;
+  try {
+    const body = '# 导入标题\n\n正文内容';
+    content = importContent({ filename: 'article.md', body });
+
+    assert.equal(content.title, '导入标题');
+    assert.equal(content.body, body);
+    assert.equal(content.status, '已导入');
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('explicit imported title wins over the Markdown heading', () => {
+  let content;
+  try {
+    content = importContent({
+      filename: 'article.md',
+      title: '显式标题',
+      body: '# Markdown 标题\n\n正文内容',
+    });
+
+    assert.equal(content.title, '显式标题');
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('uses the HTML title when no imported title is provided', () => {
+  let content;
+  try {
+    content = importContent({
+      filename: 'article.html',
+      body: '<html><head><title>HTML 标题</title></head><body><p>正文内容</p></body></html>',
+    });
+
+    assert.equal(content.title, 'HTML 标题');
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('falls back to the first HTML h1 when the title element is absent', () => {
+  let content;
+  try {
+    content = importContent({
+      filename: 'article.htm',
+      body: '<article><h1 class="headline">HTML 一级标题</h1><p>正文内容</p></article>',
+    });
+
+    assert.equal(content.title, 'HTML 一级标题');
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('uses the first non-empty plain-text line as the imported title', () => {
+  let content;
+  try {
+    content = importContent({
+      filename: 'article.txt',
+      body: '\n  \n纯文本第一行\n第二行正文',
+    });
+
+    assert.equal(content.title, '纯文本第一行');
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('falls back to the filename without its supported extension', () => {
+  let content;
+  try {
+    content = importContent({
+      filename: '文件名标题.markdown',
+      body: '<img src="https://example.com/article.png" alt="">',
+    });
+
+    assert.equal(content.title, '文件名标题');
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('rejects a non-empty filename with an unsupported extension', () => {
+  let insertedContent;
+  try {
+    assert.throws(() => {
+      insertedContent = importContent({ filename: 'article.docx', body: '有效正文' });
+    }, /文件格式不支持，仅支持 \.md、\.markdown、\.html、\.htm、\.txt/);
+  } finally {
+    cleanupImportedContent(insertedContent);
+  }
+});
+
+test('rejects empty or whitespace-only imported content', () => {
+  let insertedContent;
+  try {
+    assert.throws(() => {
+      insertedContent = importContent({ filename: 'empty.txt', body: ' \n\t ' });
+    }, /导入正文不能为空/);
+  } finally {
+    cleanupImportedContent(insertedContent);
+  }
+});
+
+test('rejects imported content over 5 MiB by UTF-8 byte size', () => {
+  let insertedContent;
+  const oversizedBody = `标题\n${'你'.repeat(Math.floor((5 * 1024 * 1024) / 3) + 1)}`;
+  try {
+    assert.throws(() => {
+      insertedContent = importContent({ filename: 'oversized.txt', body: oversizedBody });
+    }, /导入正文不能超过 5 MiB/);
+  } finally {
+    cleanupImportedContent(insertedContent);
+  }
+});
+
+test('removes dangerous imported HTML while preserving safe article markup', () => {
+  let content;
+  try {
+    content = importContent({
+      filename: 'safe-article.html',
+      body: [
+        '<!doctype html><html><head><title>安全文章</title>',
+        '<meta http-equiv="refresh" content="0;url=javascript:alert(1)">',
+        '<link rel="stylesheet" href="javascript:alert(1)"></head>',
+        '<body onload="alert(1)"><script>alert(1)</script>',
+        '<iframe src="https://evil.example">危险框架</iframe>',
+        '<object data="https://evil.example"><p>危险对象</p></object>',
+        '<embed src="data:text/html,&lt;script&gt;alert(1)&lt;/script&gt;">',
+        '<h1 onclick="alert(1)">安全标题</h1>',
+        '<p onmouseover="alert(1)">安全正文 ',
+        '<a href=" javascript:alert(1)">危险链接</a> ',
+        '<a href="data:text/html;base64,PHNjcmlwdD4=">危险数据</a> ',
+        '<a href="https://safe.example/article">安全链接</a></p>',
+        '<img src="https://safe.example/image.png" alt="安全图片" onerror="alert(1)">',
+        '<table><tr><td>安全表格</td></tr></table>',
+        '<pre><code>const ok = true;</code></pre></body></html>',
+      ].join('\n'),
+    });
+
+    assert.doesNotMatch(content.body, /<(?:script|iframe|object|embed|meta|link)\b/i);
+    assert.doesNotMatch(content.body, /\son[a-z0-9_-]+\s*=/i);
+    assert.doesNotMatch(content.body, /javascript\s*:|data\s*:\s*text\/html/i);
+    assert.match(content.body, /<h1[^>]*>安全标题<\/h1>/);
+    assert.match(content.body, /<p[^>]*>安全正文/);
+    assert.match(content.body, /href="https:\/\/safe\.example\/article"/);
+    assert.match(content.body, /<img[^>]*src="https:\/\/safe\.example\/image\.png"[^>]*alt="安全图片"[^>]*>/);
+    assert.match(content.body, /<table><tr><td>安全表格<\/td><\/tr><\/table>/);
+    assert.match(content.body, /<pre><code>const ok = true;<\/code><\/pre>/);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('stores imported defaults and derives a 120-character readable summary', () => {
+  let content;
+  try {
+    const readableBody = '正文内容'.repeat(50);
+    content = importContent({ filename: 'summary.md', body: `# 摘要标题\n\n${readableBody}` });
+
+    assert.match(content.id, /^content_/);
+    assert.equal(content.summary, `摘要标题 ${readableBody}`.slice(0, 120));
+    assert.equal(content.type, '导入文章');
+    assert.equal(content.plan_date, null);
+    assert.equal(content.layout_html, '');
+    assert.deepEqual(content.images, []);
+    assert.deepEqual(content.selected_platforms, []);
+    assert.equal(content.created_at, content.updated_at);
+    assert.match(content.created_at, /^\d{4}-\d{2}-\d{2}T/);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('keeps a provided summary and trims a provided content type', () => {
+  let content;
+  try {
+    content = importContent({
+      filename: 'custom.txt',
+      body: '自定义字段文章\n正文',
+      summary: '  自定义摘要  ',
+      type: '  外部资料  ',
+    });
+
+    assert.equal(content.summary, '自定义摘要');
+    assert.equal(content.type, '外部资料');
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('records an activity for the imported article', () => {
+  let content;
+  try {
+    content = importContent({ filename: 'activity.txt', body: '活动记录文章\n正文' });
+    const activity = db.prepare("SELECT * FROM activity WHERE target_type = 'content' AND target_id = ?").get(content.id);
+
+    assert.ok(activity);
+    assert.equal(activity.actor, '用户');
+    assert.equal(activity.action, '导入文章《活动记录文章》');
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('returns imported content in dashboard content data', () => {
+  let content;
+  try {
+    content = importContent({ filename: 'dashboard.txt', body: '内容列表文章\n正文' });
+    const listed = getDashboardData().contents.find(item => item.id === content.id);
+
+    assert.ok(listed);
+    assert.equal(listed.title, '内容列表文章');
+    assert.equal(listed.status, '已导入');
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('POST /api/content/import imports and returns content', async () => {
+  const title = `端点导入文章-${Date.now()}`;
+  let content;
+  await new Promise((resolve, reject) => {
+    const onError = error => reject(error);
+    server.once('error', onError);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', onError);
+      resolve();
+    });
+  });
+
+  try {
+    const { port } = server.address();
+    const response = await fetch(`http://127.0.0.1:${port}/api/content/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: 'endpoint.md', title, body: '# 被覆盖标题\n\n端点正文' }),
+    });
+    const result = await response.json();
+    content = result.content;
+
+    assert.equal(response.status, 200);
+    assert.equal(result.ok, true);
+    assert.equal(content.title, title);
+    assert.equal(content.status, '已导入');
+  } finally {
+    content ||= db.prepare('SELECT id FROM contents WHERE title = ?').get(title);
+    cleanupImportedContent(content);
+    if (server.listening) {
+      await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
   }
 });
