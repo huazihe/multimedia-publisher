@@ -172,6 +172,40 @@ test('imports Markdown title and body with imported status', () => {
   }
 });
 
+test('preserves a Markdown autolink verbatim', () => {
+  let content;
+  try {
+    const body = '\n# 链接文章\n\n访问 <https://safe.example/path>\n';
+    content = importContent({ filename: 'autolink.md', body });
+
+    assert.equal(content.body, body.trim());
+    assert.match(content.body, /<https:\/\/safe\.example\/path>/);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('preserves a script element inside a Markdown code fence as text', () => {
+  let content;
+  try {
+    const body = [
+      '',
+      '# 代码示例',
+      '',
+      '```html',
+      '<script>alert("示例")</script>',
+      '```',
+      '',
+    ].join('\n');
+    content = importContent({ filename: 'code-example.markdown', body });
+
+    assert.equal(content.body, body.trim());
+    assert.match(content.body, /<script>alert\("示例"\)<\/script>/);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
 test('explicit imported title wins over the Markdown heading', () => {
   let content;
   try {
@@ -238,6 +272,17 @@ test('falls back to the filename without its supported extension', () => {
     });
 
     assert.equal(content.title, '文件名标题');
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('uses the final unnamed title fallback when no title source is available', () => {
+  let content;
+  try {
+    content = importContent({ body: '![](https://safe.example/image.png)' });
+
+    assert.equal(content.title, '未命名文章');
   } finally {
     cleanupImportedContent(content);
   }
@@ -310,6 +355,29 @@ test('removes dangerous imported HTML while preserving safe article markup', () 
     assert.match(content.body, /<img[^>]*src="https:\/\/safe\.example\/image\.png"[^>]*alt="安全图片"[^>]*>/);
     assert.match(content.body, /<table><tr><td>安全表格<\/td><\/tr><\/table>/);
     assert.match(content.body, /<pre><code>const ok = true;<\/code><\/pre>/);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('removes SVG animation and resource elements from imported HTML', () => {
+  let content;
+  try {
+    content = importContent({
+      filename: 'svg-attack.html',
+      body: [
+        '<article><p>保留正文</p>',
+        '<svg xmlns="http://www.w3.org/2000/svg">',
+        '<animate attributeName="href" values="https://safe.example; javascript:alert(1)"></animate>',
+        '<use href="https://safe.example/icon.svg#icon"></use>',
+        '</svg><p>保留结尾</p></article>',
+      ].join(''),
+    });
+
+    assert.doesNotMatch(content.body, /<(?:svg|animate|use)\b/i);
+    assert.doesNotMatch(content.body, /javascript\s*:/i);
+    assert.match(content.body, /<p>保留正文<\/p>/);
+    assert.match(content.body, /<p>保留结尾<\/p>/);
   } finally {
     cleanupImportedContent(content);
   }

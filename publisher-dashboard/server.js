@@ -1283,7 +1283,12 @@ function titleFromMarkdown(body, fallback = '未命名内容') {
   return cleanHeading || fallback;
 }
 
-const IMPORT_BLOCKED_ELEMENTS = new Set(['script', 'iframe', 'object', 'embed', 'meta', 'link']);
+const IMPORT_BLOCKED_ELEMENTS = new Set([
+  'script', 'iframe', 'object', 'embed', 'meta', 'link',
+  'svg', 'animate', 'animatemotion', 'animatetransform', 'set', 'use', 'image', 'foreignobject',
+  'mpath', 'feimage', 'symbol', 'defs', 'pattern', 'mask', 'clippath', 'lineargradient',
+  'radialgradient', 'filter', 'marker',
+]);
 const IMPORT_URL_ATTRIBUTES = new Set([
   'href', 'src', 'srcset', 'xlink:href', 'action', 'formaction', 'poster', 'background', 'cite',
 ]);
@@ -1333,7 +1338,7 @@ function sanitizeImportedTag(tag) {
 
 function sanitizeImportedHtml(value) {
   let sanitized = String(value || '');
-  for (const tagName of ['script', 'iframe', 'object']) {
+  for (const tagName of ['script', 'iframe', 'object', 'svg']) {
     const pairedElement = new RegExp(`<\\s*${tagName}\\b[^>]*>[\\s\\S]*?<\\s*\\/\\s*${tagName}\\s*>`, 'gi');
     let previous;
     do {
@@ -1353,13 +1358,22 @@ function readableImportedText(value) {
   return stripHtml(markdownWithoutSyntax).replace(/\s+/g, ' ').trim();
 }
 
+function isImportedHtml(filename, body) {
+  if (/\.(?:html|htm)$/i.test(String(filename || ''))) return true;
+  const trimmed = String(body || '').replace(/^\uFEFF/, '').trimStart();
+  return /^<!doctype\s+html\b/i.test(trimmed) || /^<html[\s>]/i.test(trimmed);
+}
+
 function titleFromImportedBody(body, filename = '', fallback = '未命名文章') {
   const raw = String(body || '');
   const markdownHeading = raw.match(/^[ \t]{0,3}#[ \t]+(.+?)[ \t]*#*[ \t]*$/m)?.[1];
   const htmlTitle = raw.match(/<title\b[^>]*>([\s\S]*?)<\/title\s*>/i)?.[1];
   const htmlHeading = raw.match(/<h1\b[^>]*>([\s\S]*?)<\/h1\s*>/i)?.[1];
   const firstReadableLine = raw.split(/\r?\n/)
-    .map(line => stripHtml(line).trim())
+    .map(line => {
+      const markdownImage = line.match(/^[ \t]*!\[([^\]]*)\]\([^)]+\)[ \t]*$/);
+      return stripHtml(markdownImage ? markdownImage[1] : line).trim();
+    })
     .find(Boolean);
   const filenameTitle = path.basename(String(filename || '').trim())
     .replace(/\.(?:md|markdown|html?|txt)$/i, '');
@@ -1380,7 +1394,10 @@ function importContent(payload = {}) {
   if (filename && !/\.(?:md|markdown|html|htm|txt)$/i.test(filename)) {
     throw new Error('文件格式不支持，仅支持 .md、.markdown、.html、.htm、.txt');
   }
-  const body = sanitizeImportedHtml(rawBody);
+  const trimmedBody = rawBody.trim();
+  const body = isImportedHtml(filename, trimmedBody)
+    ? sanitizeImportedHtml(trimmedBody).trim()
+    : trimmedBody;
   if (!body.trim()) throw new Error('导入正文不能为空');
   const title = String(payload.title || '').trim() || titleFromImportedBody(body, filename);
   const summary = String(payload.summary ?? '').trim()
