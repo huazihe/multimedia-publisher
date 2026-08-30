@@ -200,7 +200,7 @@ test('renders fenced Markdown markup as escaped code nodes', () => {
     content = importContent({ filename: 'code-example.markdown', body });
 
     assert.match(content.body, /<h1>代码示例<\/h1>/);
-    assert.match(content.body, /<pre><code>&lt;article data-action=&quot;publish&quot;&gt;&lt;script&gt;alert\(&quot;示例&quot;\)&lt;\/script&gt;&lt;\/article&gt;<\/code><\/pre>/);
+    assert.match(content.body, /<pre><code class="language-html">&lt;article data-action=&quot;publish&quot;&gt;&lt;script&gt;alert\(&quot;示例&quot;\)&lt;\/script&gt;&lt;\/article&gt;<\/code><\/pre>/);
     assert.doesNotMatch(content.body, /<script\b|<[^>]+\sdata-action\s*=/i);
   } finally {
     cleanupImportedContent(content);
@@ -235,7 +235,7 @@ test('sanitizes mixed HTML while rendering protected Markdown literals safely', 
     assert.doesNotMatch(content.body, /onclick\s*=|href="javascript:|alert\("危险"\)/i);
     assert.match(content.body, /<article>\s*<p><a>保留正文<\/a><\/p>/);
     assert.match(content.body, /<a href="https:\/\/safe\.example\/path">https:\/\/safe\.example\/path<\/a>/);
-    assert.match(content.body, /<pre><code>&lt;script&gt;alert\(&quot;示例&quot;\)&lt;\/script&gt;<\/code><\/pre>/);
+    assert.match(content.body, /<pre><code class="language-html">&lt;script&gt;alert\(&quot;示例&quot;\)&lt;\/script&gt;<\/code><\/pre>/);
     assert.ok(content.body.includes(forgedToken));
   } finally {
     cleanupImportedContent(content);
@@ -470,6 +470,17 @@ test('ignores Markdown headings inside fenced, indented, and inline code', () =>
     content = importContent({
       filename: 'metadata.md',
       body: [
+        '<!--',
+        '# 评论伪标题',
+        '-->',
+        '<script>\n# 脚本伪标题\n</script>',
+        '<iframe>\n# iframe 伪标题\n</iframe>',
+        '<object>\n# object 伪标题\n</object>',
+        '<embed>\n# embed 伪标题\n</embed>',
+        '<style>\n# style 伪标题\n</style>',
+        '<svg>\n# svg 伪标题\n</svg>',
+        '<meta>\n# meta 伪标题\n</meta>',
+        '<link>\n# link 伪标题\n</link>',
         '```markdown',
         '# 围栏伪标题',
         '```',
@@ -482,6 +493,49 @@ test('ignores Markdown headings inside fenced, indented, and inline code', () =>
 
     assert.equal(content.title, '真实 Markdown 标题');
     assert.match(content.body, /<h1>真实 Markdown 标题<\/h1>/);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('preserves inline and fenced code through import and contentToMarkdown', () => {
+  let content;
+  try {
+    content = importContent({
+      filename: 'roundtrip-code.md',
+      body: [
+        '# 代码往返',
+        '',
+        'Inline ``value with `tick` inside`` end.',
+        '',
+        '```js',
+        'const html = "<article data-action=\\"publish\\">";',
+        'console.log(`tick`);',
+        '```',
+      ].join('\n'),
+    });
+    const markdown = contentToMarkdown(content);
+
+    assert.match(content.body, /<code>value with `tick` inside<\/code>/);
+    assert.match(content.body, /<pre><code class="language-js">/);
+    assert.match(markdown, /Inline ``value with `tick` inside`` end\./);
+    assert.match(markdown, /```js\nconst html = "<article data-action=\\"publish\\">";\nconsole\.log\(`tick`\);\n```/);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('converts a code-only imported body back to fenced Markdown', () => {
+  let content;
+  try {
+    content = importContent({
+      filename: 'code-only.md',
+      body: '```python\nprint("<safe>")\n```',
+    });
+    const markdown = contentToMarkdown(content);
+
+    assert.match(markdown, /```python\nprint\("<safe>"\)\n```/);
+    assert.doesNotMatch(markdown, /<pre>|<code/);
   } finally {
     cleanupImportedContent(content);
   }

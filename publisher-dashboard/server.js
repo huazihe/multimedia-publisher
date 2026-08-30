@@ -502,6 +502,8 @@ function markdownToImportedHtml(markdown) {
       flushParagraph();
       const fenceCharacter = openingFence[1][0];
       const fenceLength = openingFence[1].length;
+      const info = line.slice(openingFence[0].length).trim().split(/\s+/)[0] || '';
+      const language = /^[A-Za-z0-9_+-]+$/.test(info) ? info : '';
       const codeLines = [];
       index++;
       while (index < lines.length) {
@@ -515,7 +517,7 @@ function markdownToImportedHtml(markdown) {
         codeLines.push(lines[index]);
         index++;
       }
-      output.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+      output.push(`<pre><code${language ? ` class="language-${escapeHtml(language)}"` : ''}>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
       continue;
     }
 
@@ -590,7 +592,7 @@ function markdownToHtml(markdown, options = {}) {
 }
 
 function isHtmlBody(value) {
-  return /<(article|section|p|div|h[1-6]|img|figure|br|ul|ol|li|blockquote|strong|em)\b/i.test(String(value || ''));
+  return /<(article|section|p|div|h[1-6]|img|figure|br|hr|ul|ol|li|blockquote|strong|em|pre|code|table|a)\b/i.test(String(value || ''));
 }
 
 function stripHtml(value) {
@@ -623,11 +625,70 @@ function extractEmbeddedHtmlDocument(value) {
   return isFullHtmlDocument(documentText) ? documentText : '';
 }
 
+function decodeHtmlText(value) {
+  return String(value || '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&(?:#x([0-9a-f]+)|#([0-9]+)|(amp|lt|gt|quot|apos|nbsp));/gi, (entity, hex, decimal, name) => {
+      if (hex || decimal) {
+        const codePoint = Number.parseInt(hex || decimal, hex ? 16 : 10);
+        if (Number.isInteger(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff) {
+          try {
+            return String.fromCodePoint(codePoint);
+          } catch {
+            return entity;
+          }
+        }
+        return entity;
+      }
+      return ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' })[name.toLowerCase()] || entity;
+    });
+}
+
+function longestBacktickRun(value) {
+  let longest = 0;
+  for (const match of String(value || '').matchAll(/`+/g)) longest = Math.max(longest, match[0].length);
+  return longest;
+}
+
+function inlineCodeToMarkdown(value) {
+  const code = decodeHtmlText(value).replace(/\r\n?|\n/g, ' ');
+  const delimiter = '`'.repeat(Math.max(1, longestBacktickRun(code) + 1));
+  const padding = /^(?:`| )|(?:`| )$/.test(code) ? ' ' : '';
+  return `${delimiter}${padding}${code}${padding}${delimiter}`;
+}
+
+function fencedCodeToMarkdown(value, language = '') {
+  const code = decodeHtmlText(value).replace(/\r\n?/g, '\n');
+  const fence = '`'.repeat(Math.max(3, longestBacktickRun(code) + 1));
+  return `${fence}${language}\n${code}${code.endsWith('\n') ? '' : '\n'}${fence}`;
+}
+
+function codeLanguageFromAttributes(attributes) {
+  const classMatch = String(attributes || '').match(/\bclass\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/i);
+  const classes = (classMatch?.[1] || classMatch?.[2] || classMatch?.[3] || '').split(/\s+/);
+  return classes.map(className => className.match(/^language-([A-Za-z0-9_+-]+)$/)?.[1]).find(Boolean) || '';
+}
+
 function htmlToMarkdown(html) {
   const source = String(html || '');
+  let namespace;
+  do {
+    namespace = `__WEIBOT_CODE_${randomBytes(18).toString('hex')}_`;
+  } while (source.includes(namespace));
+  const codeBlocks = [];
+  const protectCode = markdown => {
+    const token = `${namespace}${codeBlocks.length}__`;
+    codeBlocks.push(markdown);
+    return token;
+  };
+
   let converted = source
     .replace(/<script[\s\S]*?<\/script>/gi, '')
     .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<pre\b[^>]*>\s*<code\b([^>]*)>([\s\S]*?)<\/code>\s*<\/pre>/gi,
+      (_, attributes, code) => `\n\n${protectCode(fencedCodeToMarkdown(code, codeLanguageFromAttributes(attributes)))}\n\n`)
+    .replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, (_, code) => protectCode(inlineCodeToMarkdown(code)))
     .replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, (_, text) => `\n# ${stripHtml(text)}\n`)
     .replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, (_, text) => `\n## ${stripHtml(text)}\n`)
     .replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, (_, text) => `\n### ${stripHtml(text)}\n`)
@@ -638,7 +699,11 @@ function htmlToMarkdown(html) {
     .replace(/<\/(p|div|li|blockquote|figure)>/gi, '\n\n')
     .replace(/<[^>]+>/g, '');
   converted = stripHtml(converted).replace(/\n{3,}/g, '\n\n');
-  return converted;
+  const tokenPattern = new RegExp(`${namespace}(\\d+)__`, 'g');
+  return converted
+    .replace(tokenPattern, (token, index) => codeBlocks[Number(index)] ?? token)
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 function contentBodyToMarkdown(body) {
@@ -1437,6 +1502,7 @@ const IMPORT_GLOBAL_ALLOWED_ATTRIBUTES = new Set(['title']);
 const IMPORT_ALLOWED_ATTRIBUTES = {
   a: new Set(['href', 'title']),
   img: new Set(['src', 'alt', 'title', 'width', 'height']),
+  code: new Set(['class', 'title']),
   ol: new Set(['start', 'reversed', 'title']),
   li: new Set(['value', 'title']),
   th: new Set(['colspan', 'rowspan', 'scope', 'title']),
@@ -1483,6 +1549,7 @@ function isAllowedImportedAttribute(tagName, attributeName, attributeValue) {
   }
   if (['start', 'value'].includes(attributeName)) return /^-?\d+$/.test(attributeValue);
   if (attributeName === 'scope') return /^(?:row|col|rowgroup|colgroup)$/i.test(attributeValue);
+  if (attributeName === 'class') return /^language-[A-Za-z0-9_+-]+$/.test(attributeValue);
   return attributeName === 'reversed' || attributeName === 'title' || attributeName === 'alt';
 }
 
@@ -1683,9 +1750,24 @@ function importedHtmlMetadataProbe(body) {
   return probe.replace(/<\s*\/?\s*(?:meta|link|base)\b[^>]*>/gi, '');
 }
 
+function importedMarkdownMetadataProbe(body) {
+  let probe = String(body || '').replace(/<!--[\s\S]*?-->/g, '');
+  const blockedBlocks = [...IMPORT_BLOCKED_CONTENT_ELEMENTS, 'embed', 'meta', 'link', 'base'];
+  for (const tagName of blockedBlocks) {
+    const pairedElement = new RegExp(`<\\s*${tagName}\\b[^>]*>[\\s\\S]*?<\\s*\\/\\s*${tagName}\\s*>`, 'gi');
+    let previous;
+    do {
+      previous = probe;
+      probe = probe.replace(pairedElement, '');
+    } while (probe !== previous);
+  }
+  probe = probe.replace(/<\s*\/?\s*(?:embed|meta|link|base)\b[^>]*>/gi, '');
+  return importedHtmlDetectionProbe(probe);
+}
+
 function titleFromImportedBody(body, filename = '', format = 'text', fallback = '未命名文章') {
   const raw = String(body || '');
-  const markdownProbe = importedHtmlDetectionProbe(raw);
+  const markdownProbe = importedMarkdownMetadataProbe(raw);
   const htmlProbe = importedHtmlMetadataProbe(raw);
   const markdownHeading = markdownProbe.match(/^[ \t]{0,3}#[ \t]+(.+?)[ \t]*#*[ \t]*$/m)?.[1];
   const htmlTitle = htmlProbe.match(/<title\b[^>]*>([\s\S]*?)<\/title\s*>/i)?.[1];
