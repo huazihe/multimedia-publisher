@@ -1975,6 +1975,83 @@ function contentToMarkdown(content) {
   return `---\ntitle: ${content.title}\n---\n\n# ${content.title}\n\n${body}\n`;
 }
 
+function previewApiError(message, statusCode, apiCode) {
+  const error = statusError(message, statusCode);
+  error.apiCode = apiCode;
+  return error;
+}
+
+function sanitizePreviewErrorDetail(value) {
+  return stripAnsi(String(value || ''))
+    .replace(/\r?\n+/g, ' ')
+    .replace(/\b(cookie|token|authorization|password)\s*[:=]\s*(?:"[^"]*"|'[^']*'|\S+)/gi, '$1=[redacted]')
+    .replace(/(?:[A-Za-z]:[\\/]\S+|\/\S+)/g, '[path]')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 200);
+}
+
+function isPreviewTimeout(error) {
+  const code = String(error?.code || '').toUpperCase();
+  return error?.killed === true
+    || code === 'ETIMEDOUT'
+    || code === 'ERR_CHILD_PROCESS_TIMEOUT';
+}
+
+function isPreviewCliUnavailable(error) {
+  const code = String(error?.code || '').toUpperCase();
+  const message = String(error?.message || '');
+  return code === 'ENOENT'
+    || code === 'MODULE_NOT_FOUND'
+    || /CLI\s+尚未构建|Cannot find module.+packages[\\/]cli[\\/]dist/i.test(message);
+}
+
+function mapPreviewExecutionError(error, detail) {
+  if (isPreviewTimeout(error)) {
+    return previewApiError('平台预览超时，请重试', 504, 'PREVIEW_TIMEOUT');
+  }
+  if (isPreviewCliUnavailable(error)) {
+    return previewApiError(
+      '平台预览服务尚未构建，请先运行 npm run build',
+      503,
+      'PREVIEW_CLI_UNAVAILABLE'
+    );
+  }
+  const safeDetail = sanitizePreviewErrorDetail(detail || error?.message);
+  return previewApiError(
+    safeDetail ? `平台预览失败：${safeDetail}` : '平台预览失败',
+    502,
+    'PREVIEW_CLI_FAILED'
+  );
+}
+
+function validatePlatformPreviewResult(preview, platformId) {
+  const validFormats = new Set(['html', 'markdown', 'text']);
+  const valid = preview
+    && typeof preview === 'object'
+    && !Array.isArray(preview)
+    && preview.platform === platformId
+    && typeof preview.title === 'string'
+    && preview.title.trim().length > 0
+    && validFormats.has(preview.format)
+    && typeof preview.content === 'string'
+    && typeof preview.htmlPreview === 'string'
+    && Number.isInteger(preview.imageCount)
+    && preview.imageCount >= 0
+    && Array.isArray(preview.warnings)
+    && preview.warnings.every(warning => typeof warning === 'string')
+    && (preview.limits === undefined
+      || (preview.limits !== null && typeof preview.limits === 'object' && !Array.isArray(preview.limits)));
+  if (!valid) {
+    throw previewApiError(
+      '平台预览返回的字段结构无效',
+      502,
+      'PREVIEW_INVALID_RESPONSE'
+    );
+  }
+  return preview;
+}
+
 async function previewContentForPlatform(contentId, platform, options = {}) {
   const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
   if (!content) throw statusError('内容不存在', 404);
@@ -1986,16 +2063,26 @@ async function previewContentForPlatform(contentId, platform, options = {}) {
     throw statusError(`平台不存在: ${platformId}`, 400);
   }
 
-  const previewDir = fs.mkdtempSync(path.join(os.tmpdir(), 'publisher-dashboard-preview-'));
+  const tempRoot = path.resolve(options.tempRoot || os.tmpdir());
+  const previewDir = fs.mkdtempSync(path.join(tempRoot, 'publisher-dashboard-preview-'));
   const markdownFile = path.join(previewDir, 'content.md');
   try {
     fs.writeFileSync(markdownFile, contentToMarkdown(content), 'utf8');
 
     const runner = options.runner || runWeibotCli;
-    const result = await runner(['preview', markdownFile, '-p', platformId], options.timeout || 30000);
+    let result;
+    try {
+      result = await runner(['preview', markdownFile, '-p', platformId], options.timeout || 30000);
+    } catch (error) {
+      throw mapPreviewExecutionError(error);
+    }
     if (result && typeof result === 'object'
       && (result.error || (result.code !== undefined && result.code !== 0))) {
-      throw statusError('平台预览命令执行失败', 502);
+      const executionError = result.error || {
+        code: result.code,
+        message: result.stderr,
+      };
+      throw mapPreviewExecutionError(executionError, result.stderr);
     }
 
     const stdout = typeof result === 'string'
@@ -2004,18 +2091,24 @@ async function previewContentForPlatform(contentId, platform, options = {}) {
     const cleanOutput = String(stdout || '').trim();
     const lines = cleanOutput ? cleanOutput.split(/\r?\n/) : [];
     if (lines.length !== 1) {
-      throw statusError('平台预览命令必须返回一行 JSON 对象', 502);
+      throw previewApiError(
+        '平台预览命令必须返回一行 JSON 对象',
+        502,
+        'PREVIEW_INVALID_RESPONSE'
+      );
     }
 
+    let preview;
     try {
-      const preview = JSON.parse(lines[0]);
-      if (!preview || typeof preview !== 'object' || Array.isArray(preview)) {
-        throw new Error('not an object');
-      }
-      return preview;
+      preview = JSON.parse(lines[0]);
     } catch {
-      throw statusError('平台预览命令返回的 JSON 无效', 502);
+      throw previewApiError(
+        '平台预览命令返回的 JSON 无效',
+        502,
+        'PREVIEW_INVALID_RESPONSE'
+      );
     }
+    return validatePlatformPreviewResult(preview, platformId);
   } finally {
     fs.rmSync(previewDir, { recursive: true, force: true });
   }
@@ -2232,12 +2325,16 @@ async function publishContent(contentId, platforms = [], options = {}) {
 
   const jobStatus = successCount === selected.length ? 'published' : (successCount > 0 ? 'partial_failed' : 'failed');
   db.prepare('UPDATE publish_jobs SET status = ?, updated_at = ? WHERE id = ?').run(jobStatus, now(), jobId);
-  db.prepare('UPDATE contents SET selected_platforms = ? WHERE id = ?').run(encodeJson(selected), contentId);
-  db.prepare('UPDATE contents SET status = ?, updated_at = ? WHERE id = ?')
-    .run(jobStatus === 'published' ? '已发布' : '发布失败', now(), contentId);
-  if (content.plan_date) {
-    db.prepare('UPDATE weekly_plans SET status = ?, updated_at = ? WHERE date = ?')
-      .run(jobStatus === 'published' ? '已发布' : '发布失败', now(), content.plan_date);
+  if (options.persistSelection !== false) {
+    db.prepare('UPDATE contents SET selected_platforms = ? WHERE id = ?').run(encodeJson(selected), contentId);
+  }
+  if (options.updateAggregateStatus !== false) {
+    db.prepare('UPDATE contents SET status = ?, updated_at = ? WHERE id = ?')
+      .run(jobStatus === 'published' ? '已发布' : '发布失败', now(), contentId);
+    if (content.plan_date) {
+      db.prepare('UPDATE weekly_plans SET status = ?, updated_at = ? WHERE date = ?')
+        .run(jobStatus === 'published' ? '已发布' : '发布失败', now(), content.plan_date);
+    }
   }
 
   addActivity(`一键发布《${content.title}》到 ${selected.length} 个平台，成功 ${successCount} 个`, 'publish_job', jobId, '运营');
@@ -2452,10 +2549,15 @@ function sendLayoutPreview(res, contentId) {
 }
 
 function createDashboardServer(options = {}) {
-  const previewOptions = options.previewRunner
-    ? { runner: options.previewRunner, timeout: options.previewTimeout }
-    : undefined;
-  const publisher = options.publisher || publishContent;
+  const previewOptions = {
+    ...(options.previewRunner ? { runner: options.previewRunner } : {}),
+    ...(options.previewTimeout ? { timeout: options.previewTimeout } : {}),
+    ...(options.previewTempRoot ? { tempRoot: options.previewTempRoot } : {}),
+  };
+  const publishDependencies = {
+    ...(options.preflight ? { preflight: options.preflight } : {}),
+    ...(options.platformPublisher ? { platformPublisher: options.platformPublisher } : {}),
+  };
 
   return http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -2725,14 +2827,20 @@ function createDashboardServer(options = {}) {
         throw statusError('内容不存在', 404);
       }
 
-      const result = await publisher(contentId, [platform], { publishMode: body.publishMode });
+      const result = await publishContent(contentId, [platform], {
+        ...publishDependencies,
+        publishMode: body.publishMode,
+        persistSelection: false,
+        updateAggregateStatus: false,
+      });
       sendJson(res, { ok: true, ...result });
       return;
     }
 
     if (url.pathname === '/api/publish' && req.method === 'POST') {
       const body = await readBody(req);
-      const result = await publisher(body.contentId, body.platforms || [], {
+      const result = await publishContent(body.contentId, body.platforms || [], {
+        ...publishDependencies,
         publishMode: body.publishMode || 'direct',
       });
       sendJson(res, { ok: true, ...result });
@@ -2758,7 +2866,11 @@ function createDashboardServer(options = {}) {
     sendStatic(req, res, url.pathname);
   } catch (error) {
     const statusCode = Number.isInteger(error.statusCode) ? error.statusCode : 500;
-    sendJson(res, { ok: false, error: error.message }, statusCode);
+    sendJson(res, {
+      ok: false,
+      error: error.message,
+      ...(error.apiCode ? { code: error.apiCode } : {}),
+    }, statusCode);
   }
   });
 }
