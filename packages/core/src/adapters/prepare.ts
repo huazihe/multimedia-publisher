@@ -177,7 +177,7 @@ function processImages(root: ParentNode, config: PreprocessConfig): void {
       continue
     }
 
-    if (config.removeEmptyImages && !src) image.remove()
+    if (!src) image.remove()
   }
 
   if (config.removeSvgImages) removeElements(root, 'svg')
@@ -228,13 +228,13 @@ function unwrap(element: Element): void {
 }
 
 function isRelativeOrFragmentLink(href: string): boolean {
-  return /^(?:#|\/|\.\/|\.\.\/|\?)/.test(href.trim())
+  return /^(?:#|\/(?!\/)|\.\/|\.\.\/|\?)/.test(href.trim())
 }
 
 function isKeptDomain(href: string, domains: string[]): boolean {
   if (isRelativeOrFragmentLink(href)) return true
   try {
-    const hostname = new URL(href).hostname.toLowerCase()
+    const hostname = new URL(href, 'https://relative.invalid').hostname.toLowerCase()
     return domains.some(domain => {
       const normalizedDomain = domain.trim().replace(/^\./, '').toLowerCase()
       return hostname === normalizedDomain || hostname.endsWith(`.${normalizedDomain}`)

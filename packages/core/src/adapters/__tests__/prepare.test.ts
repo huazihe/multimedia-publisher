@@ -37,6 +37,23 @@ describe('prepareArticleForPlatform', () => {
     expect(result.article.html).toBe(result.content)
   })
 
+  it('checks protocol-relative links against WeChat keep domains', () => {
+    const protocolRelativeArticle: Article = {
+      title: '协议相对链接',
+      markdown: '',
+      html: [
+        '<p><a href="//evil.example.com/path">外部链接文字</a></p>',
+        '<p><a href="//mp.weixin.qq.com/s/allowed">微信白名单链接</a></p>',
+      ].join(''),
+    }
+
+    const result = prepareArticleForPlatform(protocolRelativeArticle, 'weixin')
+
+    expect(result.content).not.toContain('//evil.example.com/path')
+    expect(result.content).toContain('外部链接文字')
+    expect(result.content).toContain('//mp.weixin.qq.com/s/allowed')
+  })
+
   it('returns prepared Markdown for Juejin', () => {
     const result = prepareArticleForPlatform(article, 'juejin')
 
@@ -104,6 +121,26 @@ describe('prepareArticleForPlatform', () => {
     expect(result.content).toContain('<div class="content">')
     expect(result.content).toContain('src="https://img.example.com/lazy.png"')
     expect(result.content).not.toMatch(/<!--|mpprofile|特殊卡片|<section|data-|srcset|sizes|\.svg|<p><br>/i)
+  })
+
+  it('always removes images without a usable src', () => {
+    const emptyImageArticle: Article = {
+      title: '空图片清理',
+      markdown: '',
+      html: [
+        '<p>正文</p>',
+        '<img>',
+        '<img src="">',
+        '<img src="   ">',
+        '<img src="https://img.example.com/valid.png">',
+      ].join(''),
+    }
+
+    const result = prepareArticleForPlatform(emptyImageArticle, 'weibo')
+
+    expect(result.content.match(/<img\b/g) || []).toHaveLength(1)
+    expect(result.content).toContain('src="https://img.example.com/valid.png"')
+    expect(result.imageCount).toBe(1)
   })
 
   it('throws a clear error for an unknown platform', () => {
