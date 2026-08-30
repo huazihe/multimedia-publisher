@@ -386,9 +386,9 @@ function sanitizeRoot(root: ParentNode, document: Document, config: PreprocessCo
     template.innerHTML = container.innerHTML
   }
 
-  removeElements(root, 'script,object,embed,base')
+  removeElements(root, 'script,object,embed,base,link')
   removeMetaRefresh(root)
-  if (!config.keepStyles) removeElements(root, 'style,link[rel="stylesheet"]')
+  if (!config.keepStyles) removeElements(root, 'style')
   if (config.removeIframes) removeElements(root, 'iframe')
   if (config.removeComments) removeComments(root)
 

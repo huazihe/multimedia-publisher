@@ -167,6 +167,26 @@ describe('prepareArticleForPlatform', () => {
     }
   })
 
+  it('removes external link resources regardless of rel tokens or casing', () => {
+    const linkedArticle: Article = {
+      title: '外部样式安全测试',
+      markdown: '',
+      html: [
+        '<link rel="stylesheet preload" href="https://evil.example.com/multi.css">',
+        '<link REL="PreLoad StyleSheet" HREF="https://evil.example.com/mixed.css">',
+        '<link rel="preload" href="https://evil.example.com/resource.js">',
+        '<p>安全正文</p>',
+      ].join(''),
+    }
+
+    const result = prepareArticleForPlatform(linkedArticle, 'weibo')
+
+    for (const output of [result.content, result.htmlPreview, result.article.html || '']) {
+      expect(output).toContain('安全正文')
+      expect(output).not.toMatch(/<link\b|evil\.example\.com/i)
+    }
+  })
+
   it('applies configured structural and attribute cleanup rules', () => {
     const structuralArticle: Article = {
       title: '结构清理',
