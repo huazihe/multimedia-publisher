@@ -1,16 +1,109 @@
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
+import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   adapterRegistry,
   type Article,
   type PlatformAdapter,
+  type PublishOptions,
   type SyncResult,
 } from '@weibot/core'
 import type { Command } from 'commander'
 import { describe, expect, it, vi } from 'vitest'
 import { buildPlatformPreview, runDirectPreview, runDirectSync } from './direct'
 
+const sideEffectProbes = vi.hoisted(() => ({
+  createNodeRuntime: vi.fn(),
+  promiseWriteFile: vi.fn(),
+  spawn: vi.fn(),
+  writeFile: vi.fn(),
+  writeFileSync: vi.fn(),
+}))
+
+vi.mock('@weibot/core/runtime/node', async () => {
+  const actual = await vi.importActual<typeof import('@weibot/core/runtime/node')>(
+    '@weibot/core/runtime/node'
+  )
+  sideEffectProbes.createNodeRuntime.mockImplementation(actual.createNodeRuntime)
+  return {
+    ...actual,
+    createNodeRuntime: sideEffectProbes.createNodeRuntime,
+  }
+})
+
+vi.mock('node:child_process', async () => {
+  const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process')
+  return {
+    ...actual,
+    spawn: sideEffectProbes.spawn,
+  }
+})
+
+vi.mock('fs', async () => {
+  const actual = await vi.importActual<typeof import('fs')>('fs')
+  const defaultFs = (actual as typeof actual & { default?: typeof actual }).default || actual
+  return {
+    ...actual,
+    writeFile: sideEffectProbes.writeFile,
+    writeFileSync: sideEffectProbes.writeFileSync,
+    default: {
+      ...defaultFs,
+      writeFile: sideEffectProbes.writeFile,
+      writeFileSync: sideEffectProbes.writeFileSync,
+    },
+  }
+})
+
+vi.mock('node:fs/promises', async () => {
+  const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
+  return {
+    ...actual,
+    writeFile: sideEffectProbes.promiseWriteFile,
+  }
+})
+
 const fixtureFile = fileURLToPath(new URL('../test/fixtures/article.md', import.meta.url))
+const cliRoot = fileURLToPath(new URL('..', import.meta.url))
+const builtCliFile = path.join(cliRoot, 'dist/index.js')
+const importSideEffectCounts = {
+  createNodeRuntime: sideEffectProbes.createNodeRuntime.mock.calls.length,
+  promiseWriteFile: sideEffectProbes.promiseWriteFile.mock.calls.length,
+  spawn: sideEffectProbes.spawn.mock.calls.length,
+  writeFile: sideEffectProbes.writeFile.mock.calls.length,
+  writeFileSync: sideEffectProbes.writeFileSync.mock.calls.length,
+}
+
+function createTestAdapter(
+  platform: string,
+  publish: PlatformAdapter['publish']
+): PlatformAdapter {
+  return {
+    meta: {
+      id: platform,
+      name: platform,
+      icon: '',
+      homepage: '',
+      capabilities: ['article', 'draft'],
+    },
+    async init() {},
+    async checkAuth() {
+      return { isAuthenticated: true }
+    },
+    publish,
+  }
+}
+
+function runBuiltCli(args: string[]) {
+  return spawnSync(process.execPath, [builtCliFile, ...args], {
+    cwd: cliRoot,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      FORCE_COLOR: '0',
+    },
+  })
+}
 
 describe('buildPlatformPreview', () => {
   it('returns Xiaohongshu text containing the article body', () => {
@@ -74,32 +167,81 @@ describe('runDirectPreview', () => {
 })
 
 describe('runDirectSync', () => {
+  it('keeps dry-run isolated from runtime, adapters, network, child processes, and file writes', async () => {
+    expect(importSideEffectCounts).toEqual({
+      createNodeRuntime: 0,
+      promiseWriteFile: 0,
+      spawn: 0,
+      writeFile: 0,
+      writeFileSync: 0,
+    })
+    const callsBeforeDryRun = {
+      createNodeRuntime: sideEffectProbes.createNodeRuntime.mock.calls.length,
+      promiseWriteFile: sideEffectProbes.promiseWriteFile.mock.calls.length,
+      spawn: sideEffectProbes.spawn.mock.calls.length,
+      writeFile: sideEffectProbes.writeFile.mock.calls.length,
+      writeFileSync: sideEffectProbes.writeFileSync.mock.calls.length,
+    }
+
+    const publishSpy = vi.fn(async (): Promise<SyncResult> => ({
+      platform: 'xiaohongshu',
+      success: true,
+      draftOnly: true,
+      timestamp: Date.now(),
+    }))
+    const getSpy = vi.spyOn(adapterRegistry, 'get').mockResolvedValue(
+      createTestAdapter('xiaohongshu', publishSpy)
+    )
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() => {
+      throw new Error('dry-run attempted network access')
+    })
+
+    try {
+      await runDirectSync(
+        fixtureFile,
+        { platforms: 'xiaohongshu', dryRun: true },
+        {}
+      )
+
+      expect(getSpy).not.toHaveBeenCalled()
+      expect(publishSpy).not.toHaveBeenCalled()
+      expect(fetchSpy).not.toHaveBeenCalled()
+      expect(sideEffectProbes.createNodeRuntime).toHaveBeenCalledTimes(
+        callsBeforeDryRun.createNodeRuntime
+      )
+      expect(sideEffectProbes.spawn).toHaveBeenCalledTimes(callsBeforeDryRun.spawn)
+      expect(sideEffectProbes.writeFileSync).toHaveBeenCalledTimes(
+        callsBeforeDryRun.writeFileSync
+      )
+      expect(sideEffectProbes.writeFile).toHaveBeenCalledTimes(callsBeforeDryRun.writeFile)
+      expect(sideEffectProbes.promiseWriteFile).toHaveBeenCalledTimes(
+        callsBeforeDryRun.promiseWriteFile
+      )
+    } finally {
+      fetchSpy.mockRestore()
+      logSpy.mockRestore()
+      getSpy.mockRestore()
+    }
+  })
+
   it('publishes a separately prepared article for every platform', async () => {
     const publishedArticles = new Map<string, Article>()
-    const createAdapter = (platform: string): PlatformAdapter => ({
-      meta: {
-        id: platform,
-        name: platform,
-        icon: '',
-        homepage: '',
-        capabilities: ['article', 'draft'],
-      },
-      async init() {},
-      async checkAuth() {
-        return { isAuthenticated: true }
-      },
-      async publish(article): Promise<SyncResult> {
-        publishedArticles.set(platform, article)
-        return {
-          platform,
-          success: true,
-          draftOnly: true,
-          timestamp: Date.now(),
-        }
-      },
-    })
     const getSpy = vi.spyOn(adapterRegistry, 'get')
-      .mockImplementation(async platform => createAdapter(platform))
+      .mockImplementation(async platform =>
+        createTestAdapter(
+          platform,
+          async (article): Promise<SyncResult> => {
+            publishedArticles.set(platform, article)
+            return {
+              platform,
+              success: true,
+              draftOnly: true,
+              timestamp: Date.now(),
+            }
+          }
+        )
+      )
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() => {
       throw new Error('sync preparation test attempted network access')
@@ -136,6 +278,115 @@ describe('runDirectSync', () => {
       getSpy.mockRestore()
     }
   })
+
+  it('uses draft-only draft mode publish options by default', async () => {
+    const publishSpy = vi.fn(async (
+      _article: Article,
+      _options?: PublishOptions
+    ): Promise<SyncResult> => ({
+      platform: 'juejin',
+      success: true,
+      draftOnly: true,
+      timestamp: Date.now(),
+    }))
+    const getSpy = vi.spyOn(adapterRegistry, 'get').mockResolvedValue(
+      createTestAdapter('juejin', publishSpy)
+    )
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    const previousExitCode = process.exitCode
+
+    try {
+      process.exitCode = undefined
+      await runDirectSync(fixtureFile, { platforms: 'juejin' }, {})
+
+      expect(publishSpy).toHaveBeenCalledTimes(1)
+      expect(publishSpy.mock.calls[0][1]).toEqual({
+        draftOnly: true,
+        publishMode: 'draft',
+      })
+      expect(process.exitCode).toBeUndefined()
+    } finally {
+      process.exitCode = previousExitCode
+      stderrSpy.mockRestore()
+      logSpy.mockRestore()
+      getSpy.mockRestore()
+    }
+  })
+
+  it('uses direct mode and downgrades a successful draft-only adapter result', async () => {
+    const publishSpy = vi.fn(async (
+      _article: Article,
+      _options?: PublishOptions
+    ): Promise<SyncResult> => ({
+      platform: 'juejin',
+      success: true,
+      draftOnly: true,
+      message: 'adapter only saved a draft',
+      timestamp: Date.now(),
+    }))
+    const getSpy = vi.spyOn(adapterRegistry, 'get').mockResolvedValue(
+      createTestAdapter('juejin', publishSpy)
+    )
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    const previousExitCode = process.exitCode
+
+    try {
+      process.exitCode = undefined
+      await runDirectSync(fixtureFile, { platforms: 'juejin', direct: true }, {})
+
+      expect(publishSpy).toHaveBeenCalledTimes(1)
+      expect(publishSpy.mock.calls[0][1]).toEqual({
+        draftOnly: true,
+        publishMode: 'direct',
+      })
+      expect(process.exitCode).toBe(1)
+      expect(logSpy.mock.calls.flat().join(' ')).toContain('[FAIL]')
+      expect(logSpy.mock.calls.flat().join(' ')).toContain('adapter only saved a draft')
+    } finally {
+      process.exitCode = previousExitCode
+      stderrSpy.mockRestore()
+      logSpy.mockRestore()
+      getSpy.mockRestore()
+    }
+  })
+
+  it('keeps a successful direct result when the adapter confirms publication', async () => {
+    const publishSpy = vi.fn(async (
+      _article: Article,
+      _options?: PublishOptions
+    ): Promise<SyncResult> => ({
+      platform: 'juejin',
+      success: true,
+      draftOnly: false,
+      timestamp: Date.now(),
+    }))
+    const getSpy = vi.spyOn(adapterRegistry, 'get').mockResolvedValue(
+      createTestAdapter('juejin', publishSpy)
+    )
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    const previousExitCode = process.exitCode
+
+    try {
+      process.exitCode = undefined
+      await runDirectSync(fixtureFile, { platforms: 'juejin', direct: true }, {})
+
+      expect(publishSpy).toHaveBeenCalledTimes(1)
+      expect(publishSpy.mock.calls[0][1]).toEqual({
+        draftOnly: true,
+        publishMode: 'direct',
+      })
+      expect(process.exitCode).toBeUndefined()
+      expect(logSpy.mock.calls.flat().join(' ')).toContain('[OK]')
+    } finally {
+      process.exitCode = previousExitCode
+      stderrSpy.mockRestore()
+      logSpy.mockRestore()
+      getSpy.mockRestore()
+    }
+  })
 })
 
 describe('CLI preview command', () => {
@@ -164,5 +415,53 @@ describe('CLI preview command', () => {
       process.argv = previousArgv
       writeSpy.mockRestore()
     }
+  })
+})
+
+describe('built CLI preview process', () => {
+  it('prints one JSON object line and exits successfully', () => {
+    const result = runBuiltCli(['preview', fixtureFile, '-p', 'xiaohongshu'])
+
+    expect(result.error).toBeUndefined()
+    expect(result.status).toBe(0)
+    expect(result.stderr).toBe('')
+
+    const lines = result.stdout.trimEnd().split(/\r?\n/)
+    expect(lines).toHaveLength(1)
+    expect(JSON.parse(lines[0])).toMatchObject({
+      platform: 'xiaohongshu',
+      format: 'text',
+    })
+  })
+
+  it('reports an unknown platform on stderr and exits non-zero', () => {
+    const result = runBuiltCli(['preview', fixtureFile, '-p', 'unknown-platform'])
+
+    expect(result.error).toBeUndefined()
+    expect(result.status).toBe(1)
+    expect(result.stdout).toBe('')
+    expect(result.stderr.trim()).toBe('平台不存在: unknown-platform')
+  })
+
+  it('reports a missing input file on stderr and exits non-zero', () => {
+    const missingFile = path.join(cliRoot, 'test/fixtures/missing-article.md')
+    const result = runBuiltCli(['preview', missingFile, '-p', 'xiaohongshu'])
+
+    expect(result.error).toBeUndefined()
+    expect(result.status).toBe(1)
+    expect(result.stdout).toBe('')
+    expect(result.stderr).toContain('ENOENT')
+    expect(result.stderr).toContain(missingFile)
+  })
+
+  it('requires the platform option before running preview', () => {
+    const result = runBuiltCli(['preview', fixtureFile])
+
+    expect(result.error).toBeUndefined()
+    expect(result.status).toBe(1)
+    expect(result.stdout).toBe('')
+    expect(result.stderr).toContain(
+      "error: required option '-p, --platform <platform>' not specified"
+    )
   })
 })
