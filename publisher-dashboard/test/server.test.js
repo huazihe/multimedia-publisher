@@ -360,6 +360,28 @@ test('removes dangerous imported HTML while preserving safe article markup', () 
   }
 });
 
+test('sanitizes a pasted HTML fragment without a filename', () => {
+  let content;
+  try {
+    content = importContent({
+      body: [
+        '<article onclick="alert(1)"><script>alert(1)</script>',
+        '<h2>片段标题</h2>',
+        '<p><a href="javascript:alert(1)">保留正文</a></p>',
+        '<svg><animate attributeName="href" values="javascript:alert(1)"></animate></svg>',
+        '</article>',
+      ].join(''),
+    });
+
+    assert.doesNotMatch(content.body, /<(?:script|svg|animate)\b/i);
+    assert.doesNotMatch(content.body, /\sonclick\s*=|javascript\s*:/i);
+    assert.match(content.body, /<article><h2>片段标题<\/h2>/);
+    assert.match(content.body, /<p><a>保留正文<\/a><\/p>/);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
 test('removes SVG animation and resource elements from imported HTML', () => {
   let content;
   try {

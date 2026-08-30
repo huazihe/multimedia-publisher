@@ -1358,10 +1358,34 @@ function readableImportedText(value) {
   return stripHtml(markdownWithoutSyntax).replace(/\s+/g, ' ').trim();
 }
 
+function importedHtmlDetectionProbe(body) {
+  let fenceCharacter = '';
+  let fenceLength = 0;
+  return String(body || '').split(/\r?\n/).map(line => {
+    if (!fenceCharacter) {
+      const openingFence = line.match(/^[ \t]{0,3}(`{3,}|~{3,})/);
+      if (!openingFence) return line;
+      fenceCharacter = openingFence[1][0];
+      fenceLength = openingFence[1].length;
+      return '';
+    }
+
+    const closingFence = line.match(/^[ \t]{0,3}(`+|~+)[ \t]*$/);
+    if (closingFence
+      && closingFence[1][0] === fenceCharacter
+      && closingFence[1].length >= fenceLength) {
+      fenceCharacter = '';
+      fenceLength = 0;
+    }
+    return '';
+  }).join('\n');
+}
+
 function isImportedHtml(filename, body) {
   if (/\.(?:html|htm)$/i.test(String(filename || ''))) return true;
-  const trimmed = String(body || '').replace(/^\uFEFF/, '').trimStart();
-  return /^<!doctype\s+html\b/i.test(trimmed) || /^<html[\s>]/i.test(trimmed);
+  const probe = importedHtmlDetectionProbe(body).replace(/^\uFEFF/, '').trimStart();
+  if (/^<!doctype\s+html\b/i.test(probe) || /^<html[\s>]/i.test(probe)) return true;
+  return /<\s*\/?\s*(?:head|body|article|section|main|aside|nav|header|footer|div|p|h[1-6]|table|thead|tbody|tfoot|tr|th|td|ul|ol|li|blockquote|img|figure|figcaption|pre|code|br|hr|a|form|input|button|video|audio|source|canvas|script|iframe|object|embed|meta|link|svg)\b/i.test(probe);
 }
 
 function titleFromImportedBody(body, filename = '', fallback = '未命名文章') {
