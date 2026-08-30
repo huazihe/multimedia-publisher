@@ -1920,8 +1920,11 @@ function generateContent(planDate, explicitTopic) {
 function layoutContent(contentId, template) {
   const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
   if (!content) throw new Error('内容不存在');
-  const hasTemplate = template !== undefined && template !== null && template !== '';
-  const html = hasTemplate
+  const templateProvided = arguments.length >= 2;
+  if (templateProvided && (typeof template !== 'string' || !template.trim())) {
+    throw statusError('template 必须是非空字符串', 400);
+  }
+  const html = templateProvided
     ? renderLayoutTemplate(template, {
       title: content.title,
       summary: content.summary || '',
@@ -2602,7 +2605,14 @@ const server = http.createServer(async (req, res) => {
     const layoutMatch = url.pathname.match(/^\/api\/content\/([^/]+)\/layout$/);
     if (layoutMatch && req.method === 'POST') {
       const body = await readBody(req);
-      sendJson(res, { ok: true, content: layoutContent(layoutMatch[1], body.template) });
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        throw statusError('请求体必须是 JSON 对象', 400);
+      }
+      const templateProvided = Object.prototype.hasOwnProperty.call(body, 'template');
+      const content = templateProvided
+        ? layoutContent(layoutMatch[1], body.template)
+        : layoutContent(layoutMatch[1]);
+      sendJson(res, { ok: true, content });
       return;
     }
 

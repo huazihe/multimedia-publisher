@@ -42,7 +42,30 @@ const COMMAND_ATTRIBUTES = new Set([
   'data-action',
   'data-command',
 ]);
-const URL_ATTRIBUTES = new Set(['href', 'src', 'poster', 'xlink:href']);
+const RESOURCE_ATTRIBUTES = new Set([
+  'archive',
+  'attributionsrc',
+  'background',
+  'cite',
+  'classid',
+  'codebase',
+  'data',
+  'dynsrc',
+  'href',
+  'icon',
+  'imagesizes',
+  'imagesrcset',
+  'longdesc',
+  'lowsrc',
+  'manifest',
+  'ping',
+  'poster',
+  'profile',
+  'src',
+  'srcset',
+  'usemap',
+  'xlink:href',
+]);
 const DEFAULT_STYLES = {
   title: 'margin:0 0 18px;font-size:28px;font-weight:700;line-height:1.4;letter-spacing:1px;text-align:center;color:#1f2937;',
   summary: 'margin:0 0 28px;padding:16px 18px;font-size:15px;line-height:1.9;color:#4b5563;background:#f7f8fa;border-radius:8px;',
@@ -261,12 +284,31 @@ function unwrapElement(element) {
   element.remove();
 }
 
-function isSafeUrl(value, attributeName) {
+function normalizedUrl(value) {
+  return String(value || '').trim().replace(/[\u0000-\u0020\u007f]+/g, '');
+}
+
+function isSafeRelativeUrl(value) {
+  if (!value || /^[\\/]{2}/.test(value)) return false;
+  if (/^(?:#|\/(?!\/)|\.\/|\.\.\/)/.test(value)) return true;
+  return !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(value);
+}
+
+function isSafeHyperlink(value) {
+  const normalized = normalizedUrl(value);
+  return /^(?:https?:|mailto:|tel:)/i.test(normalized) || isSafeRelativeUrl(normalized);
+}
+
+function isSafeImageSource(value) {
   const normalized = String(value || '').trim().replace(/[\u0000-\u001f\u007f\s]+/g, '');
-  if (!normalized) return true;
-  if (/^(?:#|\/|\.\/|\.\.\/)/.test(normalized)) return true;
-  if (attributeName === 'src' && /^data:image\/(?:png|jpeg|jpg|gif|webp);base64,/i.test(normalized)) return true;
-  return /^(?:https?:|mailto:|tel:)/i.test(normalized);
+  if (/^data:image\/(?:png|jpeg|jpg|gif|webp);base64,/i.test(normalized)) return true;
+  return /^https?:/i.test(normalized) || isSafeRelativeUrl(normalized);
+}
+
+function isAllowedResourceAttribute(element, attributeName, value) {
+  if (element.localName === 'a' && attributeName === 'href') return isSafeHyperlink(value);
+  if (element.localName === 'img' && attributeName === 'src') return isSafeImageSource(value);
+  return false;
 }
 
 function sanitizeAttributes(root, options = {}) {
@@ -281,11 +323,8 @@ function sanitizeAttributes(root, options = {}) {
         element.removeAttribute(attribute.name);
         continue;
       }
-      if (name === 'srcset') {
-        element.removeAttribute(attribute.name);
-        continue;
-      }
-      if (URL_ATTRIBUTES.has(name) && !isSafeUrl(attribute.value, name)) {
+      if (RESOURCE_ATTRIBUTES.has(name)
+        && !isAllowedResourceAttribute(element, name, attribute.value)) {
         element.removeAttribute(attribute.name);
       }
     }
@@ -314,6 +353,19 @@ function sanitizeTree(root, options = {}) {
 
 function clearElement(element) {
   while (element.firstChild) element.removeChild(element.firstChild);
+}
+
+function clearTextExcept(root, preservedElements = []) {
+  const preserved = new Set(preservedElements.filter(Boolean));
+  const visit = node => {
+    if (node.nodeType === 3) {
+      node.data = '';
+      return;
+    }
+    if (node.nodeType !== 1 || preserved.has(node)) return;
+    for (const child of [...node.childNodes]) visit(child);
+  };
+  visit(root);
 }
 
 function copyPresentation(source, target) {
@@ -439,7 +491,7 @@ function createProfile(document, root, content) {
     paragraph,
     heading,
     footer,
-    footerName: footer?.querySelector('h2,h3,h4,strong,p') || null,
+    footerName: footer?.querySelector('.big,.title,.author-name,[class*="account-name"],h2,h3,h4,strong,p') || null,
     footerDescription: footer?.querySelector('p:last-child,.f-desc,[class*="desc"]') || null,
     titleShell: directChildContaining(root, title),
   };
@@ -531,15 +583,60 @@ function createFooter(document, profile, accountName, accountDescription) {
   return footer;
 }
 
-function cloneShell(document, source, fallbackTag, excluded) {
-  if (!source || source === excluded) return document.createElement(fallbackTag);
-  const shell = document.createElement(source.localName || fallbackTag);
-  for (const attribute of [...source.attributes]) {
-    const name = attribute.name.toLowerCase();
-    if (name === 'id' || name.startsWith('on') || COMMAND_ATTRIBUTES.has(name)) continue;
-    shell.setAttribute(attribute.name, attribute.value);
+function updateFooterInPlace(document, profile, accountName, accountDescription) {
+  const footer = profile.footer;
+  if (!footer) return createFooter(document, profile, accountName, accountDescription);
+
+  let name = profile.footerName && footer.contains(profile.footerName) ? profile.footerName : null;
+  let description = profile.footerDescription && footer.contains(profile.footerDescription)
+    ? profile.footerDescription
+    : null;
+  if (name === description) description = null;
+  clearTextExcept(footer, [name, description]);
+  for (const action of [...footer.querySelectorAll('a,button')]) {
+    if (action !== name && action !== description) action.remove();
   }
-  return shell;
+
+  footer.setAttribute('data-wechat-account', 'true');
+  if (!footer.hasAttribute('class') && !footer.hasAttribute('style')) {
+    footer.setAttribute('style', DEFAULT_STYLES.footer);
+  }
+
+  if (!name) {
+    name = document.createElement('p');
+    withDefaultStyle(name, DEFAULT_STYLES.accountName);
+    footer.append(name);
+  }
+  name.setAttribute('data-wechat-slot', 'account-name');
+  name.textContent = accountName;
+
+  if (!description) {
+    description = document.createElement('p');
+    withDefaultStyle(description, DEFAULT_STYLES.accountDescription);
+    footer.append(description);
+  }
+  description.setAttribute('data-wechat-slot', 'account-description');
+  description.textContent = accountDescription;
+  return footer;
+}
+
+function updateTitleInPlace(element, title) {
+  clearElement(element);
+  element.setAttribute('data-wechat-slot', 'title');
+  element.textContent = title;
+  return element;
+}
+
+function directChildOrSelf(ancestor, descendant) {
+  return ancestor === descendant ? descendant : directChildContaining(ancestor, descendant);
+}
+
+function removeUnrelatedRootChildren(root, preservedBranches) {
+  const preserved = new Set(preservedBranches.filter(Boolean));
+  for (const child of [...root.children]) {
+    if (preserved.has(child)) continue;
+    if (String(child.textContent || '').trim()) child.remove();
+  }
 }
 
 function findTemplateStructure(document) {
@@ -559,30 +656,70 @@ function normalizeTemplateDocument(document, values) {
   sanitizeTree(document);
   const structure = findTemplateStructure(document);
   const profile = createProfile(document, structure.root, structure.content);
-  const title = createTitle(document, profile, values.title);
   const summary = createSummary(document, profile, values.summary);
   const articleNodes = createArticleNodes(document, values.body, profile);
-  const footer = createFooter(document, profile, values.accountName, values.accountDescription);
+  const footer = updateFooterInPlace(document, profile, values.accountName, values.accountDescription);
+  const footerInsideContent = profile.footer && structure.content.contains(profile.footer);
+  const footerCarrier = footerInsideContent
+    ? (directChildContaining(structure.content, profile.footer) || profile.footer)
+    : null;
+  if (footerCarrier && footerCarrier !== profile.footer) clearTextExcept(footerCarrier, [profile.footer]);
+  footerCarrier?.remove();
 
   if (structure.richMedia) {
     const outsideTitle = profile.title && !structure.content.contains(profile.title) ? profile.title : null;
     if (outsideTitle) {
-      clearElement(outsideTitle);
-      outsideTitle.textContent = values.title;
+      updateTitleInPlace(outsideTitle, values.title);
     }
     clearElement(structure.content);
-    if (!outsideTitle) structure.content.append(title);
-    structure.content.append(summary, ...articleNodes, footer);
+    if (!outsideTitle) structure.content.append(createTitle(document, profile, values.title));
+    structure.content.append(summary, ...articleNodes);
+    if (footerCarrier) structure.content.append(footerCarrier);
+    else if (!profile.footer) structure.content.append(footer);
   } else if (structure.content !== structure.root) {
-    const titleShell = cloneShell(document, profile.titleShell, 'header', structure.content);
-    const contentShell = cloneShell(document, structure.content, 'main');
-    titleShell.append(title);
-    contentShell.append(summary, ...articleNodes);
-    clearElement(structure.root);
-    structure.root.append(titleShell, contentShell, footer);
+    const titleOutsideContent = profile.title && !structure.content.contains(profile.title)
+      ? profile.title
+      : null;
+    let titleBranch = titleOutsideContent
+      ? directChildContaining(structure.root, titleOutsideContent)
+      : null;
+    const contentBranch = directChildOrSelf(structure.root, structure.content);
+    const outsideFooterBranch = profile.footer && !footerInsideContent
+      ? directChildContaining(structure.root, profile.footer)
+      : null;
+
+    if (titleOutsideContent) {
+      clearTextExcept(titleBranch || titleOutsideContent, [titleOutsideContent]);
+      updateTitleInPlace(titleOutsideContent, values.title);
+    } else {
+      const titleHost = document.createElement('header');
+      titleHost.append(createTitle(document, profile, values.title));
+      structure.root.insertBefore(titleHost, contentBranch || structure.root.firstChild);
+      titleBranch = titleHost;
+    }
+    removeUnrelatedRootChildren(structure.root, [titleBranch, contentBranch, outsideFooterBranch]);
+    clearElement(structure.content);
+    structure.content.append(summary, ...articleNodes);
+    if (footerCarrier) structure.content.append(footerCarrier);
+    else if (!profile.footer) structure.content.append(footer);
   } else {
-    clearElement(structure.root);
-    structure.root.append(title, summary, ...articleNodes, footer);
+    const title = profile.title;
+    const titleBranch = title ? directChildContaining(structure.root, title) : null;
+    const rootChildren = [...structure.root.children];
+    const titleIndex = titleBranch ? rootChildren.indexOf(titleBranch) : -1;
+    if (title && titleIndex >= 0) {
+      for (let index = 0; index <= titleIndex; index++) {
+        clearTextExcept(rootChildren[index], rootChildren[index] === titleBranch ? [title] : []);
+      }
+      for (let index = titleIndex + 1; index < rootChildren.length; index++) rootChildren[index].remove();
+      updateTitleInPlace(title, values.title);
+    } else {
+      clearElement(structure.root);
+      structure.root.append(createTitle(document, profile, values.title));
+    }
+    structure.root.append(summary, ...articleNodes);
+    if (footerCarrier) structure.root.append(footerCarrier);
+    else if (!profile.footer) structure.root.append(footer);
   }
 
   document.body.setAttribute('data-wechat-template', values.filename);

@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { createRequire } = require('node:module');
 const { after, test } = require('node:test');
 
 const {
@@ -12,6 +13,15 @@ const {
 } = require('../layout-templates');
 
 const TEMPLATE_DIR = path.resolve(__dirname, '../../skills/weixin-layout/templates');
+const requireFromCore = createRequire(path.resolve(__dirname, '../../packages/core/package.json'));
+const { parseHTML } = (() => {
+  try {
+    return require('linkedom');
+  } catch (error) {
+    if (error?.code !== 'MODULE_NOT_FOUND') throw error;
+    return requireFromCore('linkedom');
+  }
+})();
 const testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'publisher-layout-templates-test-'));
 process.env.PUBLISHER_DB = path.join(testDataDir, 'publisher.sqlite');
 const PLACEHOLDER_MARKERS = /此处为|替换为|文章主标题|公众号名称|公众号简介/;
@@ -147,6 +157,56 @@ test('renders all 40 templates with only the requested article and account copy'
   assert.ok(signatures.size >= 12, `40 套模板只保留了 ${signatures.size} 种视觉样式`);
 });
 
+test('preserves nested magazine cover, content, and footer ancestry', () => {
+  const html = renderLayoutTemplate('杂志风·图文并茂.html', {
+    title: '嵌套杂志标题',
+    summary: '嵌套杂志导语',
+    body: '<h2>嵌套杂志小节</h2><p>嵌套杂志正文</p>',
+    accountName: '嵌套杂志账号',
+    accountDescription: '嵌套杂志说明',
+  });
+  const { document } = parseHTML(html);
+  const title = document.querySelector('.article > .cover > .cover-content > .cover-bottom > h1.title');
+  const content = document.querySelector('.article > .content');
+  const footer = content?.querySelector('.follow-section[data-wechat-account="true"]');
+
+  assert.ok(document.querySelector('.article > .cover > .cover-content > .cover-top'));
+  assert.ok(title);
+  assert.equal(title.getAttribute('data-wechat-slot'), 'title');
+  assert.equal(title.textContent, '嵌套杂志标题');
+  assert.ok(content);
+  assert.ok(content.querySelector('[data-wechat-slot="summary"]'));
+  assert.match(content.textContent, /嵌套杂志正文/);
+  assert.ok(footer);
+  assert.match(footer.textContent, /嵌套杂志账号/);
+});
+
+test('preserves standard hero decorations and footer position around replaced content', () => {
+  const html = renderLayoutTemplate('专业案例·清爽蓝白.html', {
+    title: '标准嵌套标题',
+    summary: '标准嵌套导语',
+    body: '<h2>标准嵌套小节</h2><p>标准嵌套正文</p>',
+    accountName: '标准嵌套账号',
+    accountDescription: '标准嵌套说明',
+  });
+  const { document } = parseHTML(html);
+  const root = document.querySelector('.wrap[data-wechat-template-root="true"]');
+  const title = root?.querySelector(':scope > .hero > h1');
+  const content = root?.querySelector(':scope > .content');
+  const footer = root?.querySelector(':scope > .footer[data-wechat-account="true"]');
+
+  assert.ok(root);
+  assert.ok(root.querySelector(':scope > .hero > .eyebrow'));
+  assert.ok(title);
+  assert.equal(title.getAttribute('data-wechat-slot'), 'title');
+  assert.equal(title.textContent, '标准嵌套标题');
+  assert.ok(root.querySelector(':scope > .hero > .subtitle'));
+  assert.ok(content?.querySelector('[data-wechat-slot="summary"]'));
+  assert.match(content.textContent, /标准嵌套正文/);
+  assert.ok(footer);
+  assert.match(footer.textContent, /标准嵌套账号/);
+});
+
 test('renders generated Markdown as article HTML', () => {
   const html = renderLayoutTemplate('style_10.html', {
     title: 'Markdown 标题',
@@ -196,6 +256,52 @@ test('removes unsafe resources and actions from article content and the final do
   assert.doesNotMatch(html, /javascript\s*:/i);
 });
 
+test('keeps resources only for allowlisted hyperlink and image attributes', () => {
+  const html = renderLayoutTemplate('style_10.html', {
+    title: '资源白名单标题',
+    summary: '资源白名单导语',
+    body: [
+      '<p>',
+      '<a href="https://safe.example/article" ping="https://tracker.example/ping" attributionsrc="//tracker.example/attribution">安全网页</a>',
+      '<a href="mailto:editor@example.com">安全邮箱</a>',
+      '<a href="#section">安全锚点</a>',
+      '<a href="/relative/article">安全相对链接</a>',
+      '<a href="//evil.example/article">协议相对链接</a>',
+      '</p>',
+      '<img src="https://safe.example/image.png" alt="安全远程图片">',
+      '<img src="/images/local.png" alt="安全本地图片">',
+      '<img src="data:image/png;base64,iVBORw0KGgo=" alt="安全内嵌图片">',
+      '<img src="//evil.example/image.png" background="https://evil.example/background.png" longdesc="https://evil.example/details" alt="危险资源图片">',
+      '<table background="https://evil.example/table.png"><tr><td>安全表格文字</td></tr></table>',
+      '<blockquote cite="https://evil.example/source">安全引用文字</blockquote>',
+      '<div href="https://evil.example/fake-link" src="https://evil.example/fake-resource">安全容器文字</div>',
+      '<video poster="https://evil.example/poster.png"><source src="https://evil.example/video.mp4"></video>',
+      '<script src="https://evil.example/app.js"></script>',
+      '<link rel="stylesheet" href="https://evil.example/app.css">',
+      '<embed src="https://evil.example/app.swf">',
+    ].join(''),
+  });
+
+  for (const safeResource of [
+    'href="https://safe.example/article"',
+    'href="mailto:editor@example.com"',
+    'href="#section"',
+    'href="/relative/article"',
+    'src="https://safe.example/image.png"',
+    'src="/images/local.png"',
+    'src="data:image/png;base64,iVBORw0KGgo="',
+  ]) assert.ok(html.includes(safeResource), `缺少安全资源 ${safeResource}`);
+
+  for (const retainedText of ['协议相对链接', '危险资源图片', '安全表格文字', '安全引用文字', '安全容器文字']) {
+    assert.ok(html.includes(retainedText), `清理资源时丢失正文 ${retainedText}`);
+  }
+  assert.doesNotMatch(html, /<(?:script|link|embed|video|source)\b/i);
+  assert.doesNotMatch(html, /\s(?:attributionsrc|ping|background|poster|cite|longdesc|usemap|srcset|imagesrcset|imagesizes|xlink:href)\s*=/i);
+  assert.doesNotMatch(html, /(?:href|src)="\/\//i);
+  assert.doesNotMatch(html, /evil\.example|tracker\.example/i);
+  assert.doesNotMatch(html, /<(?!a\b)[^>]+\shref\s*=|<(?!img\b)[^>]+\ssrc\s*=/i);
+});
+
 test('layoutContent renders a selected template and keeps the generic fallback', () => {
   const { importContent, layoutContent, db } = dashboard();
   let content;
@@ -211,7 +317,6 @@ test('layoutContent renders a selected template and keeps the generic fallback',
     assert.equal(generic.status, '已排版');
     assert.match(generic.layout_html, /class="wechat-preview"/);
     assert.doesNotMatch(generic.layout_html, /data-wechat-template=/);
-    assert.throws(() => layoutContent(content.id, false), /模板名称无效/);
 
     const templated = layoutContent(content.id, 'style_10.html');
     assert.equal(templated.status, '已排版');
@@ -220,6 +325,63 @@ test('layoutContent renders a selected template and keeps the generic fallback',
     assert.match(templated.layout_html, /布局集成标题/);
     assert.match(templated.layout_html, /布局集成正文/);
     assert.equal(db.prepare('SELECT layout_html FROM contents WHERE id = ?').get(content.id).layout_html, templated.layout_html);
+  } finally {
+    cleanupContent(content);
+  }
+});
+
+test('layoutContent rejects every explicitly invalid template value with status 400', () => {
+  const { importContent, layoutContent } = dashboard();
+  let content;
+  try {
+    content = importContent({
+      filename: 'layout-validation.md',
+      title: '排版参数校验标题',
+      body: '# 排版参数校验标题\n\n排版参数校验正文',
+    });
+
+    const generic = layoutContent(content.id);
+    assert.match(generic.layout_html, /class="wechat-preview"/);
+    for (const invalidTemplate of [undefined, '', null, false, 42, [], {}]) {
+      assert.throws(() => layoutContent(content.id, invalidTemplate), error => {
+        assert.equal(error.statusCode, 400);
+        assert.match(error.message, /template.*非空字符串/);
+        return true;
+      });
+    }
+  } finally {
+    cleanupContent(content);
+  }
+});
+
+test('POST layout falls back only when template is omitted and rejects explicit invalid values', async () => {
+  const { importContent } = dashboard();
+  let content;
+  const port = await listenOnRandomPort();
+  try {
+    content = importContent({
+      filename: 'layout-validation-route.md',
+      title: '路由参数校验标题',
+      body: '# 路由参数校验标题\n\n路由参数校验正文',
+    });
+    const endpoint = `http://127.0.0.1:${port}/api/content/${content.id}/layout`;
+    const postLayout = templateBody => fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(templateBody),
+    });
+
+    let response = await postLayout({});
+    let result = await response.json();
+    assert.equal(response.status, 200);
+    assert.match(result.content.layout_html, /class="wechat-preview"/);
+
+    for (const template of ['', null, false, 42, [], {}]) {
+      response = await postLayout({ template });
+      result = await response.json();
+      assert.equal(response.status, 400, `template=${JSON.stringify(template)}`);
+      assert.match(result.error, /template.*非空字符串/);
+    }
   } finally {
     cleanupContent(content);
   }
