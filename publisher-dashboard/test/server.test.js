@@ -378,6 +378,82 @@ test('uses the first non-empty plain-text line as the imported title', () => {
   }
 });
 
+test('keeps .txt imports as verbatim text with a plain-text title', () => {
+  let content;
+  try {
+    const body = '# 纯文本标题\n<article data-action="publish">按文本保留</article>';
+    content = importContent({ filename: 'literal.txt', body });
+
+    assert.equal(content.title, '# 纯文本标题');
+    assert.equal(content.body, body);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('protects inline and indented Markdown code during unnamed mixed inference', () => {
+  let content;
+  try {
+    const inlineCode = '`<button data-action="inline">行内按钮</button>`';
+    const indentedCode = '    <script>alert("缩进代码")</script>';
+    const autolink = '<https://safe.example/path>';
+    const body = [
+      '普通标题',
+      '',
+      inlineCode,
+      indentedCode,
+      autolink,
+      '<article data-action="publish"><button>外部按钮</button><p>外部正文</p></article>',
+    ].join('\n');
+    content = importContent({ body });
+
+    assert.equal(content.title, '普通标题');
+    assert.ok(content.body.includes(inlineCode));
+    assert.ok(content.body.includes(indentedCode));
+    assert.ok(content.body.includes(autolink));
+    assert.match(content.body, /<article>外部按钮<p>外部正文<\/p><\/article>/);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('uses the HTML title before Markdown-looking lines in HTML content', () => {
+  let content;
+  try {
+    content = importContent({
+      filename: 'html-title.html',
+      body: [
+        '<!doctype html><html><head><title>真实 HTML 标题</title></head><body>',
+        '# 伪 Markdown 标题',
+        '<h1>HTML 一级标题</h1><p>正文</p>',
+        '</body></html>',
+      ].join('\n'),
+    });
+
+    assert.equal(content.title, '真实 HTML 标题');
+    assert.doesNotMatch(content.body, /<title\b/i);
+    assert.match(content.body, /<h1>HTML 一级标题<\/h1>/);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('payload format html forces HTML title precedence and sanitization', () => {
+  let content;
+  try {
+    content = importContent({
+      format: 'html',
+      body: '# 伪 Markdown 标题\n<title>格式指定标题</title><article data-action="publish"><p>正文</p></article>',
+    });
+
+    assert.equal(content.title, '格式指定标题');
+    assert.doesNotMatch(content.body, /<title\b|data-action/i);
+    assert.match(content.body, /<article><p>正文<\/p><\/article>/);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
 test('falls back to the filename without its supported extension', () => {
   let content;
   try {
@@ -517,10 +593,88 @@ test('removes every inline style attribute while preserving safe attributes', ()
       ].join(''),
     });
 
-    assert.doesNotMatch(content.body, /\sstyle\s*=|url\s*\(/i);
-    assert.match(content.body, /<article id="root" class="story" data-kind="article">/);
-    assert.match(content.body, /<p class="lead" title="安全提示">安全正文<\/p>/);
+    assert.doesNotMatch(content.body, /\s(?:style|id|class|data-kind)\s*=|url\s*\(/i);
+    assert.match(content.body, /<article>/);
+    assert.match(content.body, /<p title="安全提示">安全正文<\/p>/);
     assert.match(content.body, /<img src="https:\/\/safe\.example\/image\.png" alt="安全图片" width="640">/);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('removes command attributes and interactive controls from imported HTML', () => {
+  let content;
+  try {
+    content = importContent({
+      filename: 'command-injection.html',
+      body: [
+        '<article id="content-editor" class="action-zone" data-action="publish" data-command="delete" contenteditable="true">',
+        '<h2 data-action="publish-now">安全标题</h2>',
+        '<button data-action="publish" formaction="/publish">发布按钮文本</button>',
+        '<form action="/publish"><input name="command" value="publish">',
+        '<select name="target"><option value="all">选项文本</option></select>',
+        '<textarea name="payload">文本域内容</textarea></form>',
+        '<dialog open data-command="confirm">对话文本</dialog>',
+        '<p><strong>安全正文</strong><custom-widget data-action="run">自定义文本</custom-widget></p>',
+        '</article>',
+      ].join(''),
+    });
+
+    assert.doesNotMatch(content.body, /<(?:button|input|select|option|textarea|form|dialog|custom-widget)\b/i);
+    assert.doesNotMatch(content.body, /\s(?:id|class|data-[\w-]+|contenteditable|formaction|action|name|value|open)\s*=/i);
+    assert.match(content.body, /<article><h2>安全标题<\/h2>/);
+    assert.match(content.body, /发布按钮文本/);
+    assert.match(content.body, /选项文本/);
+    assert.match(content.body, /文本域内容/);
+    assert.match(content.body, /对话文本/);
+    assert.match(content.body, /<p><strong>安全正文<\/strong>自定义文本<\/p>/);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('allows only approved href and src URL protocols in imported HTML', () => {
+  let content;
+  try {
+    content = importContent({
+      filename: 'url-policy.html',
+      body: [
+        '<article>',
+        '<a href="#section">hash</a>',
+        '<a href="/relative/path">relative</a>',
+        '<a href="https://safe.example/path">https</a>',
+        '<a href="http://safe.example/path">http</a>',
+        '<a href="mailto:editor@example.com">mail</a>',
+        '<a href="tel:+8613800000000">tel</a>',
+        '<a href="ftp://files.example.com/file">blocked ftp</a>',
+        '<a href="vbscript:msgbox(1)">blocked vbscript</a>',
+        '<a href="&#x6a;avascript:alert(1)">blocked javascript</a>',
+        '<a href="data:text/html;base64,PHNjcmlwdD4=">blocked data</a>',
+        '<img src="/images/local.png" alt="local">',
+        '<img src="https://safe.example/image.jpg" alt="remote">',
+        '<img src="data:image/png;base64,iVBORw0KGgo=" alt="png">',
+        '<img src="data:image/jpeg;base64,/9j/4AAQ=" alt="jpeg">',
+        '<img src="data:image/gif;base64,R0lGODlhAQ==" alt="gif">',
+        '<img src="data:image/webp;base64,UklGRg==" alt="webp">',
+        '<img src="data:image/svg+xml;base64,PHN2Zz4=" alt="blocked svg">',
+        '<img src="data:text/html;base64,PGh0bWw+" alt="blocked html">',
+        '<img src="data:application/xhtml+xml;base64,PGh0bWw+" alt="blocked xhtml">',
+        '<img src="ftp://files.example.com/image.png" alt="blocked ftp image">',
+        '</article>',
+      ].join(''),
+    });
+
+    for (const url of [
+      '#section', '/relative/path', 'https://safe.example/path', 'http://safe.example/path',
+      'mailto:editor@example.com', 'tel:+8613800000000', '/images/local.png',
+      'https://safe.example/image.jpg', 'data:image/png;base64,iVBORw0KGgo=',
+      'data:image/jpeg;base64,/9j/4AAQ=', 'data:image/gif;base64,R0lGODlhAQ==',
+      'data:image/webp;base64,UklGRg==',
+    ]) assert.ok(content.body.includes(url));
+    assert.doesNotMatch(content.body, /href="(?:ftp|vbscript|javascript|data):/i);
+    assert.doesNotMatch(content.body, /src="(?:ftp:|data:(?:image\/svg\+xml|text\/html|application\/xhtml\+xml))/i);
+    assert.match(content.body, /<a>blocked ftp<\/a>/);
+    assert.match(content.body, /<img alt="blocked svg">/);
   } finally {
     cleanupImportedContent(content);
   }
@@ -622,6 +776,33 @@ test('records an activity for the imported article', () => {
   }
 });
 
+test('rolls back imported content when its activity insert fails', () => {
+  const title = `事务回滚文章-${Date.now()}`;
+  db.exec('DROP TRIGGER IF EXISTS fail_import_activity');
+  db.exec(`
+    CREATE TRIGGER fail_import_activity
+    BEFORE INSERT ON activity
+    WHEN NEW.target_type = 'content' AND NEW.action LIKE '导入文章%'
+    BEGIN
+      SELECT RAISE(ABORT, 'forced import activity failure');
+    END
+  `);
+
+  try {
+    assert.throws(() => importContent({
+      filename: 'rollback.txt',
+      title,
+      body: '事务回滚正文',
+    }), /forced import activity failure/);
+    assert.equal(db.prepare('SELECT id FROM contents WHERE title = ?').get(title), undefined);
+    assert.equal(db.prepare("SELECT id FROM activity WHERE action LIKE '导入文章%' AND target_id IN (SELECT id FROM contents WHERE title = ?)").get(title), undefined);
+  } finally {
+    db.exec('DROP TRIGGER IF EXISTS fail_import_activity');
+    db.prepare("DELETE FROM activity WHERE target_type = 'content' AND target_id IN (SELECT id FROM contents WHERE title = ?)").run(title);
+    db.prepare('DELETE FROM contents WHERE title = ?').run(title);
+  }
+});
+
 test('returns imported content in dashboard content data', () => {
   let content;
   try {
@@ -665,6 +846,63 @@ test('POST /api/content/import imports and returns content', async () => {
   } finally {
     content ||= db.prepare('SELECT id FROM contents WHERE title = ?').get(title);
     cleanupImportedContent(content);
+    if (server.listening) {
+      await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
+  }
+});
+
+test('POST /api/content/import returns validation and request-size status codes', async () => {
+  const titles = [
+    `无效扩展-${Date.now()}`,
+    `超大正文-${Date.now()}`,
+    `超大请求-${Date.now()}`,
+  ];
+  await new Promise((resolve, reject) => {
+    const onError = error => reject(error);
+    server.once('error', onError);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', onError);
+      resolve();
+    });
+  });
+
+  try {
+    const { port } = server.address();
+    const endpoint = `http://127.0.0.1:${port}/api/content/import`;
+    const post = (url, body) => fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+
+    let response = await post(endpoint, JSON.stringify({ filename: 'article.docx', title: titles[0], body: '正文' }));
+    assert.equal(response.status, 415);
+    assert.match((await response.json()).error, /文件格式不支持/);
+
+    response = await post(endpoint, JSON.stringify({ filename: 'empty.txt', body: '   ' }));
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /正文不能为空/);
+
+    response = await post(endpoint, JSON.stringify({ filename: 'large.txt', title: titles[1], body: 'a'.repeat(5 * 1024 * 1024 + 1) }));
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /不能超过 5 MiB/);
+
+    response = await post(endpoint, '{"filename":');
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /JSON 格式无效/);
+
+    response = await post(endpoint, JSON.stringify({ filename: 'envelope.txt', title: titles[2], body: 'a'.repeat(6 * 1024 * 1024 + 1) }));
+    assert.equal(response.status, 413);
+    assert.match((await response.json()).error, /请求内容过大/);
+
+    response = await post(`http://127.0.0.1:${port}/api/topics/generate`, '{"date":');
+    assert.equal(response.status, 500);
+  } finally {
+    for (const title of titles) {
+      const rows = db.prepare('SELECT id FROM contents WHERE title = ?').all(title);
+      for (const row of rows) cleanupImportedContent(row);
+    }
     if (server.listening) {
       await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     }

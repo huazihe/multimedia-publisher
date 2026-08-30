@@ -166,6 +166,7 @@ const RETIRED_PLATFORM_IDS = ['cnaiplus', 'zhike', 'cechina', 'sensorexpert'];
 const CONTENT_TYPES = ['行业分析', '案例复盘', '方法论', '清单指南', '热点解读'];
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 const MAX_IMPORTED_BODY_BYTES = 5 * 1024 * 1024;
+const MAX_IMPORT_REQUEST_BYTES = 6 * 1024 * 1024;
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(DRAFTS_DIR, { recursive: true });
@@ -177,6 +178,12 @@ db.exec('PRAGMA foreign_keys = ON');
 
 function now() {
   return new Date().toISOString();
+}
+
+function statusError(message, statusCode) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
 }
 
 function makeId(prefix) {
@@ -347,6 +354,22 @@ function addActivity(action, targetType = null, targetId = null, actor = 'AI 助
     INSERT INTO activity (id, actor, action, target_type, target_id, created_at)
     VALUES (?, ?, ?, ?, ?, ?)
   `).run(makeId('act'), actor, action, targetType, targetId, now());
+}
+
+function runTransaction(callback) {
+  db.exec('BEGIN');
+  try {
+    const result = callback();
+    db.exec('COMMIT');
+    return result;
+  } catch (error) {
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      // Preserve the original transaction error.
+    }
+    throw error;
+  }
 }
 
 function seedData() {
@@ -1284,15 +1307,25 @@ function titleFromMarkdown(body, fallback = '未命名内容') {
   return cleanHeading || fallback;
 }
 
-const IMPORT_BLOCKED_ELEMENTS = new Set([
-  'script', 'style', 'iframe', 'object', 'embed', 'meta', 'link',
-  'svg', 'animate', 'animatemotion', 'animatetransform', 'set', 'use', 'image', 'foreignobject',
-  'mpath', 'feimage', 'symbol', 'defs', 'pattern', 'mask', 'clippath', 'lineargradient',
-  'radialgradient', 'filter', 'marker',
+const IMPORT_BLOCKED_CONTENT_ELEMENTS = ['head', 'script', 'style', 'iframe', 'object', 'template', 'noscript', 'svg'];
+const IMPORT_ALLOWED_ELEMENTS = new Set([
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'div', 'section', 'article',
+  'strong', 'em', 'b', 'i', 'u', 's', 'ul', 'ol', 'li', 'blockquote', 'pre', 'code',
+  'table', 'caption', 'colgroup', 'col', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td',
+  'figure', 'figcaption', 'img', 'a', 'br', 'hr',
 ]);
-const IMPORT_URL_ATTRIBUTES = new Set([
-  'href', 'src', 'srcset', 'xlink:href', 'action', 'formaction', 'poster', 'background', 'cite',
-]);
+const IMPORT_VOID_ELEMENTS = new Set(['img', 'br', 'hr', 'col']);
+const IMPORT_GLOBAL_ALLOWED_ATTRIBUTES = new Set(['title']);
+const IMPORT_ALLOWED_ATTRIBUTES = {
+  a: new Set(['href', 'title']),
+  img: new Set(['src', 'alt', 'title', 'width', 'height']),
+  ol: new Set(['start', 'reversed', 'title']),
+  li: new Set(['value', 'title']),
+  th: new Set(['colspan', 'rowspan', 'scope', 'title']),
+  td: new Set(['colspan', 'rowspan', 'title']),
+  col: new Set(['span', 'title']),
+  colgroup: new Set(['span', 'title']),
+};
 
 function decodeImportedUrl(value) {
   let decoded = String(value || '');
@@ -1307,38 +1340,64 @@ function decodeImportedUrl(value) {
   return decoded;
 }
 
-function isDangerousImportedUrl(value, attributeName) {
-  const compact = decodeImportedUrl(value).replace(/[\u0000-\u0020\u007f-\u009f]+/g, '').toLowerCase();
-  if (attributeName === 'srcset') {
-    return compact.includes('javascript:') || compact.includes('data:text/html');
+function isAllowedImportedUrl(value, attributeName) {
+  const compact = decodeImportedUrl(value)
+    .replace(/[\u0000-\u0020\u007f-\u009f]+/g, '')
+    .toLowerCase();
+  if (!compact) return false;
+
+  const scheme = compact.match(/^([a-z][a-z0-9+.-]*):/)?.[1] || '';
+  if (!scheme) return !compact.startsWith('\\');
+  if (attributeName === 'href') return ['http', 'https', 'mailto', 'tel'].includes(scheme);
+  if (attributeName !== 'src') return false;
+  if (['http', 'https'].includes(scheme)) return true;
+  return /^data:image\/(?:png|jpeg|gif|webp);base64,[a-z0-9+/]+={0,2}$/i.test(compact);
+}
+
+function isAllowedImportedAttribute(tagName, attributeName, attributeValue) {
+  const allowed = IMPORT_ALLOWED_ATTRIBUTES[tagName] || IMPORT_GLOBAL_ALLOWED_ATTRIBUTES;
+  if (!allowed.has(attributeName)) return false;
+  if (attributeName === 'href' || attributeName === 'src') {
+    return isAllowedImportedUrl(attributeValue, attributeName);
   }
-  return compact.startsWith('javascript:') || compact.startsWith('data:text/html');
+  if (['width', 'height', 'colspan', 'rowspan', 'span'].includes(attributeName)) {
+    return /^\d{1,5}$/.test(attributeValue);
+  }
+  if (['start', 'value'].includes(attributeName)) return /^-?\d+$/.test(attributeValue);
+  if (attributeName === 'scope') return /^(?:row|col|rowgroup|colgroup)$/i.test(attributeValue);
+  return attributeName === 'reversed' || attributeName === 'title' || attributeName === 'alt';
 }
 
 function sanitizeImportedTag(tag) {
   const closing = tag.match(/^<\s*\/\s*([a-z][\w:-]*)[^>]*>$/i);
-  if (closing) return IMPORT_BLOCKED_ELEMENTS.has(closing[1].toLowerCase()) ? '' : `</${closing[1]}>`;
+  if (closing) {
+    const tagName = closing[1].toLowerCase();
+    return IMPORT_ALLOWED_ELEMENTS.has(tagName) && !IMPORT_VOID_ELEMENTS.has(tagName) ? `</${tagName}>` : '';
+  }
 
   const opening = tag.match(/^<\s*([a-z][\w:-]*)([\s\S]*?)(\/?)>$/i);
-  if (!opening) return /^<!--/.test(tag) ? '' : tag;
-  const [, tagName, rawAttributes, selfClosing] = opening;
-  if (IMPORT_BLOCKED_ELEMENTS.has(tagName.toLowerCase())) return '';
+  if (!opening) return '';
+  const [, rawTagName, rawAttributes] = opening;
+  const tagName = rawTagName.toLowerCase();
+  if (!IMPORT_ALLOWED_ELEMENTS.has(tagName)) return '';
 
   const attributePattern = /\s+([^\s"'<>\/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
   const safeAttributes = [];
+  const seenAttributes = new Set();
   for (const match of rawAttributes.matchAll(attributePattern)) {
     const attributeName = match[1].toLowerCase();
     const attributeValue = match[2] ?? match[3] ?? match[4] ?? '';
-    if (attributeName.startsWith('on') || attributeName === 'srcdoc' || attributeName === 'style') continue;
-    if (IMPORT_URL_ATTRIBUTES.has(attributeName) && isDangerousImportedUrl(attributeValue, attributeName)) continue;
+    if (seenAttributes.has(attributeName)
+      || !isAllowedImportedAttribute(tagName, attributeName, attributeValue)) continue;
+    seenAttributes.add(attributeName);
     safeAttributes.push(match[0].trim());
   }
-  return `<${tagName}${safeAttributes.length ? ` ${safeAttributes.join(' ')}` : ''}${selfClosing ? ' /' : ''}>`;
+  return `<${tagName}${safeAttributes.length ? ` ${safeAttributes.join(' ')}` : ''}>`;
 }
 
 function sanitizeImportedHtml(value) {
   let sanitized = String(value || '');
-  for (const tagName of ['script', 'style', 'iframe', 'object', 'svg']) {
+  for (const tagName of IMPORT_BLOCKED_CONTENT_ELEMENTS) {
     const pairedElement = new RegExp(`<\\s*${tagName}\\b[^>]*>[\\s\\S]*?<\\s*\\/\\s*${tagName}\\s*>`, 'gi');
     let previous;
     do {
@@ -1359,26 +1418,11 @@ function readableImportedText(value) {
 }
 
 function importedHtmlDetectionProbe(body) {
-  let fenceCharacter = '';
-  let fenceLength = 0;
-  return String(body || '').split(/\r?\n/).map(line => {
-    if (!fenceCharacter) {
-      const openingFence = line.match(/^[ \t]{0,3}(`{3,}|~{3,})/);
-      if (!openingFence) return line;
-      fenceCharacter = openingFence[1][0];
-      fenceLength = openingFence[1].length;
-      return '';
-    }
-
-    const closingFence = line.match(/^[ \t]{0,3}(`+|~+)[ \t]*$/);
-    if (closingFence
-      && closingFence[1][0] === fenceCharacter
-      && closingFence[1].length >= fenceLength) {
-      fenceCharacter = '';
-      fenceLength = 0;
-    }
-    return '';
-  }).join('\n');
+  const mask = literal => literal.replace(/[^\r\n]/g, ' ');
+  let probe = protectImportedFencedCode(body, mask);
+  probe = protectImportedIndentedCode(probe, mask);
+  probe = protectImportedInlineCode(probe, mask);
+  return replaceImportedMarkdownAutolinks(probe, mask, mask);
 }
 
 function protectImportedFencedCode(body, protect) {
@@ -1427,6 +1471,62 @@ function protectImportedFencedCode(body, protect) {
   return output + source.slice(cursor);
 }
 
+function protectImportedIndentedCode(body, protect) {
+  return String(body || '').replace(/^(?: {4}|\t)[^\r\n]*(?:\r\n|\r|\n|$)/gm, protect);
+}
+
+function protectImportedInlineCode(body, protect) {
+  const source = String(body || '');
+  let output = '';
+  let cursor = 0;
+  let index = 0;
+
+  while (index < source.length) {
+    if (source[index] !== '`') {
+      index++;
+      continue;
+    }
+    let openingEnd = index + 1;
+    while (source[openingEnd] === '`') openingEnd++;
+    const markerLength = openingEnd - index;
+    let searchIndex = openingEnd;
+    let closingEnd = -1;
+
+    while (searchIndex < source.length) {
+      const closingStart = source.indexOf('`', searchIndex);
+      if (closingStart === -1) break;
+      let runEnd = closingStart + 1;
+      while (source[runEnd] === '`') runEnd++;
+      if (runEnd - closingStart === markerLength) {
+        closingEnd = runEnd;
+        break;
+      }
+      searchIndex = runEnd;
+    }
+
+    if (closingEnd === -1) {
+      index = openingEnd;
+      continue;
+    }
+    output += source.slice(cursor, index);
+    output += protect(source.slice(index, closingEnd));
+    cursor = closingEnd;
+    index = closingEnd;
+  }
+  return output + source.slice(cursor);
+}
+
+function replaceImportedMarkdownAutolinks(body, replaceSafe, replaceDangerous) {
+  const markdownAutolink = /<(?:[A-Za-z][A-Za-z0-9.+-]{1,31}:[^<>\u0000-\u0020\u007f]*|[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)>/g;
+  const dangerousSchemes = new Set(['javascript', 'data', 'vbscript']);
+  return String(body || '').replace(markdownAutolink, autolink => {
+    const scheme = autolink.match(/^<([A-Za-z][A-Za-z0-9.+-]{1,31}):/)?.[1].toLowerCase();
+    return scheme && dangerousSchemes.has(scheme)
+      ? replaceDangerous(autolink)
+      : replaceSafe(autolink);
+  });
+}
+
 function protectImportedMarkdownLiterals(body) {
   const source = String(body || '');
   let namespace;
@@ -1440,13 +1540,10 @@ function protectImportedMarkdownLiterals(body) {
     literals.push(literal);
     return token;
   };
-  const protectedFences = protectImportedFencedCode(source, protect);
-  const markdownAutolink = /<(?:[A-Za-z][A-Za-z0-9.+-]{1,31}:[^<>\u0000-\u0020\u007f]*|[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)>/g;
-  const dangerousSchemes = new Set(['javascript', 'data', 'vbscript']);
-  const protectedBody = protectedFences.replace(markdownAutolink, autolink => {
-    const scheme = autolink.match(/^<([A-Za-z][A-Za-z0-9.+-]{1,31}):/)?.[1].toLowerCase();
-    return scheme && dangerousSchemes.has(scheme) ? '' : protect(autolink);
-  });
+  let protectedBody = protectImportedFencedCode(source, protect);
+  protectedBody = protectImportedIndentedCode(protectedBody, protect);
+  protectedBody = protectImportedInlineCode(protectedBody, protect);
+  protectedBody = replaceImportedMarkdownAutolinks(protectedBody, protect, () => '');
   const tokenPattern = new RegExp(`${namespace}(\\d+)__`, 'g');
 
   return {
@@ -1457,24 +1554,36 @@ function protectImportedMarkdownLiterals(body) {
   };
 }
 
-function importedHtmlMode(filename, body, format) {
-  const source = String(body || '').replace(/^\uFEFF/, '').trimStart();
-  if (String(format || '').trim().toLowerCase() === 'html'
-    || /\.(?:html|htm)$/i.test(String(filename || ''))
-    || /^<!doctype\s+html\b/i.test(source)
-    || /^<html[\s>]/i.test(source)) return 'explicit';
-
-  const probe = importedHtmlDetectionProbe(source);
-  return /<\s*\/?\s*(?:head|body|article|section|main|aside|nav|header|footer|div|p|h[1-6]|table|thead|tbody|tfoot|tr|th|td|ul|ol|li|blockquote|img|figure|figcaption|pre|code|br|hr|a|form|input|button|video|audio|source|canvas|style|script|iframe|object|embed|meta|link|svg)\b/i.test(probe)
-    ? 'mixed'
-    : '';
+function containsImportedHtml(body) {
+  return /<\s*\/?\s*(?:html|head|title|body|article|section|main|aside|nav|header|footer|div|p|h[1-6]|table|caption|colgroup|col|thead|tbody|tfoot|tr|th|td|ul|ol|li|blockquote|figure|figcaption|pre|code|strong|em|b|i|u|s|a|img|br|hr|form|input|button|select|option|textarea|dialog|details|summary|video|audio|source|canvas|style|script|iframe|object|embed|meta|link|base|template|svg)\b/i.test(String(body || ''));
 }
 
-function titleFromImportedBody(body, filename = '', fallback = '未命名文章') {
+function importedContentFormat(filename, body, format) {
+  const requested = String(format || '').trim().toLowerCase();
+  const extension = path.extname(String(filename || '')).toLowerCase();
+  if (requested === 'html' || ['.html', '.htm'].includes(extension)) return 'html';
+  if (['.txt'].includes(extension)) return 'text';
+  if (['.md', '.markdown'].includes(extension)) return 'markdown';
+  if (['text', 'txt', 'plain', 'plain-text'].includes(requested)) return 'text';
+  if (['markdown', 'md'].includes(requested)) return 'markdown';
+
+  const source = String(body || '').replace(/^\uFEFF/, '');
+  const probe = importedHtmlDetectionProbe(source).replace(/^\uFEFF/, '').trimStart();
+  if (/^<!doctype\s+html\b/i.test(probe) || /^<html[\s>]/i.test(probe)) return 'html';
+  if (containsImportedHtml(probe)) return 'mixed';
+  if (/^[ \t]{0,3}(?:#{1,6}[ \t]+|>|[-+*][ \t]+|`{3,}|~{3,})/m.test(source)
+    || /(?:!?)\[[^\]]*\]\([^)]+\)/.test(source)
+    || /`[^`\r\n]+`/.test(source)
+    || /^(?: {4}|\t)\S/m.test(source)) return 'markdown';
+  return 'text';
+}
+
+function titleFromImportedBody(body, filename = '', format = 'text', fallback = '未命名文章') {
   const raw = String(body || '');
   const markdownHeading = raw.match(/^[ \t]{0,3}#[ \t]+(.+?)[ \t]*#*[ \t]*$/m)?.[1];
   const htmlTitle = raw.match(/<title\b[^>]*>([\s\S]*?)<\/title\s*>/i)?.[1];
   const htmlHeading = raw.match(/<h1\b[^>]*>([\s\S]*?)<\/h1\s*>/i)?.[1];
+  const firstPlainLine = raw.split(/\r?\n/).map(line => line.trim()).find(Boolean);
   const firstReadableLine = raw.split(/\r?\n/)
     .map(line => {
       const markdownImage = line.match(/^[ \t]*!\[([^\]]*)\]\([^)]+\)[ \t]*$/);
@@ -1483,7 +1592,14 @@ function titleFromImportedBody(body, filename = '', fallback = '未命名文章'
     .find(Boolean);
   const filenameTitle = path.basename(String(filename || '').trim())
     .replace(/\.(?:md|markdown|html?|txt)$/i, '');
-  for (const candidate of [markdownHeading, htmlTitle, htmlHeading, firstReadableLine, filenameTitle]) {
+
+  if (format === 'text' && firstPlainLine) return firstPlainLine;
+  const candidates = format === 'html'
+    ? [htmlTitle, htmlHeading, firstReadableLine]
+    : (format === 'mixed'
+      ? [htmlTitle, htmlHeading, markdownHeading, firstReadableLine]
+      : [markdownHeading, htmlTitle, htmlHeading, firstReadableLine]);
+  for (const candidate of [...candidates, filenameTitle]) {
     const title = stripHtml(candidate || '').trim();
     if (title) return title;
   }
@@ -1492,47 +1608,53 @@ function titleFromImportedBody(body, filename = '', fallback = '未命名文章'
 
 function importContent(payload = {}) {
   const rawBody = String(payload.body ?? '');
-  if (!rawBody.trim()) throw new Error('导入正文不能为空');
+  if (!rawBody.trim()) throw statusError('导入正文不能为空', 400);
   if (Buffer.byteLength(rawBody, 'utf8') > MAX_IMPORTED_BODY_BYTES) {
-    throw new Error('导入正文不能超过 5 MiB');
+    throw statusError('导入正文不能超过 5 MiB', 400);
   }
   const filename = String(payload.filename ?? '').trim();
   if (filename && !/\.(?:md|markdown|html|htm|txt)$/i.test(filename)) {
-    throw new Error('文件格式不支持，仅支持 .md、.markdown、.html、.htm、.txt');
+    throw statusError('文件格式不支持，仅支持 .md、.markdown、.html、.htm、.txt', 415);
   }
   const trimmedBody = rawBody.trim();
+  const format = importedContentFormat(filename, trimmedBody, payload.format);
+  const title = String(payload.title || '').trim()
+    || titleFromImportedBody(trimmedBody, filename, format);
   let body = trimmedBody;
-  const htmlMode = importedHtmlMode(filename, trimmedBody, payload.format);
-  if (htmlMode === 'explicit') {
+  if (format === 'html') {
     body = sanitizeImportedHtml(trimmedBody).trim();
-  } else if (htmlMode === 'mixed') {
+  } else if (format === 'mixed'
+    || (format === 'markdown' && containsImportedHtml(importedHtmlDetectionProbe(trimmedBody)))) {
     const protectedMarkdown = protectImportedMarkdownLiterals(trimmedBody);
     body = protectedMarkdown.restore(sanitizeImportedHtml(protectedMarkdown.body).trim());
   }
-  if (!body.trim()) throw new Error('导入正文不能为空');
-  const title = String(payload.title || '').trim() || titleFromImportedBody(body, filename);
+  if (!body.trim()) throw statusError('导入正文不能为空', 400);
   const summary = String(payload.summary ?? '').trim()
     || Array.from(readableImportedText(body)).slice(0, 120).join('');
   const type = String(payload.type ?? '').trim() || '导入文章';
   const contentId = makeId('content');
   const timestamp = now();
-  db.prepare(`
-    INSERT INTO contents
-      (id, title, summary, body, type, plan_date, status, layout_html, images, selected_platforms, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, NULL, '已导入', '', ?, ?, ?, ?)
-  `).run(
-    contentId,
-    title,
-    summary,
-    body,
-    type,
-    encodeJson([]),
-    encodeJson([]),
-    timestamp,
-    timestamp
-  );
-  addActivity(`导入文章《${title}》`, 'content', contentId, '用户');
-  return normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
+  return runTransaction(() => {
+    db.prepare(`
+      INSERT INTO contents
+        (id, title, summary, body, type, plan_date, status, layout_html, images, selected_platforms, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, NULL, '已导入', '', ?, ?, ?, ?)
+    `).run(
+      contentId,
+      title,
+      summary,
+      body,
+      type,
+      encodeJson([]),
+      encodeJson([]),
+      timestamp,
+      timestamp
+    );
+    addActivity(`导入文章《${title}》`, 'content', contentId, '用户');
+    const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
+    if (!content) throw new Error('导入内容读取失败');
+    return content;
+  });
 }
 
 function updateContent(contentId, payload = {}) {
@@ -1896,19 +2018,55 @@ function runFakeAiCommand(payload) {
   return recordCommand(type, text, progress, 'success', result);
 }
 
-function readBody(req) {
+function readBody(req, options = {}) {
   return new Promise((resolve, reject) => {
-    let body = '';
-    req.on('data', chunk => { body += chunk; });
+    const maxBytes = Number.isFinite(options.maxBytes) ? options.maxBytes : Infinity;
+    const declaredBytes = Number(req.headers['content-length']);
+    let settled = false;
+    let byteLength = 0;
+    const chunks = [];
+
+    const fail = error => {
+      if (settled) return;
+      settled = true;
+      req.removeListener('data', onData);
+      req.resume();
+      reject(error);
+    };
+    const onData = chunk => {
+      if (settled) return;
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      byteLength += buffer.length;
+      if (byteLength > maxBytes) {
+        fail(statusError('请求内容过大', 413));
+        return;
+      }
+      chunks.push(buffer);
+    };
+
+    if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
+      fail(statusError('请求内容过大', 413));
+      return;
+    }
+    req.on('data', onData);
     req.on('end', () => {
+      if (settled) return;
+      settled = true;
+      const body = Buffer.concat(chunks, byteLength).toString('utf8');
       if (!body) return resolve({});
       try {
         resolve(JSON.parse(body));
       } catch {
-        reject(new Error('请求 JSON 格式无效'));
+        const error = new Error('请求 JSON 格式无效');
+        if (options.invalidJsonStatusCode) error.statusCode = options.invalidJsonStatusCode;
+        reject(error);
       }
     });
-    req.on('error', reject);
+    req.on('error', error => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
   });
 }
 
@@ -2206,7 +2364,10 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === '/api/content/import' && req.method === 'POST') {
-      const body = await readBody(req);
+      const body = await readBody(req, {
+        maxBytes: MAX_IMPORT_REQUEST_BYTES,
+        invalidJsonStatusCode: 400,
+      });
       sendJson(res, { ok: true, content: importContent(body) });
       return;
     }
@@ -2258,7 +2419,8 @@ const server = http.createServer(async (req, res) => {
 
     sendStatic(req, res, url.pathname);
   } catch (error) {
-    sendJson(res, { ok: false, error: error.message }, 500);
+    const statusCode = Number.isInteger(error.statusCode) ? error.statusCode : 500;
+    sendJson(res, { ok: false, error: error.message }, statusCode);
   }
 });
 
