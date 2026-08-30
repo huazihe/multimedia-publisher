@@ -1442,7 +1442,8 @@ function protectImportedMarkdownLiterals(body) {
     return token;
   };
   const protectedFences = protectImportedFencedCode(source, protect);
-  const protectedBody = protectedFences.replace(/<https?:\/\/[^\s<>]+>/gi, protect);
+  const markdownAutolink = /<(?:[A-Za-z][A-Za-z0-9.+-]{1,31}:[^<>\u0000-\u0020\u007f]*|[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)>/g;
+  const protectedBody = protectedFences.replace(markdownAutolink, protect);
   const tokenPattern = new RegExp(`${namespace}(\\d+)__`, 'g');
 
   return {
@@ -1453,11 +1454,17 @@ function protectImportedMarkdownLiterals(body) {
   };
 }
 
-function isImportedHtml(filename, body) {
-  if (/\.(?:html|htm)$/i.test(String(filename || ''))) return true;
-  const probe = importedHtmlDetectionProbe(body).replace(/^\uFEFF/, '').trimStart();
-  if (/^<!doctype\s+html\b/i.test(probe) || /^<html[\s>]/i.test(probe)) return true;
-  return /<\s*\/?\s*(?:head|body|article|section|main|aside|nav|header|footer|div|p|h[1-6]|table|thead|tbody|tfoot|tr|th|td|ul|ol|li|blockquote|img|figure|figcaption|pre|code|br|hr|a|form|input|button|video|audio|source|canvas|script|iframe|object|embed|meta|link|svg)\b/i.test(probe);
+function importedHtmlMode(filename, body, format) {
+  const source = String(body || '').replace(/^\uFEFF/, '').trimStart();
+  if (String(format || '').trim().toLowerCase() === 'html'
+    || /\.(?:html|htm)$/i.test(String(filename || ''))
+    || /^<!doctype\s+html\b/i.test(source)
+    || /^<html[\s>]/i.test(source)) return 'explicit';
+
+  const probe = importedHtmlDetectionProbe(source);
+  return /<\s*\/?\s*(?:head|body|article|section|main|aside|nav|header|footer|div|p|h[1-6]|table|thead|tbody|tfoot|tr|th|td|ul|ol|li|blockquote|img|figure|figcaption|pre|code|br|hr|a|form|input|button|video|audio|source|canvas|script|iframe|object|embed|meta|link|svg)\b/i.test(probe)
+    ? 'mixed'
+    : '';
 }
 
 function titleFromImportedBody(body, filename = '', fallback = '未命名文章') {
@@ -1492,7 +1499,10 @@ function importContent(payload = {}) {
   }
   const trimmedBody = rawBody.trim();
   let body = trimmedBody;
-  if (isImportedHtml(filename, trimmedBody)) {
+  const htmlMode = importedHtmlMode(filename, trimmedBody, payload.format);
+  if (htmlMode === 'explicit') {
+    body = sanitizeImportedHtml(trimmedBody).trim();
+  } else if (htmlMode === 'mixed') {
     const protectedMarkdown = protectImportedMarkdownLiterals(trimmedBody);
     body = protectedMarkdown.restore(sanitizeImportedHtml(protectedMarkdown.body).trim());
   }

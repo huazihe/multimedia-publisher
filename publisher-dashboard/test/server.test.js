@@ -241,6 +241,38 @@ test('sanitizes mixed HTML while restoring protected Markdown literals byte-for-
   }
 });
 
+test('preserves a generic-scheme Markdown autolink in mixed content', () => {
+  let content;
+  try {
+    const autolink = '<ftp://files.example.com/pub/article.txt>';
+    content = importContent({
+      filename: 'mixed-generic.md',
+      body: `<article onclick="alert(1)"><p>下载地址</p></article>\n\n${autolink}`,
+    });
+
+    assert.doesNotMatch(content.body, /onclick\s*=/i);
+    assert.ok(content.body.includes(autolink));
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('preserves an email Markdown autolink in mixed content', () => {
+  let content;
+  try {
+    const autolink = '<editor.name+tag@example.co.uk>';
+    content = importContent({
+      filename: 'mixed-email.md',
+      body: `<section onload="alert(1)"><p>联系方式</p></section>\n\n${autolink}`,
+    });
+
+    assert.doesNotMatch(content.body, /onload\s*=/i);
+    assert.ok(content.body.includes(autolink));
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
 test('explicit imported title wins over the Markdown heading', () => {
   let content;
   try {
@@ -265,6 +297,28 @@ test('uses the HTML title when no imported title is provided', () => {
     });
 
     assert.equal(content.title, 'HTML 标题');
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('sanitizes scripts inside backtick fences for explicit HTML files', () => {
+  let content;
+  try {
+    content = importContent({
+      filename: 'backtick-script.html',
+      body: [
+        '<article>',
+        '```html',
+        '<script>alert("危险 HTML")</script>',
+        '```',
+        '<p>保留正文</p>',
+        '</article>',
+      ].join('\n'),
+    });
+
+    assert.doesNotMatch(content.body, /<script\b|alert\("危险 HTML"\)/i);
+    assert.match(content.body, /<p>保留正文<\/p>/);
   } finally {
     cleanupImportedContent(content);
   }
