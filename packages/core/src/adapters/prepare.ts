@@ -69,6 +69,15 @@ const URL_ATTRIBUTE_NAMES = new Set([
   'xlink:href',
 ])
 
+const PLAIN_TEXT_BLOCK_TAGS = new Set([
+  'ADDRESS', 'ARTICLE', 'ASIDE', 'BLOCKQUOTE', 'DIV', 'DL', 'DT', 'DD',
+  'FIGCAPTION', 'FIGURE', 'FOOTER', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+  'HEADER', 'HR', 'LI', 'MAIN', 'NAV', 'OL', 'P', 'PRE', 'SECTION', 'TABLE',
+  'TBODY', 'TFOOT', 'THEAD', 'TR', 'UL',
+])
+
+const PLAIN_TEXT_IGNORED_TAGS = new Set(['IMG', 'SOURCE', 'TEMPLATE'])
+
 interface ParsedFragment {
   document: Document
   root: HTMLElement
@@ -84,6 +93,17 @@ function parseFragment(html: string): ParsedFragment {
 function removeElements(root: ParentNode, selector: string): void {
   for (const element of Array.from(root.querySelectorAll(selector))) {
     element.remove()
+  }
+}
+
+function removeMetaRefresh(root: ParentNode): void {
+  for (const meta of Array.from(root.querySelectorAll('meta'))) {
+    const httpEquiv = Array.from(meta.attributes)
+      .find(attribute => attribute.name.toLowerCase() === 'http-equiv')
+      ?.value
+    if (httpEquiv?.trim().toLowerCase() === 'refresh') {
+      meta.remove()
+    }
   }
 }
 
@@ -358,10 +378,16 @@ function bodyContent(root: HTMLElement, config: PreprocessConfig): string {
   return styles + body.innerHTML
 }
 
-function sanitizeHtml(html: string, config: PreprocessConfig): string {
-  const { document, root } = parseFragment(html)
+function sanitizeRoot(root: ParentNode, document: Document, config: PreprocessConfig): void {
+  for (const template of Array.from(root.querySelectorAll('template'))) {
+    const container = document.createElement('div')
+    container.innerHTML = template.innerHTML
+    sanitizeRoot(container, document, config)
+    template.innerHTML = container.innerHTML
+  }
 
   removeElements(root, 'script,object,embed,base')
+  removeMetaRefresh(root)
   if (!config.keepStyles) removeElements(root, 'style,link[rel="stylesheet"]')
   if (config.removeIframes) removeElements(root, 'iframe')
   if (config.removeComments) removeComments(root)
@@ -376,28 +402,36 @@ function sanitizeHtml(html: string, config: PreprocessConfig): string {
   if (config.removeTrailingBr) removeTrailingBreaks(root)
   unwrapConfiguredContainers(root, config)
   removeEmptyElements(root, config)
+}
+
+function sanitizeHtml(html: string, config: PreprocessConfig): string {
+  const { document, root } = parseFragment(html)
+  sanitizeRoot(root, document, config)
 
   const result = bodyContent(root, config).trim()
   return config.compactHtml ? result.replace(/>\s+</g, '><') : result
 }
 
-function stripMarkup(markdown: string): string {
-  return markdown
-    .replace(/!\[[^\]]*]\([^)]*\)/g, '')
-    .replace(/\[([^\]]+)]\([^)]*\)/g, '$1')
-    .replace(/```[^\n]*\n([\s\S]*?)```/g, '$1')
-    .replace(/~~~[^\n]*\n([\s\S]*?)~~~/g, '$1')
-    .replace(/^\s{0,3}#{1,6}[ \t]+/gm, '')
-    .replace(/^\s{0,3}>[ \t]?/gm, '')
-    .replace(/^\s{0,3}(?:[-+*]|\d+[.)])[ \t]+/gm, '')
-    .replace(/^\s{0,3}(?:[-*_][ \t]*){3,}$/gm, '')
-    .replace(/`([^`\n]+)`/g, '$1')
-    .replace(/(\*\*|__)(.*?)\1/g, '$2')
-    .replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, '$1')
-    .replace(/(?<!_)_([^_\n]+)_(?!_)/g, '$1')
-    .replace(/~~(.*?)~~/g, '$1')
-    .replace(/<[^>]+>/g, '')
-    .replace(/\\([\\`*_[\]{}()#+\-.!>])/g, '$1')
+function plainTextFromNode(node: Node): string {
+  if (node.nodeType === 3) return node.textContent || ''
+  if (node.nodeType !== 1 && node.nodeType !== 11) return ''
+
+  const element = node.nodeType === 1 ? node as Element : null
+  const tagName = element?.tagName || ''
+  if (PLAIN_TEXT_IGNORED_TAGS.has(tagName)) return ''
+  if (tagName === 'BR') return '\n'
+
+  const content = Array.from(node.childNodes).map(plainTextFromNode).join('')
+  if (tagName === 'TD' || tagName === 'TH') return `${content}\t`
+  return PLAIN_TEXT_BLOCK_TAGS.has(tagName) ? `\n\n${content}\n\n` : content
+}
+
+function htmlToPlainText(html: string): string {
+  const { root } = parseFragment(html)
+  return Array.from(root.childNodes)
+    .map(plainTextFromNode)
+    .join('')
+    .replace(/\r\n?/g, '\n')
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
@@ -459,7 +493,9 @@ function previewHtml(
 }
 
 function resolveFormat(platform: PlatformMeta, config: PreprocessConfig): PreparedFormat {
-  return TEXT_PLATFORM_IDS.has(platform.id) ? 'text' : config.outputFormat
+  if (TEXT_PLATFORM_IDS.has(platform.id)) return 'text'
+  if (platform.id === 'zip-download') return 'markdown'
+  return config.outputFormat
 }
 
 export function prepareArticleForPlatform(
@@ -483,7 +519,7 @@ export function prepareArticleForPlatform(
     ? html
     : format === 'markdown'
       ? markdown
-      : stripMarkup(markdown)
+      : htmlToPlainText(html)
   const imageCount = countImages(html, article.cover)
   const limits = { ...(PLATFORM_LIMITS[platformId] || {}) }
 
