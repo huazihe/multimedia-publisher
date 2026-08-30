@@ -241,17 +241,22 @@ test('sanitizes mixed HTML while restoring protected Markdown literals byte-for-
   }
 });
 
-test('preserves a generic-scheme Markdown autolink in mixed content', () => {
+test('preserves safe URI-scheme Markdown autolinks in mixed content', () => {
   let content;
   try {
-    const autolink = '<ftp://files.example.com/pub/article.txt>';
+    const autolinks = [
+      '<ftp://files.example.com/pub/article.txt>',
+      '<http://safe.example/path?q=1>',
+      '<https://safe.example/path#section>',
+      '<mailto:editor.name+tag@example.co.uk>',
+    ];
     content = importContent({
       filename: 'mixed-generic.md',
-      body: `<article onclick="alert(1)"><p>下载地址</p></article>\n\n${autolink}`,
+      body: `<article onclick="alert(1)"><p>安全链接</p></article>\n\n${autolinks.join('\n')}`,
     });
 
     assert.doesNotMatch(content.body, /onclick\s*=/i);
-    assert.ok(content.body.includes(autolink));
+    for (const autolink of autolinks) assert.ok(content.body.includes(autolink));
   } finally {
     cleanupImportedContent(content);
   }
@@ -268,6 +273,27 @@ test('preserves an email Markdown autolink in mixed content', () => {
 
     assert.doesNotMatch(content.body, /onload\s*=/i);
     assert.ok(content.body.includes(autolink));
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('removes dangerous-scheme Markdown autolinks from mixed content', () => {
+  let content;
+  try {
+    const dangerousAutolinks = [
+      '<javascript:alert(2)>',
+      '<data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==>',
+      '<vbscript:msgbox(1)>',
+    ];
+    content = importContent({
+      filename: 'mixed-dangerous.md',
+      body: `<article><p>保留正文</p></article>\n\n${dangerousAutolinks.join('\n')}`,
+    });
+
+    for (const autolink of dangerousAutolinks) assert.ok(!content.body.includes(autolink));
+    assert.doesNotMatch(content.body, /javascript\s*:|data\s*:\s*text\/html|vbscript\s*:/i);
+    assert.match(content.body, /<article><p>保留正文<\/p><\/article>/);
   } finally {
     cleanupImportedContent(content);
   }

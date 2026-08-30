@@ -1443,7 +1443,11 @@ function protectImportedMarkdownLiterals(body) {
   };
   const protectedFences = protectImportedFencedCode(source, protect);
   const markdownAutolink = /<(?:[A-Za-z][A-Za-z0-9.+-]{1,31}:[^<>\u0000-\u0020\u007f]*|[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)>/g;
-  const protectedBody = protectedFences.replace(markdownAutolink, protect);
+  const dangerousSchemes = new Set(['javascript', 'data', 'vbscript']);
+  const protectedBody = protectedFences.replace(markdownAutolink, autolink => {
+    const scheme = autolink.match(/^<([A-Za-z][A-Za-z0-9.+-]{1,31}):/)?.[1].toLowerCase();
+    return scheme && dangerousSchemes.has(scheme) ? '' : protect(autolink);
+  });
   const tokenPattern = new RegExp(`${namespace}(\\d+)__`, 'g');
 
   return {
