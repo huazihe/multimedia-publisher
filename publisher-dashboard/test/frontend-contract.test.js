@@ -6,6 +6,7 @@ const path = require('node:path');
 const { createRequire } = require('node:module');
 const { spawnSync } = require('node:child_process');
 const { test } = require('node:test');
+const vm = require('node:vm');
 
 const dashboardRoot = path.resolve(__dirname, '..');
 const indexPath = path.join(dashboardRoot, 'public', 'index.html');
@@ -24,6 +25,13 @@ const { parseHTML } = (() => {
   }
 })();
 const { document } = parseHTML(indexSource);
+
+function extractFunctionSource(source, name, nextName) {
+  const start = source.indexOf(`function ${name}(`);
+  const end = source.indexOf(`\nfunction ${nextName}(`, start);
+  if (start < 0 || end < 0) return null;
+  return source.slice(start, end).trim();
+}
 
 test('keeps the six dynamic dashboard views and delegated navigation contract', () => {
   const views = ['dashboard', 'plans', 'content', 'publish', 'platforms', 'history'];
@@ -54,7 +62,24 @@ test('defines an accessible semantic import dialog for paste and local text file
 
   const tabs = [...dialog.querySelectorAll('[role="tab"][data-import-tab]')];
   assert.deepEqual(tabs.map(tab => tab.dataset.importTab), ['paste', 'file']);
-  assert.equal(dialog.querySelectorAll('[role="tabpanel"]').length, 2);
+  assert.deepEqual(tabs.map(tab => ({
+    id: tab.id,
+    selected: tab.getAttribute('aria-selected'),
+    controls: tab.getAttribute('aria-controls'),
+    tabIndex: tab.getAttribute('tabindex'),
+  })), [
+    { id: 'import-paste-tab', selected: 'true', controls: 'import-paste-panel', tabIndex: '0' },
+    { id: 'import-file-tab', selected: 'false', controls: 'import-file-panel', tabIndex: '-1' },
+  ]);
+  const panels = [...dialog.querySelectorAll('[role="tabpanel"]')];
+  assert.deepEqual(panels.map(panel => ({
+    id: panel.id,
+    labelledBy: panel.getAttribute('aria-labelledby'),
+    hidden: panel.hasAttribute('hidden'),
+  })), [
+    { id: 'import-paste-panel', labelledBy: 'import-paste-tab', hidden: false },
+    { id: 'import-file-panel', labelledBy: 'import-file-tab', hidden: true },
+  ]);
 
   const title = dialog.querySelector('#import-title-input');
   const textarea = dialog.querySelector('#import-content-input');
@@ -66,6 +91,128 @@ test('defines an accessible semantic import dialog for paste and local text file
   assert.match(dialog.textContent, /5\s*MiB/i);
   assert.ok(dialog.querySelector('[data-action="submit-import"]'));
   assert.ok(dialog.querySelector('[data-action="cancel-import"]'));
+});
+
+test('infers all supported HTML fragments without confusing Markdown autolinks or code', () => {
+  const source = extractFunctionSource(appSource, 'inferImportFormat', 'importedBodyByteLength');
+  assert.ok(source, 'inferImportFormat 必须保持为可独立测试的纯函数');
+  const inferImportFormat = vm.runInNewContext(`(${source})`);
+  const htmlFragments = [
+    '<!doctype html><html><head><title>T</title></head><body><main>正文</main></body></html>',
+    '<ul><li>项目</li></ul>',
+    '<ol><li>项目</li></ol>',
+    '<li>项目</li>',
+    '<blockquote>引用</blockquote>',
+    '<table></table>',
+    '<thead></thead>',
+    '<tbody></tbody>',
+    '<tr></tr>',
+    '<th>标题</th>',
+    '<td>单元格</td>',
+    '<figure></figure>',
+    '<figcaption>图注</figcaption>',
+    '<pre>代码</pre>',
+    '<code>const value = 1;</code>',
+    '<hr>',
+    '<br>',
+    '<img src="/cover.png" alt="封面">',
+    '<a href="https://example.com">链接</a>',
+    '<h3>标题</h3>',
+    '<article>文章</article>',
+    '<main>正文</main>',
+    '<section>章节</section>',
+    '<div>容器</div>',
+    '<p>段落</p>',
+  ];
+  for (const fragment of htmlFragments) {
+    assert.equal(inferImportFormat('', fragment), 'html', fragment);
+  }
+
+  for (const markdown of [
+    '<https://example.com/path?q=1>',
+    '<ftp://files.example.com/pub/article.txt>',
+    '<writer@example.com>',
+    '`<table><tr><td>inline</td></tr></table>`',
+    '``<code>`inline tick`</code>``',
+    '```html\n<table><tr><td>fenced</td></tr></table>\n```',
+    '    <figure><img src="code.png"></figure>',
+  ]) {
+    assert.equal(inferImportFormat('', markdown), 'markdown', markdown);
+  }
+  assert.equal(inferImportFormat('', '2 < 3，且 5 > 4'), 'text');
+});
+
+test('implements roving tabindex and keyboard navigation for import and platform tabs', () => {
+  const source = extractFunctionSource(appSource, 'nextTabIndexForKey', 'handleTablistKeydown');
+  assert.ok(source, '缺少可单元测试的 Tab 键盘索引函数');
+  const nextTabIndexForKey = vm.runInNewContext(`(${source})`);
+  assert.equal(nextTabIndexForKey('ArrowRight', 0, 3), 1);
+  assert.equal(nextTabIndexForKey('ArrowRight', 2, 3), 0);
+  assert.equal(nextTabIndexForKey('ArrowLeft', 0, 3), 2);
+  assert.equal(nextTabIndexForKey('ArrowLeft', 2, 3), 1);
+  assert.equal(nextTabIndexForKey('Home', 2, 3), 0);
+  assert.equal(nextTabIndexForKey('End', 0, 3), 2);
+  assert.equal(nextTabIndexForKey('Enter', 1, 3), -1);
+
+  const setImportTabSource = extractFunctionSource(appSource, 'setImportTab', 'resetImportDialog');
+  assert.ok(setImportTabSource);
+  const { document: importDocument } = parseHTML(indexSource);
+  const importState = { importTab: 'paste' };
+  const setImportTab = vm.runInNewContext(`(${setImportTabSource})`, {
+    state: importState,
+    $$: selector => [...importDocument.querySelectorAll(selector)],
+    $: selector => importDocument.querySelector(selector),
+    setImportFeedback: () => {},
+  });
+  setImportTab('file');
+  assert.equal(importState.importTab, 'file');
+  assert.deepEqual(
+    [...importDocument.querySelectorAll('[data-import-tab]')].map(tab => [
+      tab.getAttribute('aria-selected'),
+      tab.getAttribute('tabindex'),
+    ]),
+    [['false', '-1'], ['true', '0']],
+  );
+  assert.equal(importDocument.querySelector('#import-paste-panel').hidden, true);
+  assert.equal(importDocument.querySelector('#import-file-panel').hidden, false);
+
+  const handleSource = extractFunctionSource(appSource, 'handleTablistKeydown', 'setImportFeedback');
+  assert.ok(handleSource);
+  const activations = [];
+  const handleTablistKeydown = vm.runInNewContext(`(${handleSource})`, {
+    nextTabIndexForKey,
+    setImportTab: tab => activations.push(`import:${tab}`),
+    selectPreviewPlatform: platform => activations.push(`platform:${platform}`),
+  });
+  const { document: keyboardDocument } = parseHTML(`
+    <div role="tablist">
+      <button role="tab" data-platform="weixin">微信</button>
+      <button role="tab" data-platform="zhihu">知乎</button>
+    </div>
+  `);
+  const keyboardTabs = [...keyboardDocument.querySelectorAll('[role="tab"]')];
+  let focusedPlatform = '';
+  let prevented = false;
+  keyboardTabs.forEach(tab => {
+    tab.focus = () => { focusedPlatform = tab.dataset.platform; };
+  });
+  assert.equal(handleTablistKeydown({
+    key: 'ArrowRight',
+    target: keyboardTabs[0],
+    preventDefault: () => { prevented = true; },
+  }), true);
+  assert.equal(prevented, true);
+  assert.equal(focusedPlatform, 'zhihu');
+  assert.deepEqual(activations, ['platform:zhihu']);
+
+  assert.match(appSource, /button\.setAttribute\(['"]tabindex['"],\s*active\s*\?\s*['"]0['"]\s*:\s*['"]-1['"]\)/);
+  assert.match(appSource, /function handleTablistKeydown\s*\(/);
+  assert.match(appSource, /\['ArrowLeft',\s*'ArrowRight',\s*'Home',\s*'End'\]/);
+  assert.match(appSource, /nextTab\.focus\(\)/);
+  assert.match(appSource, /class="platform-preview-tabs" role="tablist"/);
+  assert.match(appSource, /role="tab"[^>]+aria-controls="platform-preview-panel"[^>]+aria-selected=[^>]+tabindex=/);
+  assert.match(appSource, /id="platform-preview-panel"[^>]+role="tabpanel"[^>]+aria-labelledby=/);
+  assert.match(appSource, /focusedPlatform[\s\S]*?\?\.focus\(\)/);
 });
 
 test('defines an explicit article/platform/mode publish confirmation dialog', () => {
@@ -128,6 +275,16 @@ test('isolates global actions from editable/imported content containers', () => 
     delegatedClick,
     /if\s*\(isActionEventIsolated\(event\.target\)\)\s*return[\s\S]*?closest\(['"]\[data-action\]['"]\)/,
   );
+  for (const eventName of ['change', 'input', 'keydown']) {
+    assert.match(
+      appSource,
+      new RegExp(`document\\.addEventListener\\(['"]${eventName}['"], event => \\{\\s*if \\(isActionEventIsolated\\(event\\.target\\)\\) return`),
+      `${eventName} 委托必须先隔离用户内容`,
+    );
+  }
+  assert.match(appSource, /function bindContentEditorDirtyTracking\s*\(/);
+  assert.match(appSource, /if\s*\(selected\)\s*bindContentEditorDirtyTracking\(selected\.id\)/);
+  assert.match(appSource, /field\.addEventListener\(['"]input['"],\s*\(\)\s*=>\s*markContentDirty\(id\)\)/);
 });
 
 test('contains unique static ids and responsive, horizontally safe workspace rules', () => {

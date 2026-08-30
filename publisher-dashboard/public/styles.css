@@ -3181,6 +3181,10 @@ body {
   overflow: hidden;
 }
 
+.platform-preview-panel {
+  min-width: 0;
+}
+
 .platform-preview-summary {
   display: flex;
   align-items: flex-start;

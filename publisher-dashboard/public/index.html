@@ -140,8 +140,8 @@
       </label>
 
       <div class="import-tabs span-2" role="tablist" aria-label="导入方式">
-        <button id="import-paste-tab" class="import-tab active" type="button" role="tab" data-action="select-import-tab" data-import-tab="paste" aria-controls="import-paste-panel" aria-selected="true">粘贴正文</button>
-        <button id="import-file-tab" class="import-tab" type="button" role="tab" data-action="select-import-tab" data-import-tab="file" aria-controls="import-file-panel" aria-selected="false">读取文件</button>
+        <button id="import-paste-tab" class="import-tab active" type="button" role="tab" tabindex="0" data-action="select-import-tab" data-import-tab="paste" aria-controls="import-paste-panel" aria-selected="true">粘贴正文</button>
+        <button id="import-file-tab" class="import-tab" type="button" role="tab" tabindex="-1" data-action="select-import-tab" data-import-tab="file" aria-controls="import-file-panel" aria-selected="false">读取文件</button>
       </div>
 
       <section id="import-paste-panel" class="import-tab-panel span-2" role="tabpanel" aria-labelledby="import-paste-tab">

@@ -840,6 +840,11 @@ function previewPlatformRecord(platformId) {
   };
 }
 
+function platformTabId(platformId) {
+  const safeId = String(platformId || '').replace(/[^a-z0-9_-]+/gi, '-');
+  return `platform-preview-tab-${safeId}`;
+}
+
 function ensureActivePreviewPlatform() {
   const platforms = state.data?.platforms || [];
   if (platforms.some(platform => platform.id === state.activePreviewPlatform)) return;
@@ -1002,6 +1007,10 @@ function platformAdaptationHtml(content) {
   const platform = state.activePreviewPlatform;
   const allPlatforms = state.data?.platforms || [];
   const featured = FEATURED_PREVIEW_PLATFORMS.map(id => previewPlatformRecord(id));
+  const tabPlatforms = featured.some(item => item.id === platform)
+    ? featured
+    : [...featured, previewPlatformRecord(platform)];
+  const activeTabId = platformTabId(platform);
   return `
     <div class="platform-adaptation-head">
       <div>
@@ -1015,8 +1024,8 @@ function platformAdaptationHtml(content) {
     </div>
 
     <div class="platform-preview-tabs" role="tablist" aria-label="常用平台">
-      ${featured.map(item => `
-        <button type="button" role="tab" class="platform-preview-tab ${platform === item.id ? 'active' : ''}" data-action="select-preview-platform" data-platform="${escapeHtml(item.id)}" aria-selected="${platform === item.id}">
+      ${tabPlatforms.map(item => `
+        <button id="${escapeHtml(platformTabId(item.id))}" type="button" role="tab" aria-controls="platform-preview-panel" aria-selected="${platform === item.id}" tabindex="${platform === item.id ? '0' : '-1'}" class="platform-preview-tab ${platform === item.id ? 'active' : ''}" data-action="select-preview-platform" data-platform="${escapeHtml(item.id)}">
           ${platformAvatar(item)}
           <span>${escapeHtml(item.name)}</span>
         </button>
@@ -1030,15 +1039,17 @@ function platformAdaptationHtml(content) {
       </select>
     </label>
 
-    ${platform === 'weixin' ? wechatTemplateControls(content) : ''}
+    <div id="platform-preview-panel" class="platform-preview-panel" role="tabpanel" aria-labelledby="${escapeHtml(activeTabId)}">
+      ${platform === 'weixin' ? wechatTemplateControls(content) : ''}
 
-    <div class="platform-preview-live" data-platform-preview-live>
-      ${platformPreviewResult(content, platform)}
-    </div>
+      <div class="platform-preview-live" data-platform-preview-live>
+        ${platformPreviewResult(content, platform)}
+      </div>
 
-    <div class="platform-publish-actions">
-      <button class="secondary" type="button" data-action="open-platform-draft" data-id="${escapeHtml(content.id)}" data-platform="${escapeHtml(platform)}">保存该平台草稿</button>
-      <button class="primary" type="button" data-action="open-platform-direct" data-id="${escapeHtml(content.id)}" data-platform="${escapeHtml(platform)}">直接发布该平台</button>
+      <div class="platform-publish-actions">
+        <button class="secondary" type="button" data-action="open-platform-draft" data-id="${escapeHtml(content.id)}" data-platform="${escapeHtml(platform)}">保存该平台草稿</button>
+        <button class="primary" type="button" data-action="open-platform-direct" data-id="${escapeHtml(content.id)}" data-platform="${escapeHtml(platform)}">直接发布该平台</button>
+      </div>
     </div>
   `;
 }
@@ -1047,7 +1058,15 @@ function renderPlatformAdaptationPane() {
   const host = $('[data-platform-adaptation-pane]');
   const content = getSelectedContent();
   if (!host || !content || host.dataset.contentId !== String(content.id)) return;
+  const focusedPlatform = host.contains(document.activeElement)
+    ? document.activeElement?.closest?.('[role="tab"][data-platform]')?.dataset.platform
+    : '';
   host.innerHTML = platformAdaptationHtml(content);
+  if (focusedPlatform) {
+    [...host.querySelectorAll('[role="tab"][data-platform]')]
+      .find(tab => tab.dataset.platform === focusedPlatform)
+      ?.focus();
+  }
 }
 
 function renderContent() {
@@ -1097,6 +1116,7 @@ function renderContent() {
       ` : '<div class="empty content-empty-state">请选择一篇文章打开正文草稿</div>'}
     </div>
   `;
+  if (selected) bindContentEditorDirtyTracking(selected.id);
   if (selected && state.activeView === 'content') {
     void loadPlatformPreview(selected, state.activePreviewPlatform);
   }
@@ -1650,6 +1670,32 @@ function shiftPlanRange(days) {
   renderPlans();
 }
 
+function nextTabIndexForKey(key, currentIndex, totalTabs) {
+  if (!Number.isInteger(currentIndex) || currentIndex < 0 || !Number.isInteger(totalTabs) || totalTabs < 1) return -1;
+  if (key === 'ArrowRight') return (currentIndex + 1) % totalTabs;
+  if (key === 'ArrowLeft') return (currentIndex - 1 + totalTabs) % totalTabs;
+  if (key === 'Home') return 0;
+  if (key === 'End') return totalTabs - 1;
+  return -1;
+}
+
+function handleTablistKeydown(event) {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return false;
+  const currentTab = event.target.closest?.('[role="tab"]');
+  const tablist = currentTab?.closest('[role="tablist"]');
+  if (!currentTab || !tablist) return false;
+  const tabs = [...tablist.querySelectorAll('[role="tab"]')].filter(tab => !tab.disabled);
+  const nextIndex = nextTabIndexForKey(event.key, tabs.indexOf(currentTab), tabs.length);
+  if (nextIndex < 0) return false;
+
+  event.preventDefault();
+  const nextTab = tabs[nextIndex];
+  nextTab.focus();
+  if (nextTab.dataset.importTab) setImportTab(nextTab.dataset.importTab);
+  if (nextTab.dataset.platform) selectPreviewPlatform(nextTab.dataset.platform);
+  return true;
+}
+
 function setImportFeedback(message = '', type = '') {
   const feedback = $('#import-dialog-feedback');
   if (!feedback) return;
@@ -1664,7 +1710,7 @@ function setImportTab(tab) {
     const active = button.dataset.importTab === nextTab;
     button.classList.toggle('active', active);
     button.setAttribute('aria-selected', active ? 'true' : 'false');
-    button.tabIndex = 0;
+    button.setAttribute('tabindex', active ? '0' : '-1');
   });
   $('#import-paste-panel').hidden = nextTab !== 'paste';
   $('#import-file-panel').hidden = nextTab !== 'file';
@@ -1706,11 +1752,19 @@ function cancelImport() {
 
 function inferImportFormat(filename, content) {
   const name = String(filename || '').trim().toLowerCase();
-  const source = String(content || '').trim();
+  const source = String(content || '');
   if (/\.(?:html|htm)$/.test(name)) return 'html';
   if (/\.(?:md|markdown)$/.test(name)) return 'markdown';
-  if (/^\s*<!doctype\s+html|<(?:html|head|body|article|section|p|h[1-6]|div)\b/i.test(source)) return 'html';
-  if (/^\s*(?:#{1,6}\s+|[-*+]\s+|>\s+|```)|\[[^\]]+\]\([^)]+\)/m.test(source)) return 'markdown';
+  const markdownAutolink = /<(?:[a-z][a-z0-9+.-]{1,31}:[^<>\s]+|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})>/gi;
+  const htmlProbe = source
+    .replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, '')
+    .replace(/^(?: {4}|\t).+$/gm, '')
+    .replace(/(`+)([\s\S]*?)\1/g, '')
+    .replace(markdownAutolink, '');
+  const htmlElement = /<!doctype\s+html\b|<\s*\/?\s*(?:html|head|body|main|article|section|div|p|h[1-6]|ul|ol|li|blockquote|table|thead|tbody|tr|th|td|figure|figcaption|pre|code|hr|br|img|a)(?=\s|\/?>)[^>]*>/i;
+  if (htmlElement.test(htmlProbe)) return 'html';
+  const markdownSyntax = /^\s*(?:#{1,6}\s+|[-*+]\s+|>\s+|```|~~~)|^(?: {4}|\t)\S|\[[^\]]+\]\([^)]+\)|<(?:[a-z][a-z0-9+.-]{1,31}:[^<>\s]+|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})>|`+/im;
+  if (markdownSyntax.test(source)) return 'markdown';
   return 'text';
 }
 
@@ -1973,6 +2027,18 @@ function markContentDirty(id) {
   if (saveState) {
     saveState.textContent = '有未保存更改';
     saveState.classList.add('is-dirty');
+  }
+}
+
+function bindContentEditorDirtyTracking(id) {
+  const fields = [
+    $(`[data-content-body="${id}"]`),
+    $(`[data-content-title="${id}"]`),
+    $(`[data-content-summary="${id}"]`),
+  ].filter(Boolean);
+  for (const field of fields) {
+    field.addEventListener('focusin', () => markContentDirty(id));
+    field.addEventListener('input', () => markContentDirty(id));
   }
 }
 
@@ -2281,6 +2347,8 @@ document.addEventListener('click', event => {
 });
 
 document.addEventListener('change', event => {
+  if (isActionEventIsolated(event.target)) return;
+
   const importFile = event.target.closest('#import-file-input');
   if (importFile) {
     readImportFile(importFile);
@@ -2329,18 +2397,13 @@ document.addEventListener('change', event => {
   }
 });
 
-document.addEventListener('focusin', event => {
-  const contentField = event.target.closest('[data-content-body], [data-content-title], [data-content-summary]');
-  if (!contentField) return;
-  markContentDirty(contentField.dataset.contentBody || contentField.dataset.contentTitle || contentField.dataset.contentSummary);
+document.addEventListener('keydown', event => {
+  if (isActionEventIsolated(event.target)) return;
+  handleTablistKeydown(event);
 });
 
 document.addEventListener('input', event => {
-  const contentField = event.target.closest('[data-content-body], [data-content-title], [data-content-summary]');
-  if (contentField) {
-    markContentDirty(contentField.dataset.contentBody || contentField.dataset.contentTitle || contentField.dataset.contentSummary);
-    return;
-  }
+  if (isActionEventIsolated(event.target)) return;
 
   const historyFilter = event.target.closest('[data-history-filter="keyword"]');
   if (historyFilter) {
