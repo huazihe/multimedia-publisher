@@ -59,6 +59,7 @@ const {
   publishSnapshotName,
   publishContent,
   createOperationJournal,
+  createInstanceLock,
   createDashboardServer,
   getDashboardData,
   DRAFTS_DIR,
@@ -222,13 +223,16 @@ test('local API requires trusted origin and per-server CSRF for mutations', asyn
   let publisherCalls = 0;
   try {
     firstServer = createDashboardServer({
+      operationsFile: path.join(testDataDir, 'csrf-first-operations.json'),
       preflight: async () => null,
       platformPublisher: async () => {
         publisherCalls += 1;
         return { output: '', info: { status: 'success', message: 'csrf publish success' } };
       },
     });
-    secondServer = createDashboardServer();
+    secondServer = createDashboardServer({
+      operationsFile: path.join(testDataDir, 'csrf-second-operations.json'),
+    });
     const firstPort = await listenOnRandomPort(firstServer);
     const secondPort = await listenOnRandomPort(secondServer);
     const firstOrigin = `http://127.0.0.1:${firstPort}`;
@@ -1021,12 +1025,188 @@ test('operation journal atomically persists running and reloads it as uncertain'
     ttlMs: 60_000,
     limit: 8,
   });
+  reloadedJournal.recoverRunning();
   assert.equal(reloadedJournal.get('journal-operation-0001').state, 'uncertain');
   assert.throws(
     () => reloadedJournal.begin('journal-operation-0001', signature),
     error => error?.statusCode === 409 && /不确定|重复/.test(error.message),
   );
   assert.doesNotMatch(fs.readFileSync(operationsFile, 'utf8'), /cookie|secret|正文内容/i);
+});
+
+test('two journal instances reload disk state and block a different operationId with the same running signature', () => {
+  const operationsFile = path.join(testDataDir, 'operation-journal-two-instances-running.json');
+  const signature = {
+    contentId: 'content-shared-running',
+    platforms: ['zhihu'],
+    publishMode: 'direct',
+    contentHash: 'b'.repeat(64),
+  };
+  const firstJournal = createOperationJournal({ filePath: operationsFile });
+  const secondJournal = createOperationJournal({ filePath: operationsFile });
+  firstJournal.begin('shared-running-operation-0001', signature);
+
+  assert.throws(
+    () => secondJournal.begin('shared-running-operation-0002', signature),
+    error => error?.statusCode === 409 && /正在进行|不确定|重复/.test(error.message),
+  );
+  assert.equal(secondJournal.get('shared-running-operation-0001').state, 'running');
+});
+
+test('a second journal instance replays a completed signature across operationIds', () => {
+  const operationsFile = path.join(testDataDir, 'operation-journal-two-instances-completed.json');
+  const signature = {
+    contentId: 'content-shared-completed',
+    platforms: ['juejin', 'zhihu'],
+    publishMode: 'draft',
+    contentHash: 'c'.repeat(64),
+  };
+  const firstJournal = createOperationJournal({ filePath: operationsFile });
+  const secondJournal = createOperationJournal({ filePath: operationsFile });
+  firstJournal.begin('shared-completed-operation-0001', signature);
+  firstJournal.complete('shared-completed-operation-0001', {
+    jobId: 'job-shared-completed',
+    jobStatus: 'draft_saved',
+    platformResults: [
+      { platform: 'zhihu', status: 'platform_draft' },
+      { platform: 'juejin', status: 'platform_draft' },
+    ],
+  });
+
+  const replay = secondJournal.begin('shared-completed-operation-0002', signature);
+  assert.equal(replay.kind, 'replay');
+  assert.equal(replay.record.operationId, 'shared-completed-operation-0001');
+  assert.equal(replay.record.result.jobId, 'job-shared-completed');
+});
+
+test('uncertain journal records survive short TTL pruning and block new IDs for the same signature', () => {
+  const operationsFile = path.join(testDataDir, 'operation-journal-uncertain-retention.json');
+  let currentTime = 50_000;
+  const signature = {
+    contentId: 'content-uncertain-retention',
+    platforms: ['zhihu'],
+    publishMode: 'direct',
+    contentHash: 'd'.repeat(64),
+  };
+  const journal = createOperationJournal({
+    filePath: operationsFile,
+    nowMs: () => currentTime,
+    ttlMs: 10,
+    limit: 4,
+  });
+  journal.begin('uncertain-retention-operation-0001', signature);
+  journal.markUncertain('uncertain-retention-operation-0001');
+  currentTime += 10_000;
+
+  assert.throws(
+    () => journal.begin('uncertain-retention-operation-0002', signature),
+    error => error?.statusCode === 409 && /不确定/.test(error.message),
+  );
+  assert.equal(journal.get('uncertain-retention-operation-0001').state, 'uncertain');
+});
+
+test('instance lock rejects a live PID and safely replaces a stale PID lock', () => {
+  const liveLockFile = path.join(testDataDir, 'publisher-live.instance.lock');
+  const staleLockFile = path.join(testDataDir, 'publisher-stale.instance.lock');
+  fs.writeFileSync(liveLockFile, JSON.stringify({ pid: 4242, token: 'live-owner' }), 'utf8');
+  const liveContender = createInstanceLock({
+    filePath: liveLockFile,
+    pid: 5252,
+    isProcessAlive: pid => pid === 4242,
+  });
+  assert.throws(
+    () => liveContender.acquire(),
+    error => error?.code === 'PUBLISHER_INSTANCE_ACTIVE' && /4242/.test(error.message),
+  );
+  assert.equal(JSON.parse(fs.readFileSync(liveLockFile, 'utf8')).pid, 4242);
+
+  fs.writeFileSync(staleLockFile, JSON.stringify({ pid: 6262, token: 'stale-owner' }), 'utf8');
+  const replacement = createInstanceLock({
+    filePath: staleLockFile,
+    pid: 7272,
+    isProcessAlive: () => false,
+  });
+  replacement.acquire();
+  assert.equal(JSON.parse(fs.readFileSync(staleLockFile, 'utf8')).pid, 7272);
+  replacement.release();
+  assert.equal(fs.existsSync(staleLockFile), false);
+});
+
+test('dashboard server holds one instance lock and releases it on close', async () => {
+  const operationsFile = path.join(testDataDir, 'server-instance-operations.json');
+  const instanceLockFile = path.join(testDataDir, 'server-instance.lock');
+  const firstServer = createDashboardServer({ operationsFile, instanceLockFile });
+  const secondServer = createDashboardServer({ operationsFile, instanceLockFile });
+  try {
+    await listenOnRandomPort(firstServer);
+    assert.equal(fs.existsSync(instanceLockFile), true);
+    assert.throws(
+      () => secondServer.listen(0, '127.0.0.1'),
+      error => error?.code === 'PUBLISHER_INSTANCE_ACTIVE',
+    );
+    await closeServer(firstServer);
+    assert.equal(fs.existsSync(instanceLockFile), false);
+    await listenOnRandomPort(secondServer);
+  } finally {
+    await closeServer(firstServer);
+    await closeServer(secondServer);
+  }
+  assert.equal(fs.existsSync(instanceLockFile), false);
+});
+
+test('publisher side-effect exception marks signature uncertain and blocks a new operationId', async () => {
+  let fixture;
+  let testServer;
+  let publisherCalls = 0;
+  const operationsFile = path.join(testDataDir, 'post-effect-uncertain-operations.json');
+  try {
+    fixture = createPublishStateFixture({
+      key: 'post-effect-uncertain',
+      planDate: '2099-06-08',
+      selectedPlatforms: ['zhihu'],
+      contentStatus: '已排版',
+      planStatus: '已排版',
+    });
+    testServer = createDashboardServer({
+      operationsFile,
+      instanceLockFile: path.join(testDataDir, 'post-effect-uncertain.instance.lock'),
+      preflight: async () => null,
+      platformPublisher: async () => {
+        publisherCalls += 1;
+        throw new Error('publisher threw after external side effect');
+      },
+    });
+    const port = await listenOnRandomPort(testServer);
+    const endpoint = `http://127.0.0.1:${port}/api/content/${fixture.id}/publish-platform`;
+    const publish = operationId => workbenchFetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId }),
+    });
+
+    let response = await publish('post-effect-uncertain-operation-0001');
+    assert.equal(response.status, 500);
+    assert.equal(publisherCalls, 1);
+    const journalAfterFailure = JSON.parse(fs.readFileSync(operationsFile, 'utf8'));
+    assert.equal(journalAfterFailure.records[0].state, 'uncertain');
+
+    response = await publish('post-effect-uncertain-operation-0002');
+    assert.equal(response.status, 409);
+    assert.match((await response.json()).error, /不确定|人工核对/);
+    assert.equal(publisherCalls, 1);
+  } finally {
+    await closeServer(testServer);
+    cleanupPublishStateFixture(fixture);
+  }
+});
+
+test('listenWithFallback does not retry another port for the same data store', () => {
+  const source = fs.readFileSync(path.resolve(__dirname, '..', 'server.js'), 'utf8');
+  const start = source.indexOf('function listenWithFallback');
+  const end = source.indexOf('\ninitDb();', start);
+  const listenSource = source.slice(start, end);
+  assert.doesNotMatch(listenSource, /listenWithFallback\(next/);
+  assert.doesNotMatch(listenSource, /trying \$\{next\}/);
 });
 
 test('repeated publish jobs keep different job-specific snapshots', async () => {
@@ -1378,7 +1558,8 @@ test('POST publish-platform rejects an in-flight duplicate and releases the guar
 
     const newOperationResponse = await publish('in-flight-operation-0002');
     assert.equal(newOperationResponse.status, 200);
-    assert.equal(calls, 2);
+    assert.equal((await newOperationResponse.json()).cached, true);
+    assert.equal(calls, 1);
   } finally {
     releaseFirst?.();
     await closeServer(testServer);
@@ -1429,9 +1610,11 @@ test('single publish completed cache expires by TTL and evicts oldest entries wh
     assert.equal(response.status, 200);
     assert.equal(calls, 2);
 
+    updateContent(fixture.id, { body: '# Cache version two\n\nChanged canonical body.' });
     response = await publish('cache-policy-operation-0002');
     assert.equal(response.status, 200);
     assert.equal(calls, 3);
+    updateContent(fixture.id, { body: '# Cache version three\n\nChanged canonical body again.' });
     response = await publish('cache-policy-operation-0001');
     assert.equal(response.status, 200);
     assert.equal(calls, 4);

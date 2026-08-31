@@ -127,6 +127,7 @@ const EMPLOYEES = [
 const SIDEBAR_COLLAPSED_KEY = 'content-workbench.sidebarCollapsed';
 const ACTIVE_EMPLOYEE_KEY = 'content-workbench.activeEmployeeId';
 const MAX_IMPORT_FILE_BYTES = 5 * 1024 * 1024;
+const CONTENT_CHANGED_DURING_SAVE_MESSAGE = '正文在保存期间又有修改，请先保存后重试';
 const IMPORT_FILE_EXTENSION = /\.(?:md|markdown|html|htm|txt)$/i;
 const FEATURED_PREVIEW_PLATFORMS = ['weixin', 'zhihu', 'juejin', 'xiaohongshu', 'toutiao'];
 const PREVIEW_FORMAT_LABELS = {
@@ -2096,7 +2097,12 @@ async function confirmSinglePlatformPublish() {
   setSinglePublishFeedback(`正在${operation.mode === 'draft' ? '保存草稿到' : '发布到'}${platformName(operation.platform)}…`);
   try {
     if ($(`[data-content-body="${operation.contentId}"]`)) {
-      await saveContent(operation.contentId, { silent: true });
+      const saveResult = await saveContent(operation.contentId, { silent: true });
+      if (!saveResult.stable) {
+        setSinglePublishFeedback(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
+        toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
+        return false;
+      }
     }
     const result = await request(`/api/content/${encodeURIComponent(operation.contentId)}/publish-platform`, {
       method: 'POST',
@@ -2147,7 +2153,11 @@ async function runContentTransition(transition) {
   const currentId = state.selectedContentId;
   try {
     if (currentId && state.dirtyContentIds.has(String(currentId))) {
-      await saveContent(currentId, { silent: true });
+      const saveResult = await saveContent(currentId, { silent: true });
+      if (!saveResult.stable) {
+        toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
+        return false;
+      }
     }
     await transition();
     return true;
@@ -2180,7 +2190,7 @@ async function generateContent(date) {
 
 async function saveContent(id, options = {}) {
   const target = id || state.selectedContentId;
-  if (!target) return null;
+  if (!target) return { content: null, stable: true };
   const targetKey = String(target);
   const editor = $(`[data-content-body="${target}"]`);
   const titleEditor = $(`[data-content-title="${target}"]`);
@@ -2212,12 +2222,12 @@ async function saveContent(id, options = {}) {
       };
     }
     state.dirtyContentIds.add(targetKey);
-    return res.content;
+    return { content: res.content, stable: false };
   }
   state.dirtyContentIds.delete(targetKey);
   if (!options.silent) toast('正文已保存');
   await loadData();
-  return res.content;
+  return { content: res.content, stable: true };
 }
 
 function markContentDirty(id) {
@@ -2250,7 +2260,13 @@ async function layoutContent(id, template) {
   const templateProvided = arguments.length >= 2;
   if (templateProvided && !template) throw new Error('请选择有效的公众号排版模板');
   if (!target) return toast('请选择内容', 'error');
-  if ($(`[data-content-body="${target}"]`)) await saveContent(target, { silent: true });
+  if ($(`[data-content-body="${target}"]`)) {
+    const saveResult = await saveContent(target, { silent: true });
+    if (!saveResult.stable) {
+      toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
+      return false;
+    }
+  }
   const requestOptions = templateProvided
     ? { method: 'POST', body: JSON.stringify({ template }) }
     : { method: 'POST' };
@@ -2259,19 +2275,27 @@ async function layoutContent(id, template) {
   await loadData();
   openLayoutDialog(getSelectedContent());
   toast('排版预览已生成');
+  return true;
 }
 
 async function saveDraft(id) {
   const target = id || state.selectedContentId;
   const selectedPlatforms = readSelectedPlatforms();
   if (!target) return toast('请选择内容', 'error');
-  if ($(`[data-content-body="${target}"]`)) await saveContent(target, { silent: true });
+  if ($(`[data-content-body="${target}"]`)) {
+    const saveResult = await saveContent(target, { silent: true });
+    if (!saveResult.stable) {
+      toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
+      return false;
+    }
+  }
   await request(`/api/content/${target}/save-draft`, {
     method: 'POST',
     body: JSON.stringify({ platforms: selectedPlatforms }),
   });
   toast('已保存到内容中心草稿');
   await loadData();
+  return true;
 }
 
 async function publishContent(id) {
@@ -2287,7 +2311,13 @@ async function publishContent(id) {
   if (!operation) return false;
   setBatchPublishBusy(true);
   try {
-    if ($(`[data-content-body="${target}"]`)) await saveContent(target, { silent: true });
+    if ($(`[data-content-body="${target}"]`)) {
+      const saveResult = await saveContent(target, { silent: true });
+      if (!saveResult.stable) {
+        toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
+        return false;
+      }
+    }
     state.selectedPlatforms = new Set(operation.platforms);
     state.lastProgress = [`正在直接发布到 ${operation.platforms.length} 个平台`, '进入多平台直发流程'];
     renderProgress(state.lastProgress);

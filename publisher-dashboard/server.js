@@ -258,7 +258,11 @@ function createOperationJournal(options = {}) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 
   let records = [];
-  if (fs.existsSync(filePath)) {
+  const reload = () => {
+    if (!fs.existsSync(filePath)) {
+      records = [];
+      return records;
+    }
     let document;
     try {
       document = JSON.parse(fs.readFileSync(filePath, 'utf8'));
@@ -269,7 +273,8 @@ function createOperationJournal(options = {}) {
       throw new Error('发布操作日志格式无效');
     }
     records = document.records.filter(record => record && typeof record === 'object');
-  }
+    return records;
+  };
 
   const persist = () => {
     const temporaryPath = `${filePath}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
@@ -286,40 +291,51 @@ function createOperationJournal(options = {}) {
 
   const prune = currentTime => {
     const cutoff = currentTime - ttlMs;
-    const retained = records.filter(record => {
+    const protectedRecords = records.filter(record => record.state === 'running' || record.state === 'uncertain');
+    const expirableRecords = records.filter(record => record.state !== 'running' && record.state !== 'uncertain').filter(record => {
       const updatedAt = Date.parse(record.updatedAt || record.createdAt || '');
       return !Number.isFinite(updatedAt) || updatedAt >= cutoff;
     });
-    retained.sort((left, right) => Date.parse(left.updatedAt || left.createdAt || 0) - Date.parse(right.updatedAt || right.createdAt || 0));
-    records = retained.slice(Math.max(0, retained.length - limit));
+    expirableRecords.sort((left, right) => Date.parse(right.updatedAt || right.createdAt || 0) - Date.parse(left.updatedAt || left.createdAt || 0));
+    const availableSlots = Math.max(0, limit - protectedRecords.length);
+    records = [...protectedRecords, ...expirableRecords.slice(0, availableSlots)];
+    records.sort((left, right) => Date.parse(left.updatedAt || left.createdAt || 0) - Date.parse(right.updatedAt || right.createdAt || 0));
   };
 
-  let startupChanged = false;
-  const startupTime = nowMs();
-  for (const record of records) {
-    if (record.state !== 'running') continue;
-    record.state = 'uncertain';
-    record.updatedAt = new Date(startupTime).toISOString();
-    record.uncertainAt = record.updatedAt;
-    startupChanged = true;
-  }
-  const startupCount = records.length;
-  prune(startupTime);
-  if (records.length !== startupCount) startupChanged = true;
-  if (startupChanged) persist();
+  const reloadAndPrune = () => {
+    reload();
+    const before = JSON.stringify(records);
+    prune(nowMs());
+    return before !== JSON.stringify(records);
+  };
+
+  const updateState = (operationId, state, result = null) => {
+    reload();
+    const record = records.find(item => item.operationId === operationId);
+    if (!record || record.state !== 'running') return record || null;
+    const timestamp = operationTimestamp(nowMs);
+    record.state = state;
+    record.result = normalizeJournalResult(result);
+    record.updatedAt = timestamp;
+    if (state === 'completed') record.completedAt = timestamp;
+    if (state === 'failed') record.failedAt = timestamp;
+    if (state === 'uncertain') record.uncertainAt = timestamp;
+    persist();
+    return record;
+  };
+
+  reload();
 
   return {
     filePath,
     get(operationId) {
+      reload();
       return records.find(record => record.operationId === operationId) || null;
     },
     begin(operationId, signature) {
       const canonicalSignature = normalizeOperationSignature(signature);
       const signatureKey = operationSignatureKey(canonicalSignature);
-      const currentTime = nowMs();
-      const beforePrune = records.length;
-      prune(currentTime);
-      if (records.length !== beforePrune) persist();
+      const pruned = reloadAndPrune();
 
       const existing = records.find(record => record.operationId === operationId);
       if (existing) {
@@ -335,8 +351,23 @@ function createOperationJournal(options = {}) {
         }
         throw statusError('相同 operationId 的发布正在进行，请勿重复提交', 409);
       }
-      if (records.some(record => record.state === 'running' && operationSignatureKey(record.signature) === signatureKey)) {
+      const matchingSignature = records.filter(record => operationSignatureKey(record.signature) === signatureKey);
+      const uncertain = matchingSignature.find(record => record.state === 'uncertain');
+      if (uncertain) {
+        throw statusError('相同内容与平台的发布结果不确定，禁止自动重试；请人工核对平台结果', 409);
+      }
+      const running = matchingSignature.find(record => record.state === 'running');
+      if (running) {
         throw statusError('相同内容与平台的发布正在进行，请勿重复提交', 409);
+      }
+      const completed = matchingSignature.find(record => record.state === 'completed');
+      if (completed) {
+        if (pruned) persist();
+        return { kind: 'replay', record: completed };
+      }
+      if (records.length >= limit) {
+        records = records.filter(record => record.state === 'running' || record.state === 'uncertain');
+        if (records.length >= limit) throw statusError('发布操作日志已满，请先人工处理不确定操作', 503);
       }
 
       const timestamp = operationTimestamp(nowMs);
@@ -349,34 +380,148 @@ function createOperationJournal(options = {}) {
         updatedAt: timestamp,
       };
       records.push(record);
-      prune(nowMs());
-      if (!records.includes(record)) throw statusError('发布操作过多，请稍后重试', 503);
       persist();
       return { kind: 'started', record };
     },
     complete(operationId, result) {
-      const record = records.find(item => item.operationId === operationId);
-      if (!record || record.state !== 'running') throw new Error('发布操作不在运行状态');
-      const timestamp = operationTimestamp(nowMs);
-      record.state = 'completed';
-      record.result = normalizeJournalResult(result);
-      record.updatedAt = timestamp;
-      record.completedAt = timestamp;
-      persist();
+      const record = updateState(operationId, 'completed', result);
+      if (!record || record.state !== 'completed') throw new Error('发布操作不在运行状态');
       return record;
     },
     fail(operationId, result = null) {
-      const record = records.find(item => item.operationId === operationId);
-      if (!record || record.state !== 'running') return record || null;
+      return updateState(operationId, 'failed', result);
+    },
+    markUncertain(operationId, result = null) {
+      return updateState(operationId, 'uncertain', result);
+    },
+    recoverRunning() {
+      reload();
       const timestamp = operationTimestamp(nowMs);
-      record.state = 'failed';
-      record.result = normalizeJournalResult(result);
-      record.updatedAt = timestamp;
-      record.failedAt = timestamp;
-      persist();
-      return record;
+      let changed = false;
+      for (const record of records) {
+        if (record.state !== 'running') continue;
+        record.state = 'uncertain';
+        record.updatedAt = timestamp;
+        record.uncertainAt = timestamp;
+        changed = true;
+      }
+      prune(nowMs());
+      if (changed) persist();
+      return changed;
     },
   };
+}
+
+function defaultProcessIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === 'EPERM';
+  }
+}
+
+function createInstanceLock(options = {}) {
+  const filePath = path.resolve(options.filePath || `${OPERATIONS_FILE}.instance.lock`);
+  const ownerPid = Number.isInteger(options.pid) ? options.pid : process.pid;
+  const isProcessAlive = typeof options.isProcessAlive === 'function' ? options.isProcessAlive : defaultProcessIsAlive;
+  const token = String(options.token || randomBytes(18).toString('hex'));
+  let owned = false;
+
+  const readLock = () => {
+    const descriptor = fs.openSync(filePath, 'r');
+    try {
+      const stat = fs.fstatSync(descriptor);
+      const document = JSON.parse(fs.readFileSync(descriptor, 'utf8'));
+      return { document, stat };
+    } finally {
+      fs.closeSync(descriptor);
+    }
+  };
+  const releaseOnExit = () => {
+    try {
+      release();
+    } catch {
+      // Process exit must continue even when lock cleanup cannot complete.
+    }
+  };
+  const acquire = () => {
+    if (owned) return true;
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    for (let attempt = 0; attempt < 4; attempt++) {
+      let descriptor;
+      try {
+        descriptor = fs.openSync(filePath, 'wx', 0o600);
+        fs.writeFileSync(descriptor, `${JSON.stringify({ pid: ownerPid, token, createdAt: now() })}\n`, 'utf8');
+        fs.fsyncSync(descriptor);
+        fs.closeSync(descriptor);
+        descriptor = undefined;
+        owned = true;
+        process.once('exit', releaseOnExit);
+        return true;
+      } catch (error) {
+        if (descriptor !== undefined) fs.closeSync(descriptor);
+        if (error?.code !== 'EEXIST') throw error;
+      }
+
+      let existing;
+      try {
+        existing = readLock();
+      } catch (error) {
+        if (error?.code === 'ENOENT') continue;
+        existing = { document: {}, stat: fs.lstatSync(filePath) };
+      }
+      const existingPid = Number(existing.document?.pid);
+      if (isProcessAlive(existingPid)) {
+        const error = new Error(`已有发布面板进程正在使用当前数据目录（PID ${existingPid}）`);
+        error.code = 'PUBLISHER_INSTANCE_ACTIVE';
+        throw error;
+      }
+      try {
+        const currentStat = fs.lstatSync(filePath);
+        if (currentStat.dev !== existing.stat.dev || currentStat.ino !== existing.stat.ino) continue;
+        fs.unlinkSync(filePath);
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error;
+      }
+    }
+    throw new Error('无法安全获取发布面板实例锁');
+  };
+  const release = () => {
+    if (!owned) return false;
+    try {
+      const current = readLock().document;
+      if (Number(current?.pid) === ownerPid && current?.token === token) fs.unlinkSync(filePath);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    } finally {
+      owned = false;
+      process.removeListener('exit', releaseOnExit);
+    }
+    return true;
+  };
+
+  return { filePath, acquire, release, isOwned: () => owned };
+}
+
+function attachInstanceLock(server, instanceLock, operationJournal) {
+  const listen = server.listen;
+  server.listen = function listenWithInstanceLock(...args) {
+    instanceLock.acquire();
+    try {
+      operationJournal.recoverRunning();
+      return listen.apply(this, args);
+    } catch (error) {
+      instanceLock.release();
+      throw error;
+    }
+  };
+  server.on('close', () => instanceLock.release());
+  server.on('error', () => {
+    if (!server.listening) instanceLock.release();
+  });
+  return server;
 }
 
 function loopbackHostname(hostname) {
@@ -2417,6 +2562,7 @@ async function publishContent(contentId, platforms = [], options = {}) {
       continue;
     }
 
+    if (typeof options.onPublisherStart === 'function') options.onPublisherStart(platform);
     const single = await platformPublisher(markdownFile, platform, content.title, publishMode);
     finalResults[platform] = single.info;
     rawOutputs.push(single.output);
@@ -2735,6 +2881,10 @@ function createDashboardServer(options = {}) {
     ttlMs: options.operationJournalTtlMs ?? options.singlePublishCacheTtlMs,
     limit: options.operationJournalLimit ?? options.singlePublishCacheLimit,
   });
+  const instanceLock = options.instanceLock || createInstanceLock({
+    filePath: options.instanceLockFile || `${operationJournal.filePath}.instance.lock`,
+    ...(options.processIsAlive ? { isProcessAlive: options.processIsAlive } : {}),
+  });
   const workbenchCsrfToken = randomBytes(32).toString('base64url');
   const uploadsDir = path.resolve(options.uploadsDir || UPLOADS_DIR);
 
@@ -2766,24 +2916,25 @@ function createDashboardServer(options = {}) {
       return { ...replayedPublishResult(admission.record), cached: true };
     }
 
-    let publishFinished = false;
+    let publisherStarted = false;
     try {
       const result = await publishContent(contentId, selected, {
         ...publishDependencies,
         publishMode,
         persistSelection,
         updateAggregateStatus,
+        onPublisherStart: () => { publisherStarted = true; },
       });
-      publishFinished = true;
       operationJournal.complete(operationId, journalResultForPublish(result));
       return { ...result, cached: false };
     } catch (error) {
-      if (!publishFinished) operationJournal.fail(operationId);
+      if (publisherStarted) operationJournal.markUncertain(operationId);
+      else operationJournal.fail(operationId);
       throw error;
     }
   };
 
-  return http.createServer(async (req, res) => {
+  const dashboardServer = http.createServer(async (req, res) => {
   const origin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
   if (!requestOriginIsTrusted(req, origin)) {
     sendJson(res, { ok: false, error: 'Origin 不受信任' }, 403);
@@ -3119,23 +3270,18 @@ function createDashboardServer(options = {}) {
     }, statusCode);
   }
   });
+  return attachInstanceLock(dashboardServer, instanceLock, operationJournal);
 }
 
 const server = createDashboardServer();
 
-function listenWithFallback(port, attempts = 20) {
+function listenWithFallback(port) {
   const onListening = () => {
     server.off('error', onError);
     console.log(`多平台内容发布可视化面板: http://${HOST}:${port}`);
   };
   const onError = error => {
     server.off('listening', onListening);
-    if (error.code === 'EADDRINUSE' && attempts > 0) {
-      const next = port + 1;
-      console.warn(`Port ${port} is in use, trying ${next}...`);
-      listenWithFallback(next, attempts - 1);
-      return;
-    }
     throw error;
   };
   server.once('listening', onListening);
@@ -3175,6 +3321,7 @@ module.exports = {
   publishSnapshotName,
   publishContent,
   createOperationJournal,
+  createInstanceLock,
   getDashboardData,
   listenWithFallback,
 };

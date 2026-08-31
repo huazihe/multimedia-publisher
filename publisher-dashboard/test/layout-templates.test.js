@@ -40,6 +40,7 @@ const { parseHTML } = (() => {
 })();
 const testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'publisher-layout-templates-test-'));
 process.env.PUBLISHER_DB = path.join(testDataDir, 'publisher.sqlite');
+process.env.PUBLISHER_OPERATIONS_FILE = path.join(testDataDir, 'publish-operations.json');
 const PLACEHOLDER_MARKERS = /此处为|替换为|文章主标题|公众号名称|公众号简介/;
 const KNOWN_SAMPLE_COPY = /TC4钛合金|手艺人的最后一代|公众号通用排版样式合集|关于早晨的那杯茶|正文段落首行缩进两格|上一篇文章的标题|作者名字|慢生活笔记|BUSINESS INSIGHT|\[\s*配图位置\s*\]/i;
 

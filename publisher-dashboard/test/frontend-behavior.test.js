@@ -393,7 +393,10 @@ test('dirty transition saves first and never calls transition after save failure
   const successfulTransition = vm.runInNewContext(`(${transitionSource})`, {
     state: transitionState,
     hasDirtyCanonicalContent,
-    saveContent: async id => { transitionState.dirtyContentIds.delete(id); },
+    saveContent: async id => {
+      transitionState.dirtyContentIds.delete(id);
+      return { content: { id }, stable: true };
+    },
     toast: () => {},
   });
   assert.equal(await successfulTransition(() => { transitioned += 1; }), true);
@@ -486,8 +489,10 @@ test('deferred save preserves a newer editor revision and merges only server met
     },
   });
 
-  await pendingSave;
+  const saveResult = await pendingSave;
 
+  assert.equal(saveResult.stable, false);
+  assert.equal(saveResult.content.updated_at, '2026-08-31T02:00:00.000Z');
   assert.equal(editor.innerHTML, '<p>second revision stays live</p>');
   assert.equal(titleEditor.value, 'Second title stays live');
   assert.equal(summaryEditor.value, 'Second summary stays live');
@@ -499,6 +504,252 @@ test('deferred save preserves a newer editor revision and merges only server met
   assert.equal(state.data.contents[0].status, '草稿已保存');
   assert.equal(state.data.contents[0].updated_at, '2026-08-31T02:00:00.000Z');
   assert.equal(reloads, 0);
+});
+
+function createDeferredCanonicalSaveHarness(contentId = 'content-downstream-race') {
+  const editor = { isContentEditable: true, innerHTML: '<p>saved revision</p>' };
+  const titleEditor = { value: 'Saved title' };
+  const summaryEditor = { value: 'Saved summary' };
+  const content = {
+    id: contentId,
+    title: 'Stored title',
+    summary: 'Stored summary',
+    body: '<p>stored body</p>',
+    type: '行业分析',
+    status: '已排版',
+    updated_at: '2026-08-31T01:00:00.000Z',
+  };
+  const state = {
+    selectedContentId: contentId,
+    data: { contents: [content] },
+    dirtyContentIds: new Set(),
+    contentEditRevisions: new Map(),
+    contentTransitionInFlight: false,
+    selectedPlatforms: new Set(['zhihu']),
+    batchPublishSubmitting: false,
+    batchPublishOperation: null,
+    lastProgress: [],
+  };
+  const nodes = new Map([
+    [`[data-content-body="${contentId}"]`, editor],
+    [`[data-content-title="${contentId}"]`, titleEditor],
+    [`[data-content-summary="${contentId}"]`, summaryEditor],
+  ]);
+  const $ = selector => nodes.get(selector) || null;
+  let resolveSave;
+  let signalSaveStarted;
+  const saveResponse = new Promise(resolve => { resolveSave = resolve; });
+  const saveStarted = new Promise(resolve => { signalSaveStarted = resolve; });
+  const downstreamRequests = [];
+  const request = async (url, options = {}) => {
+    if (url === `/api/content/${encodeURIComponent(contentId)}` && options.method === 'POST') {
+      signalSaveStarted();
+      return saveResponse;
+    }
+    downstreamRequests.push({ url, options });
+    if (url.endsWith('/layout')) return { content: { ...content, status: '已排版' } };
+    if (url.includes('/publish-platform')) return { job: { results: [] } };
+    return { ok: true, job: { results: [] } };
+  };
+  let reloads = 0;
+  const toasts = [];
+  const loadData = async () => { reloads += 1; };
+  const toast = (message, type) => toasts.push({ message, type: type || '' });
+  const dirtySource = extractFunctionSource('markContentDirty', 'bindContentEditorDirtyTracking');
+  const saveSource = extractFunctionSource('saveContent', 'markContentDirty');
+  const markContentDirty = vm.runInNewContext(`(${dirtySource})`, { state, $ });
+  const saveContent = vm.runInNewContext(`(${saveSource})`, {
+    state,
+    $,
+    request,
+    clearPlatformPreviews: () => {},
+    toast,
+    loadData,
+    encodeURIComponent,
+  });
+  markContentDirty(contentId);
+
+  return {
+    contentId,
+    state,
+    $,
+    request,
+    saveContent,
+    saveStarted,
+    downstreamRequests,
+    toasts,
+    reloadCount: () => reloads,
+    editAndResolve() {
+      editor.innerHTML = '<p>newer live revision</p>';
+      titleEditor.value = 'Newer live title';
+      summaryEditor.value = 'Newer live summary';
+      markContentDirty(contentId);
+      resolveSave({
+        content: {
+          ...content,
+          title: 'Saved title',
+          summary: 'Saved summary',
+          body: '<p>saved revision normalized</p>',
+          updated_at: '2026-08-31T02:00:00.000Z',
+        },
+      });
+    },
+  };
+}
+
+test('layout aborts when the canonical body changes during its deferred save', async () => {
+  const harness = createDeferredCanonicalSaveHarness('layout-save-race');
+  const source = extractFunctionSource('layoutContent', 'saveDraft');
+  const layoutContent = vm.runInNewContext(`(${source})`, {
+    state: harness.state,
+    $: harness.$,
+    saveContent: harness.saveContent,
+    request: harness.request,
+    toast: (message, type) => harness.toasts.push({ message, type: type || '' }),
+    loadData: async () => { throw new Error('unstable layout must not reload'); },
+    openLayoutDialog: () => { throw new Error('unstable layout must not open preview'); },
+    getSelectedContent: () => harness.state.data.contents[0],
+    encodeURIComponent,
+    CONTENT_CHANGED_DURING_SAVE_MESSAGE: '正文在保存期间又有修改，请先保存后重试',
+  });
+
+  const pending = layoutContent(harness.contentId, 'style_10.html');
+  await harness.saveStarted;
+  harness.editAndResolve();
+  assert.equal(await pending, false);
+  assert.equal(harness.downstreamRequests.length, 0);
+  assert.equal(harness.reloadCount(), 0);
+  assert.deepEqual(harness.toasts.at(-1), { message: '正文在保存期间又有修改，请先保存后重试', type: 'error' });
+});
+
+test('saveDraft aborts when the canonical body changes during its deferred save', async () => {
+  const harness = createDeferredCanonicalSaveHarness('draft-save-race');
+  const source = extractFunctionSource('saveDraft', 'publishContent');
+  const saveDraft = vm.runInNewContext(`(${source})`, {
+    state: harness.state,
+    $: harness.$,
+    saveContent: harness.saveContent,
+    readSelectedPlatforms: () => ['zhihu'],
+    request: harness.request,
+    toast: (message, type) => harness.toasts.push({ message, type: type || '' }),
+    loadData: async () => { throw new Error('unstable draft must not reload'); },
+    CONTENT_CHANGED_DURING_SAVE_MESSAGE: '正文在保存期间又有修改，请先保存后重试',
+  });
+
+  const pending = saveDraft(harness.contentId);
+  await harness.saveStarted;
+  harness.editAndResolve();
+  assert.equal(await pending, false);
+  assert.equal(harness.downstreamRequests.length, 0);
+  assert.equal(harness.reloadCount(), 0);
+  assert.deepEqual(harness.toasts.at(-1), { message: '正文在保存期间又有修改，请先保存后重试', type: 'error' });
+});
+
+test('batch publish aborts when the canonical body changes during its deferred save', async () => {
+  const harness = createDeferredCanonicalSaveHarness('batch-save-race');
+  const createSource = extractFunctionSource('createPublishOperationId', 'beginBatchPublishOperation');
+  const beginSource = extractFunctionSource('beginBatchPublishOperation', 'finishBatchPublishOperation');
+  const finishSource = extractFunctionSource('finishBatchPublishOperation', 'setBatchPublishBusy');
+  const createPublishOperationId = vm.runInNewContext(`(${createSource})`, {
+    crypto: { randomUUID: () => 'batch-save-race-operation-0001' },
+  });
+  const beginBatchPublishOperation = vm.runInNewContext(`(${beginSource})`, { createPublishOperationId });
+  const finishBatchPublishOperation = vm.runInNewContext(`(${finishSource})`);
+  const source = extractFunctionSource('publishContent', 'checkAuth');
+  const busyStates = [];
+  const publishContent = vm.runInNewContext(`(${source})`, {
+    state: harness.state,
+    $: harness.$,
+    readSelectedPlatforms: () => ['zhihu'],
+    beginBatchPublishOperation,
+    finishBatchPublishOperation,
+    setBatchPublishBusy: busy => busyStates.push(busy),
+    saveContent: harness.saveContent,
+    renderProgress: () => { throw new Error('unstable publish must not render progress'); },
+    request: harness.request,
+    toast: (message, type) => harness.toasts.push({ message, type: type || '' }),
+    loadData: async () => { throw new Error('unstable publish must not reload'); },
+    switchView: () => { throw new Error('unstable publish must not navigate'); },
+    CONTENT_CHANGED_DURING_SAVE_MESSAGE: '正文在保存期间又有修改，请先保存后重试',
+  });
+
+  const pending = publishContent(harness.contentId);
+  await harness.saveStarted;
+  harness.editAndResolve();
+  assert.equal(await pending, false);
+  assert.equal(harness.downstreamRequests.length, 0);
+  assert.equal(harness.reloadCount(), 0);
+  assert.deepEqual(busyStates, [true, false]);
+  assert.deepEqual(harness.toasts.at(-1), { message: '正文在保存期间又有修改，请先保存后重试', type: 'error' });
+});
+
+test('single publish aborts when the canonical body changes during its deferred save', async () => {
+  const harness = createDeferredCanonicalSaveHarness('single-save-race');
+  harness.state.pendingSinglePublish = Object.freeze({
+    contentId: harness.contentId,
+    platform: 'zhihu',
+    mode: 'direct',
+    operationId: 'single-save-race-operation-0001',
+  });
+  harness.state.singlePublishSubmitting = false;
+  harness.state.singlePublishOperationToken = '';
+  harness.state.singlePublishOperationSequence = 0;
+  const beginSource = extractFunctionSource('beginSinglePublishOperation', 'finishSinglePublishOperation');
+  const finishSource = extractFunctionSource('finishSinglePublishOperation', 'canCancelSinglePublish');
+  const beginSinglePublishOperation = vm.runInNewContext(`(${beginSource})`);
+  const finishSinglePublishOperation = vm.runInNewContext(`(${finishSource})`);
+  const source = extractFunctionSource('confirmSinglePlatformPublish', 'hasDirtyCanonicalContent');
+  const feedback = [];
+  const confirmSinglePlatformPublish = vm.runInNewContext(`(${source})`, {
+    state: harness.state,
+    beginSinglePublishOperation,
+    finishSinglePublishOperation,
+    setSinglePublishBusy: () => {},
+    setSinglePublishFeedback: (message, type) => feedback.push({ message, type: type || '' }),
+    platformName: platform => platform,
+    $: harness.$,
+    saveContent: harness.saveContent,
+    request: harness.request,
+    loadData: async () => { throw new Error('unstable single publish must not reload'); },
+    toast: (message, type) => harness.toasts.push({ message, type: type || '' }),
+    encodeURIComponent,
+    CONTENT_CHANGED_DURING_SAVE_MESSAGE: '正文在保存期间又有修改，请先保存后重试',
+  });
+
+  const pending = confirmSinglePlatformPublish();
+  await harness.saveStarted;
+  harness.editAndResolve();
+  assert.equal(await pending, false);
+  assert.equal(harness.downstreamRequests.length, 0);
+  assert.equal(harness.reloadCount(), 0);
+  assert.equal(harness.state.pendingSinglePublish.operationId, 'single-save-race-operation-0001');
+  assert.deepEqual(feedback.at(-1), { message: '正文在保存期间又有修改，请先保存后重试', type: 'error' });
+  assert.deepEqual(harness.toasts.at(-1), { message: '正文在保存期间又有修改，请先保存后重试', type: 'error' });
+});
+
+test('navigation and article selection stay put when the deferred save becomes unstable', async () => {
+  const harness = createDeferredCanonicalSaveHarness('navigation-save-race');
+  const source = extractFunctionSource('runContentTransition', 'handleBeforeUnload');
+  const runContentTransition = vm.runInNewContext(`(${source})`, {
+    state: harness.state,
+    saveContent: harness.saveContent,
+    toast: (message, type) => harness.toasts.push({ message, type: type || '' }),
+    CONTENT_CHANGED_DURING_SAVE_MESSAGE: '正文在保存期间又有修改，请先保存后重试',
+  });
+  let transitions = 0;
+  const pending = runContentTransition(() => {
+    transitions += 1;
+    harness.state.selectedContentId = 'other-article';
+  });
+  await harness.saveStarted;
+  harness.editAndResolve();
+
+  assert.equal(await pending, false);
+  assert.equal(transitions, 0);
+  assert.equal(harness.state.selectedContentId, harness.contentId);
+  assert.equal(harness.downstreamRequests.length, 0);
+  assert.equal(harness.reloadCount(), 0);
+  assert.deepEqual(harness.toasts.at(-1), { message: '正文在保存期间又有修改，请先保存后重试', type: 'error' });
 });
 
 function importFlowDocument() {
