@@ -152,6 +152,7 @@ test('infers all supported HTML fragments without confusing Markdown autolinks o
     assert.equal(inferImportFormat('', markdown), 'markdown', markdown);
   }
   assert.equal(inferImportFormat('', '2 < 3，且 5 > 4'), 'text');
+  assert.equal(inferImportFormat('authoritative.txt', '<article>仍是纯文本</article>'), 'text');
 });
 
 test('implements roving tabindex and keyboard navigation for import and platform tabs', () => {
@@ -169,12 +170,13 @@ test('implements roving tabindex and keyboard navigation for import and platform
   const setImportTabSource = extractFunctionSource(appSource, 'setImportTab', 'resetImportDialog');
   assert.ok(setImportTabSource);
   const { document: importDocument } = parseHTML(indexSource);
-  const importState = { importTab: 'paste' };
+  const importState = { importTab: 'paste', importReadToken: 0, importReader: null };
   const setImportTab = vm.runInNewContext(`(${setImportTabSource})`, {
     state: importState,
     $$: selector => [...importDocument.querySelectorAll(selector)],
     $: selector => importDocument.querySelector(selector),
     setImportFeedback: () => {},
+    invalidateImportRead: state => { state.importReadToken += 1; return state.importReadToken; },
   });
   setImportTab('file');
   assert.equal(importState.importTab, 'file');

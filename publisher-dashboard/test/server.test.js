@@ -1003,6 +1003,65 @@ test('POST publish-platform keeps state stable across concurrent single-platform
   }
 });
 
+test('POST publish-platform rejects an in-flight duplicate and releases the guard afterward', async () => {
+  let fixture;
+  let testServer;
+  let releaseFirst;
+  let signalEntered;
+  const firstEntered = new Promise(resolve => { signalEntered = resolve; });
+  const firstGate = new Promise(resolve => { releaseFirst = resolve; });
+  let calls = 0;
+  try {
+    fixture = createPublishStateFixture({
+      key: 'single-platform-in-flight-guard',
+      planDate: '2099-06-05',
+      selectedPlatforms: ['weixin'],
+      contentStatus: '已排版',
+      planStatus: '已排版',
+    });
+    testServer = createDashboardServer({
+      preflight: async () => null,
+      platformPublisher: async (markdownFile, platform) => {
+        calls += 1;
+        if (calls === 1) {
+          signalEntered();
+          await firstGate;
+        }
+        return {
+          output: '',
+          info: { status: 'success', message: `${platform} guarded success` },
+        };
+      },
+    });
+    const port = await listenOnRandomPort(testServer);
+    const endpoint = `http://127.0.0.1:${port}/api/content/${fixture.id}/publish-platform`;
+    const publish = () => fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct' }),
+    });
+
+    const firstRequest = publish();
+    await firstEntered;
+    const duplicateResponse = await publish();
+    assert.equal(duplicateResponse.status, 409);
+    assert.match((await duplicateResponse.json()).error, /正在进行|重复发布/);
+    assert.equal(calls, 1);
+
+    releaseFirst();
+    const firstResponse = await firstRequest;
+    assert.equal(firstResponse.status, 200);
+
+    const retryResponse = await publish();
+    assert.equal(retryResponse.status, 200);
+    assert.equal(calls, 2);
+  } finally {
+    releaseFirst?.();
+    await closeServer(testServer);
+    cleanupPublishStateFixture(fixture);
+  }
+});
+
 test('POST publish-platform validates one known platform, mode, body, and content', async () => {
   let content;
   let testServer;
@@ -1181,6 +1240,70 @@ test('content body can be updated', () => {
   } finally {
     if (content?.id) db.prepare('DELETE FROM contents WHERE id = ?').run(content.id);
     db.prepare("DELETE FROM weekly_plans WHERE date = '2099-02-02'").run();
+  }
+});
+
+test('updateContent sanitizes canonical HTML and preserves code round trip', () => {
+  let content;
+  try {
+    content = importContent({ filename: 'canonical-update.md', body: '# 安全母稿\n\n初始正文' });
+    const unsafeBody = [
+      '<h2 id="unsafe-title" style="color:red" onclick="alert(1)">安全标题</h2>',
+      '<p data-action="publish" controls>安全正文 <a href="javascript:alert(1)" onmouseover="alert(1)">危险链接</a></p>',
+      '<img src="javascript:alert(1)" onerror="alert(1)" alt="危险图片">',
+      '<script>alert("stored-xss")</script>',
+      '<pre><code class="language-html">&lt;button data-action="code"&gt;代码示例&lt;/button&gt;</code></pre>',
+    ].join('');
+    const updated = updateContent(content.id, { body: unsafeBody });
+    const stored = db.prepare('SELECT body FROM contents WHERE id = ?').get(content.id).body;
+
+    for (const body of [updated.body, stored]) {
+      assert.match(body, /<h2>安全标题<\/h2>/);
+      assert.match(body, /<p>安全正文 <a>危险链接<\/a><\/p>/);
+      assert.doesNotMatch(body, /<script|<[^>]+\s(?:on\w+|style|data-action|id)\s*=|<[^>]+\scontrols(?:\s|>|=)|(?:href|src)="javascript:/i);
+    }
+    const markdown = contentToMarkdown(updated);
+    assert.match(markdown, /```html/);
+    assert.match(markdown, /<button data-action="code">代码示例<\/button>/);
+
+    const markdownCode = '```html\n<script data-action="code">alert("literal")</script>\n```';
+    const markdownUpdated = updateContent(content.id, { body: markdownCode });
+    assert.doesNotMatch(markdownUpdated.body, /<script\b/i);
+    assert.match(markdownUpdated.body, /&lt;script data-action=&quot;code&quot;&gt;/);
+    assert.match(contentToMarkdown(markdownUpdated), /<script data-action="code">alert\("literal"\)<\/script>/);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('content update endpoint and bootstrap normalize unsafe canonical bodies', async () => {
+  let content;
+  let testServer;
+  try {
+    content = importContent({ filename: 'canonical-endpoint.md', body: '# Endpoint 母稿\n\n正文' });
+    testServer = createDashboardServer();
+    const port = await listenOnRandomPort(testServer);
+    const unsafeBody = '<p id="legacy" style="color:red" onclick="alert(1)" data-action="publish">可见正文</p><script>alert(1)</script>';
+    const updateResponse = await fetch(`http://127.0.0.1:${port}/api/content/${content.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body: unsafeBody }),
+    });
+    const updateResult = await updateResponse.json();
+    assert.equal(updateResponse.status, 200);
+    assert.equal(updateResult.ok, true);
+    assert.equal(updateResult.content.body, '<p>可见正文</p>');
+
+    db.prepare('UPDATE contents SET body = ? WHERE id = ?').run(unsafeBody, content.id);
+    const bootstrapResponse = await fetch(`http://127.0.0.1:${port}/api/bootstrap`);
+    const bootstrapResult = await bootstrapResponse.json();
+    const legacyContent = bootstrapResult.data.contents.find(item => item.id === content.id);
+    assert.equal(bootstrapResponse.status, 200);
+    assert.equal(legacyContent.body, '<p>可见正文</p>');
+    assert.equal(db.prepare('SELECT body FROM contents WHERE id = ?').get(content.id).body, unsafeBody);
+  } finally {
+    await closeServer(testServer);
+    cleanupImportedContent(content);
   }
 });
 
@@ -1422,6 +1545,22 @@ test('keeps .txt imports as verbatim text with a plain-text title', () => {
     assert.equal(content.title, '# 纯文本标题');
     assert.match(content.body, /<p># 纯文本标题<br>&lt;article data-action=&quot;publish&quot;&gt;按文本保留&lt;\/article&gt;<\/p>/);
     assert.doesNotMatch(content.body, /<article\b|<[^>]+\sdata-action\s*=/i);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('.txt extension overrides a conflicting requested format', () => {
+  let content;
+  try {
+    content = importContent({
+      filename: 'authoritative.txt',
+      format: 'html',
+      body: '<strong data-action="publish">literal text</strong>',
+    });
+
+    assert.match(content.body, /&lt;strong data-action=&quot;publish&quot;&gt;literal text&lt;\/strong&gt;/);
+    assert.doesNotMatch(content.body, /<strong\b|<[^>]+\sdata-action\s*=/i);
   } finally {
     cleanupImportedContent(content);
   }

@@ -158,9 +158,13 @@ const state = {
   selectedWechatTemplate: '',
   pendingSinglePublish: null,
   singlePublishSubmitting: false,
+  singlePublishOperationToken: '',
+  singlePublishOperationSequence: 0,
+  contentTransitionInFlight: false,
   importTab: 'paste',
   importFileName: '',
   importReadToken: 0,
+  importReader: null,
   importSubmitting: false,
   selectedPlatforms: new Set(),
   loginSessions: {},
@@ -600,10 +604,68 @@ function contentImagesHtml(content, existingHtml = '') {
   `;
 }
 
+function sanitizeClientCanonicalHtml(value, documentRef = document) {
+  const blockedElements = new Set(['head', 'script', 'style', 'iframe', 'object', 'template', 'noscript', 'svg']);
+  const allowedElements = new Set([
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'div', 'section', 'article',
+    'strong', 'em', 'b', 'i', 'u', 's', 'ul', 'ol', 'li', 'blockquote', 'pre', 'code',
+    'table', 'caption', 'colgroup', 'col', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td',
+    'figure', 'figcaption', 'img', 'a', 'br', 'hr',
+  ]);
+  const allowedAttributes = {
+    a: new Set(['href', 'title']),
+    img: new Set(['src', 'alt', 'title', 'width', 'height']),
+    code: new Set(['class', 'title']),
+    ol: new Set(['start', 'reversed', 'title']),
+    li: new Set(['value', 'title']),
+    th: new Set(['colspan', 'rowspan', 'scope', 'title']),
+    td: new Set(['colspan', 'rowspan', 'title']),
+    col: new Set(['span', 'title']),
+    colgroup: new Set(['span', 'title']),
+  };
+  const safeUrl = (url, attribute) => {
+    const normalized = String(url || '').trim().replace(/[\u0000-\u0020\u007f-\u009f]+/g, '');
+    if (!normalized || normalized.startsWith('\\') || normalized.startsWith('//')) return false;
+    const scheme = normalized.match(/^([a-z][a-z0-9+.-]*):/i)?.[1]?.toLowerCase() || '';
+    if (!scheme) return true;
+    if (attribute === 'href') return ['http', 'https', 'mailto', 'tel'].includes(scheme);
+    if (['http', 'https'].includes(scheme)) return true;
+    return /^data:image\/(?:png|jpeg|gif|webp);base64,[a-z0-9+/]+={0,2}$/i.test(normalized);
+  };
+  const container = documentRef.createElement('div');
+  container.innerHTML = String(value || '');
+  for (const element of [...container.querySelectorAll('*')]) {
+    const tagName = element.tagName.toLowerCase();
+    if (blockedElements.has(tagName)) {
+      element.remove();
+      continue;
+    }
+    if (!allowedElements.has(tagName)) {
+      element.replaceWith(...element.childNodes);
+      continue;
+    }
+    const allowed = allowedAttributes[tagName] || new Set(['title']);
+    for (const attribute of [...element.attributes]) {
+      const name = attribute.name.toLowerCase();
+      const attributeValue = attribute.value;
+      const numeric = ['width', 'height', 'colspan', 'rowspan', 'span'].includes(name);
+      const integer = ['start', 'value'].includes(name);
+      const valid = allowed.has(name)
+        && (name === 'href' || name === 'src' ? safeUrl(attributeValue, name) : true)
+        && (!numeric || /^\d{1,5}$/.test(attributeValue))
+        && (!integer || /^-?\d+$/.test(attributeValue))
+        && (name !== 'scope' || /^(?:row|col|rowgroup|colgroup)$/i.test(attributeValue))
+        && (name !== 'class' || /^language-[A-Za-z0-9_+-]+$/.test(attributeValue));
+      if (!valid) element.removeAttribute(attribute.name);
+    }
+  }
+  return container.innerHTML;
+}
+
 function editableArticleHtml(content) {
   const body = String(content.body || '');
   const html = isHtmlString(body) ? body : markdownToEditableHtml(body);
-  return `${html}${contentImagesHtml(content, html)}`;
+  return sanitizeClientCanonicalHtml(`${html}${contentImagesHtml(content, html)}`);
 }
 
 function render() {
@@ -1674,6 +1736,26 @@ function shiftPlanRange(days) {
   renderPlans();
 }
 
+function invalidateImportRead(readState) {
+  const reader = readState.importReader;
+  if (reader && typeof reader.abort === 'function') {
+    try {
+      reader.abort();
+    } catch {
+      // A reader that has already completed cannot be aborted.
+    }
+  }
+  readState.importReader = null;
+  readState.importReadToken = Number(readState.importReadToken || 0) + 1;
+  return readState.importReadToken;
+}
+
+function applyLatestImportRead(readState, token, apply) {
+  if (token !== readState.importReadToken) return false;
+  apply();
+  return true;
+}
+
 function nextTabIndexForKey(key, currentIndex, totalTabs) {
   if (!Number.isInteger(currentIndex) || currentIndex < 0 || !Number.isInteger(totalTabs) || totalTabs < 1) return -1;
   if (key === 'ArrowRight') return (currentIndex + 1) % totalTabs;
@@ -1709,6 +1791,7 @@ function setImportFeedback(message = '', type = '') {
 
 function setImportTab(tab) {
   const nextTab = tab === 'file' ? 'file' : 'paste';
+  if (state.importTab !== nextTab) invalidateImportRead(state);
   state.importTab = nextTab;
   $$('[data-import-tab]').forEach(button => {
     const active = button.dataset.importTab === nextTab;
@@ -1722,7 +1805,7 @@ function setImportTab(tab) {
 }
 
 function resetImportDialog() {
-  state.importReadToken += 1;
+  invalidateImportRead(state);
   state.importFileName = '';
   state.importSubmitting = false;
   const title = $('#import-title-input');
@@ -1749,14 +1832,20 @@ function openImportDialog() {
 
 function cancelImport() {
   if (state.importSubmitting) return;
-  state.importReadToken += 1;
   $('#import-dialog').close();
   resetImportDialog();
+}
+
+function beginPasteImport() {
+  if (state.importTab === 'paste') invalidateImportRead(state);
+  else setImportTab('paste');
+  state.importFileName = '';
 }
 
 function inferImportFormat(filename, content) {
   const name = String(filename || '').trim().toLowerCase();
   const source = String(content || '');
+  if (/\.txt$/.test(name)) return 'text';
   if (/\.(?:html|htm)$/.test(name)) return 'html';
   if (/\.(?:md|markdown)$/.test(name)) return 'markdown';
   const markdownAutolink = /<(?:[a-z][a-z0-9+.-]{1,31}:[^<>\s]+|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})>/gi;
@@ -1777,6 +1866,7 @@ function importedBodyByteLength(value) {
 }
 
 function readImportFile(input) {
+  const readToken = invalidateImportRead(state);
   const file = input?.files?.[0];
   const status = $('#import-file-status');
   if (!file) {
@@ -1799,29 +1889,33 @@ function readImportFile(input) {
     return;
   }
 
-  const readToken = ++state.importReadToken;
   const reader = new FileReader();
+  state.importReader = reader;
   if (status) status.textContent = `正在读取 ${file.name}…`;
   setImportFeedback();
   reader.onload = () => {
-    if (readToken !== state.importReadToken) return;
-    const body = String(reader.result || '');
-    if (importedBodyByteLength(body) > MAX_IMPORT_FILE_BYTES) {
-      input.value = '';
-      state.importFileName = '';
-      if (status) status.textContent = '读取后的正文超过 5 MiB';
-      setImportFeedback('读取后的正文不能超过 5 MiB', 'error');
-      return;
-    }
-    state.importFileName = file.name;
-    $('#import-content-input').value = body;
-    if (status) status.textContent = `${file.name} · ${(file.size / 1024).toFixed(1)} KiB · 已在本机读取`;
+    applyLatestImportRead(state, readToken, () => {
+      state.importReader = null;
+      const body = String(reader.result || '');
+      if (importedBodyByteLength(body) > MAX_IMPORT_FILE_BYTES) {
+        input.value = '';
+        state.importFileName = '';
+        if (status) status.textContent = '读取后的正文超过 5 MiB';
+        setImportFeedback('读取后的正文不能超过 5 MiB', 'error');
+        return;
+      }
+      state.importFileName = file.name;
+      $('#import-content-input').value = body;
+      if (status) status.textContent = `${file.name} · ${(file.size / 1024).toFixed(1)} KiB · 已在本机读取`;
+    });
   };
   reader.onerror = () => {
-    if (readToken !== state.importReadToken) return;
-    state.importFileName = '';
-    if (status) status.textContent = `${file.name} 读取失败`;
-    setImportFeedback('无法读取该文件，请重新选择', 'error');
+    applyLatestImportRead(state, readToken, () => {
+      state.importReader = null;
+      state.importFileName = '';
+      if (status) status.textContent = `${file.name} 读取失败`;
+      setImportFeedback('无法读取该文件，请重新选择', 'error');
+    });
   };
   reader.readAsText(file);
 }
@@ -1911,6 +2005,37 @@ function retryPlatformPreview(platform) {
   void loadPlatformPreview(content, platform);
 }
 
+function beginSinglePublishOperation(publishState, pending) {
+  if (!pending || publishState.singlePublishSubmitting) return null;
+  const sequence = Number(publishState.singlePublishOperationSequence || 0) + 1;
+  const token = `single-publish-${sequence}`;
+  publishState.singlePublishOperationSequence = sequence;
+  publishState.singlePublishSubmitting = true;
+  publishState.singlePublishOperationToken = token;
+  return Object.freeze({ ...pending, token });
+}
+
+function finishSinglePublishOperation(publishState, token) {
+  if (!token || publishState.singlePublishOperationToken !== token) return false;
+  publishState.singlePublishSubmitting = false;
+  publishState.singlePublishOperationToken = '';
+  return true;
+}
+
+function canCancelSinglePublish(publishState) {
+  return !publishState.singlePublishSubmitting;
+}
+
+function handleSinglePublishDialogCancel(event) {
+  if (!canCancelSinglePublish(state)) {
+    event.preventDefault();
+    setSinglePublishFeedback('平台操作正在执行，完成前不能关闭。', 'error');
+    return false;
+  }
+  cancelSinglePublish();
+  return true;
+}
+
 function setSinglePublishFeedback(message = '', type = '') {
   const feedback = $('#single-publish-feedback');
   if (!feedback) return;
@@ -1919,7 +2044,6 @@ function setSinglePublishFeedback(message = '', type = '') {
 }
 
 function setSinglePublishBusy(busy) {
-  state.singlePublishSubmitting = busy;
   const dialog = $('#platform-publish-dialog');
   dialog?.querySelectorAll('button').forEach(button => {
     button.disabled = busy;
@@ -1929,10 +2053,14 @@ function setSinglePublishBusy(busy) {
 }
 
 function openSinglePublishConfirmation({ contentId, platform, mode }) {
+  if (!canCancelSinglePublish(state)) {
+    toast('已有平台操作正在执行，请等待完成', 'error');
+    return false;
+  }
   const content = state.data?.contents.find(item => item.id === contentId);
   if (!content || !platform || !['draft', 'direct'].includes(mode)) {
     toast('缺少平台发布信息', 'error');
-    return;
+    return false;
   }
   state.pendingSinglePublish = {
     contentId,
@@ -1944,46 +2072,81 @@ function openSinglePublishConfirmation({ contentId, platform, mode }) {
   $('#single-publish-platform').textContent = platformName(platform);
   $('#single-publish-mode').textContent = mode === 'draft' ? '保存平台草稿' : '直接发布';
   setSinglePublishFeedback(mode === 'draft' ? '确认后会写入该平台草稿箱。' : '直接发布会立即执行，请确认账号与正文。');
-  setSinglePublishBusy(false);
   $('#platform-publish-dialog').showModal();
+  return true;
 }
 
 function cancelSinglePublish() {
-  if (state.singlePublishSubmitting) return;
+  if (!canCancelSinglePublish(state)) return false;
   state.pendingSinglePublish = null;
   setSinglePublishFeedback();
   $('#platform-publish-dialog').close();
+  return true;
 }
 
 async function confirmSinglePlatformPublish() {
-  const pending = state.pendingSinglePublish;
-  if (!pending || state.singlePublishSubmitting) return;
+  const operation = beginSinglePublishOperation(state, state.pendingSinglePublish);
+  if (!operation) return false;
   setSinglePublishBusy(true);
-  setSinglePublishFeedback(`正在${pending.mode === 'draft' ? '保存草稿到' : '发布到'}${platformName(pending.platform)}…`);
+  setSinglePublishFeedback(`正在${operation.mode === 'draft' ? '保存草稿到' : '发布到'}${platformName(operation.platform)}…`);
   try {
-    if ($(`[data-content-body="${pending.contentId}"]`)) {
-      await saveContent(pending.contentId, { silent: true });
+    if ($(`[data-content-body="${operation.contentId}"]`)) {
+      await saveContent(operation.contentId, { silent: true });
     }
-    const result = await request(`/api/content/${encodeURIComponent(pending.contentId)}/publish-platform`, {
+    const result = await request(`/api/content/${encodeURIComponent(operation.contentId)}/publish-platform`, {
       method: 'POST',
-      body: JSON.stringify({ platform: pending.platform, publishMode: pending.mode }),
+      body: JSON.stringify({ platform: operation.platform, publishMode: operation.mode }),
     });
-    const platformResult = result.job?.results?.find(item => item.platform === pending.platform);
+    const platformResult = result.job?.results?.find(item => item.platform === operation.platform);
     await loadData();
+    if (state.singlePublishOperationToken !== operation.token) return false;
     $('#platform-publish-dialog').close();
     state.pendingSinglePublish = null;
     if (platformResult?.status === 'success') {
-      const fallback = pending.mode === 'draft' ? '平台草稿已保存' : '平台发布成功';
-      toast(`${platformName(pending.platform)}：${platformResult.message || fallback}`);
+      const fallback = operation.mode === 'draft' ? '平台草稿已保存' : '平台发布成功';
+      toast(`${platformName(operation.platform)}：${platformResult.message || fallback}`);
     } else {
-      toast(`${platformName(pending.platform)}：${platformResult?.message || '平台未返回成功结果'}`, 'error');
+      toast(`${platformName(operation.platform)}：${platformResult?.message || '平台未返回成功结果'}`, 'error');
     }
+    return true;
   } catch (error) {
-    setSinglePublishFeedback(error.message || '平台操作失败', 'error');
-    toast(error.message || '平台操作失败', 'error');
+    if (state.singlePublishOperationToken === operation.token) {
+      setSinglePublishFeedback(error.message || '平台操作失败', 'error');
+      toast(error.message || '平台操作失败', 'error');
+    }
+    return false;
   } finally {
-    setSinglePublishBusy(false);
+    if (finishSinglePublishOperation(state, operation.token)) setSinglePublishBusy(false);
   }
+}
+
+function hasDirtyCanonicalContent(dirtyIds = state.dirtyContentIds) {
+  return Boolean(dirtyIds?.size);
+}
+
+async function runContentTransition(transition) {
+  if (state.contentTransitionInFlight) return false;
+  state.contentTransitionInFlight = true;
+  const currentId = state.selectedContentId;
+  try {
+    if (currentId && state.dirtyContentIds.has(String(currentId))) {
+      await saveContent(currentId, { silent: true });
+    }
+    await transition();
+    return true;
+  } catch (error) {
+    toast(`正文保存失败，已留在当前页面：${error.message || '未知错误'}`, 'error');
+    return false;
+  } finally {
+    state.contentTransitionInFlight = false;
+  }
+}
+
+function handleBeforeUnload(event) {
+  if (!hasDirtyCanonicalContent()) return undefined;
+  event.preventDefault();
+  event.returnValue = '';
+  return '';
 }
 
 async function generateContent(date) {
@@ -2258,7 +2421,7 @@ document.addEventListener('click', event => {
 
   const nav = event.target.closest('[data-view]');
   if (nav) {
-    switchView(nav.dataset.view);
+    void runContentTransition(() => switchView(nav.dataset.view));
     return;
   }
 
@@ -2290,8 +2453,8 @@ document.addEventListener('click', event => {
   }
   if (name === 'reload') loadData();
   if (name === 'refresh-platforms') refreshPlatforms();
-  if (name === 'go-publish') switchView('publish');
-  if (name === 'go-history') switchView('history');
+  if (name === 'go-publish') void runContentTransition(() => switchView('publish'));
+  if (name === 'go-history') void runContentTransition(() => switchView('history'));
   if (name === 'open-plan-range') openPlanDialog();
   if (name === 'close-plan-dialog') $('#plan-dialog').close();
   if (name === 'create-plan-range') createPlanRange();
@@ -2304,18 +2467,22 @@ document.addEventListener('click', event => {
   if (name === 'save-plan') savePlan(date);
   if (name === 'generate-topics') generateTopics(date || state.selectedDate);
   if (name === 'select-plan-date') {
-    state.selectedDate = date;
-    switchView('plans');
+    void runContentTransition(() => {
+      state.selectedDate = date;
+      switchView('plans');
+    });
   }
   if (name === 'confirm-candidate') confirmCandidate(id);
   if (name === 'close-dialog') $('#candidate-dialog').close();
   if (name === 'close-layout-dialog') $('#layout-dialog').close();
   if (name === 'generate-content-from-date') generateContent(date);
   if (name === 'open-content' || name === 'select-content') {
-    state.selectedContentId = id;
-    syncContentPageToSelected();
-    applyContentPlatforms(getSelectedContent());
-    switchView('content');
+    void runContentTransition(() => {
+      state.selectedContentId = id;
+      syncContentPageToSelected();
+      applyContentPlatforms(getSelectedContent());
+      switchView('content');
+    });
   }
   if (name === 'layout-selected') layoutContent();
   if (name === 'layout-content') layoutContent(id);
@@ -2345,8 +2512,10 @@ document.addEventListener('click', event => {
     renderHistory();
   }
   if (name === 'content-page') {
-    state.contentPage = Number(action.dataset.page || 1);
-    renderContent();
+    void runContentTransition(() => {
+      state.contentPage = Number(action.dataset.page || 1);
+      renderContent();
+    });
   }
 });
 
@@ -2446,6 +2615,10 @@ document.addEventListener('mousedown', event => {
   target.appendChild(ripple);
   setTimeout(() => ripple.remove(), 650);
 });
+
+$('#platform-publish-dialog').addEventListener('cancel', handleSinglePublishDialogCancel);
+$('#import-content-input').addEventListener('paste', beginPasteImport);
+window.addEventListener('beforeunload', handleBeforeUnload);
 
 loadData().catch(error => {
   document.body.innerHTML = `<div class="empty" style="margin:40px;">启动失败：${escapeHtml(error.message)}</div>`;

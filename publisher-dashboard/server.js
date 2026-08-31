@@ -746,6 +746,7 @@ function normalizeContent(row) {
   if (!row) return null;
   return {
     ...row,
+    body: normalizeCanonicalBody(row.body),
     images: jsonValue(row.images, []),
     selected_platforms: jsonValue(row.selected_platforms, []),
   };
@@ -1721,9 +1722,10 @@ function containsImportedHtml(body) {
 function importedContentFormat(filename, body, format) {
   const requested = String(format || '').trim().toLowerCase();
   const extension = path.extname(String(filename || '')).toLowerCase();
-  if (requested === 'html' || ['.html', '.htm'].includes(extension)) return 'html';
-  if (['.txt'].includes(extension)) return 'text';
+  if (['.html', '.htm'].includes(extension)) return 'html';
+  if (extension === '.txt') return 'text';
   if (['.md', '.markdown'].includes(extension)) return 'markdown';
+  if (requested === 'html') return 'html';
   if (['text', 'txt', 'plain', 'plain-text'].includes(requested)) return 'text';
   if (['markdown', 'md'].includes(requested)) return 'markdown';
 
@@ -1736,6 +1738,20 @@ function importedContentFormat(filename, body, format) {
     || /`[^`\r\n]+`/.test(source)
     || /^(?: {4}|\t)\S/m.test(source)) return 'markdown';
   return 'text';
+}
+
+function normalizeCanonicalBody(value) {
+  const source = String(value || '');
+  if (!source.trim()) return '';
+  if (containsImportedHtml(importedHtmlDetectionProbe(source))) {
+    return sanitizeImportedHtml(source).trim();
+  }
+  const format = importedContentFormat('', source, '');
+  if (format === 'html') return sanitizeImportedHtml(source).trim();
+  if (format === 'markdown' || format === 'mixed') {
+    return sanitizeImportedHtml(markdownToHtml(source, { imported: true })).trim();
+  }
+  return sanitizeImportedHtml(textToImportedHtml(source)).trim();
 }
 
 function importedHtmlMetadataProbe(body) {
@@ -1869,7 +1885,7 @@ function importContent(payload) {
 function updateContent(contentId, payload = {}) {
   const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
   if (!content) throw new Error('内容不存在');
-  const body = String(payload.body ?? content.body ?? '');
+  const body = normalizeCanonicalBody(payload.body ?? content.body ?? '');
   const title = String(payload.title || '').trim() || titleFromMarkdown(body, content.title);
   const summary = String(payload.summary ?? content.summary ?? '').trim();
   const type = String(payload.type ?? content.type ?? '').trim();
@@ -2553,6 +2569,7 @@ function createDashboardServer(options = {}) {
     ...(options.preflight ? { preflight: options.preflight } : {}),
     ...(options.platformPublisher ? { platformPublisher: options.platformPublisher } : {}),
   };
+  const inFlightSinglePlatformPublishes = new Set();
 
   return http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -2822,13 +2839,22 @@ function createDashboardServer(options = {}) {
         throw statusError('内容不存在', 404);
       }
 
-      const result = await publishContent(contentId, [platform], {
-        ...publishDependencies,
-        publishMode: body.publishMode,
-        persistSelection: false,
-        updateAggregateStatus: false,
-      });
-      sendJson(res, { ok: true, ...result });
+      const operationKey = JSON.stringify([contentId, platform, body.publishMode]);
+      if (inFlightSinglePlatformPublishes.has(operationKey)) {
+        throw statusError('相同内容的平台发布正在进行，请勿重复提交', 409);
+      }
+      inFlightSinglePlatformPublishes.add(operationKey);
+      try {
+        const result = await publishContent(contentId, [platform], {
+          ...publishDependencies,
+          publishMode: body.publishMode,
+          persistSelection: false,
+          updateAggregateStatus: false,
+        });
+        sendJson(res, { ok: true, ...result });
+      } finally {
+        inFlightSinglePlatformPublishes.delete(operationKey);
+      }
       return;
     }
 
