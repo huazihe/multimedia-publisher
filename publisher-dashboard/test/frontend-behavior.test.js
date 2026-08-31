@@ -176,6 +176,10 @@ test('batch double-click keeps one immutable operationId and sends one publish r
     readSelectedPlatforms: () => ['zhihu'],
     beginBatchPublishOperation,
     finishBatchPublishOperation,
+    beginContentOperation: contentId => ({ contentId, token: 'batch-content-operation' }),
+    contentOperationIsStable: () => true,
+    preserveContentOperationChanges: () => {},
+    endContentOperation: () => true,
     setBatchPublishBusy: busy => busyStates.push(busy),
     saveContent: async () => {},
     renderProgress: () => {},
@@ -184,7 +188,7 @@ test('batch double-click keeps one immutable operationId and sends one publish r
       return requestGate;
     },
     toast: () => {},
-    loadData: async () => {},
+    loadData: async () => ({ applied: true }),
     switchView: () => {},
   });
 
@@ -228,6 +232,10 @@ test('full publish confirmation stays successful when post-success refresh fails
     state,
     beginSinglePublishOperation,
     finishSinglePublishOperation,
+    beginContentOperation: contentId => ({ contentId, token: 'single-content-operation' }),
+    contentOperationIsStable: () => true,
+    preserveContentOperationChanges: () => {},
+    endContentOperation: () => true,
     setSinglePublishBusy: busy => events.push(`busy:${busy}`),
     setSinglePublishFeedback: message => events.push(`feedback:${message}`),
     platformName: platform => platform,
@@ -304,6 +312,10 @@ test('single draft confirmation treats platform_draft as a successful result', a
     state,
     beginSinglePublishOperation,
     finishSinglePublishOperation,
+    beginContentOperation: contentId => ({ contentId, token: 'single-draft-content-operation' }),
+    contentOperationIsStable: () => true,
+    preserveContentOperationChanges: () => {},
+    endContentOperation: () => true,
     setSinglePublishBusy: () => {},
     setSinglePublishFeedback: () => {},
     platformName: platform => platform,
@@ -311,7 +323,7 @@ test('single draft confirmation treats platform_draft as a successful result', a
     request: async () => ({
       job: { results: [{ platform: 'zhihu', status: 'platform_draft', message: '草稿写入完成' }] },
     }),
-    loadData: async () => {},
+    loadData: async () => ({ applied: true }),
     toast: (message, type) => toasts.push({ message, type: type || '' }),
     encodeURIComponent,
   });
@@ -383,6 +395,10 @@ test('dirty transition saves first and never calls transition after save failure
   const failedTransition = vm.runInNewContext(`(${transitionSource})`, {
     state: transitionState,
     hasDirtyCanonicalContent,
+    beginContentOperation: contentId => ({ contentId, token: 'failed-transition-operation' }),
+    contentOperationIsStable: () => true,
+    preserveContentOperationChanges: () => {},
+    endContentOperation: () => true,
     saveContent: async () => { throw new Error('save failed'); },
     toast: message => { toastMessage = message; },
   });
@@ -393,6 +409,10 @@ test('dirty transition saves first and never calls transition after save failure
   const successfulTransition = vm.runInNewContext(`(${transitionSource})`, {
     state: transitionState,
     hasDirtyCanonicalContent,
+    beginContentOperation: contentId => ({ contentId, token: 'successful-transition-operation' }),
+    contentOperationIsStable: () => true,
+    preserveContentOperationChanges: () => {},
+    endContentOperation: () => true,
     saveContent: async id => {
       transitionState.dirtyContentIds.delete(id);
       return { content: { id }, stable: true };
@@ -442,6 +462,10 @@ test('deferred save preserves a newer editor revision and merges only server met
     data: { contents: [content] },
     dirtyContentIds: new Set(),
     contentEditRevisions: new Map(),
+    contentOperationLocks: new Map(),
+    contentOperationSequence: 0,
+    contentOperationLocks: new Map(),
+    contentOperationSequence: 0,
   };
   const nodes = new Map([
     [`[data-content-body="${contentId}"]`, editor],
@@ -452,6 +476,18 @@ test('deferred save preserves a newer editor revision and merges only server met
   ]);
   const $ = selector => nodes.get(selector) || null;
   const markContentDirty = vm.runInNewContext(`(${dirtySource})`, { state, $ });
+  const snapshotSource = extractFunctionSource('contentOperationSnapshot', 'setContentOperationBusy');
+  const stableSource = extractFunctionSource('contentOperationIsStable', 'preserveContentOperationChanges');
+  const preserveSource = extractFunctionSource('preserveContentOperationChanges', 'endContentOperation');
+  const contentOperationSnapshot = vm.runInNewContext(`(${snapshotSource})`, { state, $ });
+  const contentOperationIsStable = vm.runInNewContext(`(${stableSource})`, { state, contentOperationSnapshot });
+  const preserveContentOperationChanges = vm.runInNewContext(`(${preserveSource})`, { state, contentOperationSnapshot });
+  const beginContentOperation = target => {
+    const context = { contentId: String(target), token: 'deferred-save-operation', snapshot: contentOperationSnapshot(target) };
+    state.contentOperationLocks.set(String(target), context);
+    return context;
+  };
+  const endContentOperation = context => state.contentOperationLocks.delete(context.contentId);
   markContentDirty(contentId);
 
   let resolveRequest;
@@ -469,6 +505,10 @@ test('deferred save preserves a newer editor revision and merges only server met
     toast: () => {},
     loadData: async () => { reloads += 1; },
     encodeURIComponent,
+    beginContentOperation,
+    contentOperationIsStable,
+    preserveContentOperationChanges,
+    endContentOperation,
   });
 
   const pendingSave = saveContent(contentId, { silent: true });
@@ -477,7 +517,8 @@ test('deferred save preserves a newer editor revision and merges only server met
   editor.innerHTML = '<p>second revision stays live</p>';
   titleEditor.value = 'Second title stays live';
   summaryEditor.value = 'Second summary stays live';
-  markContentDirty(contentId);
+  assert.equal(markContentDirty(contentId), false);
+  state.contentEditRevisions.set(contentId, state.contentEditRevisions.get(contentId) + 1);
   resolveRequest({
     content: {
       ...content,
@@ -506,6 +547,378 @@ test('deferred save preserves a newer editor revision and merges only server met
   assert.equal(reloads, 0);
 });
 
+test('per-content operation lock disables editing and controls while blocking dirty revisions', () => {
+  const snapshotSource = extractFunctionSource('contentOperationSnapshot', 'setContentOperationBusy');
+  const busySource = extractFunctionSource('setContentOperationBusy', 'beginContentOperation');
+  const beginSource = extractFunctionSource('beginContentOperation', 'contentOperationIsStable');
+  const stableSource = extractFunctionSource('contentOperationIsStable', 'preserveContentOperationChanges');
+  const preserveSource = extractFunctionSource('preserveContentOperationChanges', 'endContentOperation');
+  const endSource = extractFunctionSource('endContentOperation', 'createPublishOperationId');
+  assert.ok(snapshotSource && busySource && beginSource && stableSource && preserveSource && endSource, '缺少 per-content operation lock helpers');
+
+  const { document } = parseHTML(`
+    <div data-content-body="locked-content" contenteditable="true"><p>正文</p></div>
+    <input data-content-title="locked-content" value="标题">
+    <textarea data-content-summary="locked-content">摘要</textarea>
+    <button data-action="save-content" data-id="locked-content">保存</button>
+    <button data-action="layout-content" data-id="locked-content">排版</button>
+    <button data-action="save-draft" data-id="locked-content">草稿</button>
+    <button data-action="publish-selected">发布</button>
+  `);
+  const state = {
+    selectedContentId: 'locked-content',
+    contentEditRevisions: new Map([['locked-content', 7]]),
+    dirtyContentIds: new Set(),
+    contentOperationLocks: new Map(),
+    contentOperationSequence: 0,
+  };
+  const $ = selector => document.querySelector(selector);
+  const $$ = selector => [...document.querySelectorAll(selector)];
+  const contentOperationSnapshot = vm.runInNewContext(`(${snapshotSource})`, { state, $ });
+  const setContentOperationBusy = vm.runInNewContext(`(${busySource})`, { state, $, $$ });
+  const beginContentOperation = vm.runInNewContext(`(${beginSource})`, {
+    state,
+    contentOperationSnapshot,
+    setContentOperationBusy,
+  });
+  const contentOperationIsStable = vm.runInNewContext(`(${stableSource})`, {
+    state,
+    contentOperationSnapshot,
+  });
+  const endContentOperation = vm.runInNewContext(`(${endSource})`, { state, setContentOperationBusy });
+  const dirtySource = extractFunctionSource('markContentDirty', 'bindContentEditorDirtyTracking');
+  const markContentDirty = vm.runInNewContext(`(${dirtySource})`, { state, $ });
+
+  const operation = beginContentOperation('locked-content');
+  assert.ok(operation);
+  assert.equal(beginContentOperation('locked-content'), null);
+  assert.equal($('[data-content-body]').getAttribute('contenteditable'), 'false');
+  assert.equal($('[data-content-title]').disabled, true);
+  assert.equal($('[data-content-summary]').disabled, true);
+  assert.equal($$('[data-action]').every(button => button.disabled), true);
+  assert.equal(contentOperationIsStable(operation), true);
+  assert.equal(markContentDirty('locked-content'), false);
+  assert.equal(state.contentEditRevisions.get('locked-content'), 7);
+
+  assert.equal(endContentOperation(operation), true);
+  assert.equal($('[data-content-body]').getAttribute('contenteditable'), 'true');
+  assert.equal($('[data-content-title]').disabled, false);
+  assert.equal($$('[data-action]').every(button => !button.disabled), true);
+  assert.equal(markContentDirty('locked-content'), true);
+  assert.equal(state.contentEditRevisions.get('locked-content'), 8);
+});
+
+function createFullContentOperationHarness(contentId = 'full-operation-content') {
+  const { document } = parseHTML(`
+    <div data-content-body="${contentId}" contenteditable="true"><p>live body</p></div>
+    <input data-content-title="${contentId}" value="Live title">
+    <textarea data-content-summary="${contentId}">Live summary</textarea>
+    <button data-action="save-content" data-id="${contentId}">保存</button>
+    <button data-action="layout-content" data-id="${contentId}">排版</button>
+    <button data-action="save-draft" data-id="${contentId}">草稿</button>
+    <button data-action="publish-selected">发布</button>
+  `);
+  const content = {
+    id: contentId,
+    title: 'Live title',
+    summary: 'Live summary',
+    body: '<p>live body</p>',
+    type: '行业分析',
+    status: '已排版',
+    selected_platforms: ['zhihu'],
+    updated_at: '2026-08-31T01:00:00.000Z',
+  };
+  const state = {
+    selectedContentId: contentId,
+    selectedDate: '',
+    planStartDate: '',
+    planEndDate: '',
+    contentPage: 1,
+    contentPageSize: 8,
+    data: { contents: [content], platforms: [], today: '2026-08-31' },
+    workbenchCsrfToken: '',
+    dirtyContentIds: new Set([contentId]),
+    contentEditRevisions: new Map([[contentId, 1]]),
+    contentOperationLocks: new Map(),
+    contentOperationSequence: 0,
+    selectedPlatforms: new Set(['zhihu']),
+    batchPublishSubmitting: false,
+    batchPublishOperation: null,
+    lastProgress: [],
+    layoutTemplatesLoaded: true,
+    authAutoChecked: true,
+  };
+  const $ = selector => document.querySelector(selector);
+  const $$ = selector => [...document.querySelectorAll(selector)];
+  const helperSources = {
+    snapshot: extractFunctionSource('contentOperationSnapshot', 'setContentOperationBusy'),
+    busy: extractFunctionSource('setContentOperationBusy', 'beginContentOperation'),
+    begin: extractFunctionSource('beginContentOperation', 'contentOperationIsStable'),
+    stable: extractFunctionSource('contentOperationIsStable', 'preserveContentOperationChanges'),
+    preserve: extractFunctionSource('preserveContentOperationChanges', 'endContentOperation'),
+    end: extractFunctionSource('endContentOperation', 'createPublishOperationId'),
+  };
+  const contentOperationSnapshot = vm.runInNewContext(`(${helperSources.snapshot})`, { state, $ });
+  const setContentOperationBusy = vm.runInNewContext(`(${helperSources.busy})`, { state, $, $$ });
+  const beginContentOperation = vm.runInNewContext(`(${helperSources.begin})`, {
+    state,
+    contentOperationSnapshot,
+    setContentOperationBusy,
+  });
+  const contentOperationIsStable = vm.runInNewContext(`(${helperSources.stable})`, { state, contentOperationSnapshot });
+  const preserveContentOperationChanges = vm.runInNewContext(`(${helperSources.preserve})`, { state, contentOperationSnapshot });
+  const endContentOperation = vm.runInNewContext(`(${helperSources.end})`, { state, setContentOperationBusy });
+  const markSource = extractFunctionSource('markContentDirty', 'bindContentEditorDirtyTracking');
+  const markContentDirty = vm.runInNewContext(`(${markSource})`, { state, $ });
+
+  const deferred = new Map();
+  const requests = [];
+  let downstreamCompleted = false;
+  const defer = key => {
+    let resolve;
+    let reject;
+    let signalStarted;
+    const started = new Promise(done => { signalStarted = done; });
+    const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+    deferred.set(key, { promise, signalStarted });
+    return { started, resolve, reject };
+  };
+  const bootstrapData = () => ({
+    csrfToken: 'csrf-after-operation',
+    contents: [{ ...content, body: '<p>server refreshed body</p>', updated_at: '2026-08-31T03:00:00.000Z' }],
+    platforms: [],
+    today: '2026-08-31',
+  });
+  const request = async (url, options = {}) => {
+    const key = url === `/api/content/${encodeURIComponent(contentId)}`
+      ? 'save'
+      : url.endsWith('/layout') ? 'layout'
+        : url.endsWith('/save-draft') ? 'draft'
+          : url === '/api/publish' ? 'publish'
+            : url === '/api/bootstrap' ? 'bootstrap' : url;
+    requests.push(key);
+    const gate = deferred.get(key);
+    if (gate) {
+      gate.signalStarted();
+      await gate.promise;
+      deferred.delete(key);
+    }
+    if (key === 'save') return { content: { ...content, updated_at: '2026-08-31T02:00:00.000Z' } };
+    if (key === 'layout') {
+      downstreamCompleted = true;
+      return { content: { ...content, status: '已排版', updated_at: '2026-08-31T02:30:00.000Z' } };
+    }
+    if (key === 'draft') {
+      downstreamCompleted = true;
+      return { job: { status: 'local_draft', results: [] } };
+    }
+    if (key === 'publish') {
+      downstreamCompleted = true;
+      return { job: { status: 'published', results: [] } };
+    }
+    if (key === 'bootstrap') return { data: bootstrapData() };
+    return { ok: true };
+  };
+  let renders = 0;
+  const loadSource = extractFunctionSource('loadData', 'getSelectedContent');
+  const loadData = vm.runInNewContext(`(${loadSource})`, {
+    state,
+    request,
+    getMonday: () => '2026-08-31',
+    addDays: () => '2026-09-06',
+    syncContentPageToSelected: () => {},
+    applyContentPlatforms: () => {},
+    getSelectedContent: () => state.data.contents[0],
+    render: () => { renders += 1; },
+    loadLayoutTemplates: async () => [],
+    layoutTemplatesRequest: null,
+    checkAllAuth: async () => {},
+    setTimeout: () => 0,
+    contentOperationIsStable,
+  });
+  const toasts = [];
+  const toast = (message, type) => toasts.push({ message, type: type || '' });
+  const saveSource = extractFunctionSource('saveContent', 'markContentDirty');
+  const saveContent = vm.runInNewContext(`(${saveSource})`, {
+    state,
+    $,
+    request,
+    clearPlatformPreviews: () => {},
+    toast,
+    loadData,
+    encodeURIComponent,
+    beginContentOperation,
+    contentOperationIsStable,
+    preserveContentOperationChanges,
+    endContentOperation,
+  });
+
+  return {
+    contentId,
+    state,
+    document,
+    $,
+    $$,
+    request,
+    requests,
+    defer,
+    loadData,
+    saveContent,
+    toast,
+    toasts,
+    markContentDirty,
+    beginContentOperation,
+    contentOperationIsStable,
+    preserveContentOperationChanges,
+    endContentOperation,
+    renderCount: () => renders,
+    downstreamCompleted: () => downstreamCompleted,
+    programmaticEdit() {
+      state.contentEditRevisions.set(contentId, (state.contentEditRevisions.get(contentId) || 0) + 1);
+      $(`[data-content-body="${contentId}"]`).innerHTML = '<p>programmatic newer body</p>';
+    },
+  };
+}
+
+test('layout operation blocks input and aborts final refresh after a programmatic edit during layout request', async () => {
+  const harness = createFullContentOperationHarness('layout-full-lock');
+  const layoutGate = harness.defer('layout');
+  const source = extractFunctionSource('layoutContent', 'saveDraft');
+  let previews = 0;
+  const layoutContent = vm.runInNewContext(`(${source})`, {
+    state: harness.state,
+    $: harness.$,
+    request: harness.request,
+    saveContent: harness.saveContent,
+    beginContentOperation: harness.beginContentOperation,
+    contentOperationIsStable: harness.contentOperationIsStable,
+    preserveContentOperationChanges: harness.preserveContentOperationChanges,
+    endContentOperation: harness.endContentOperation,
+    loadData: harness.loadData,
+    toast: harness.toast,
+    openLayoutDialog: () => { previews += 1; },
+    getSelectedContent: () => harness.state.data.contents[0],
+    encodeURIComponent,
+    beginContentOperation: harness.beginContentOperation,
+    contentOperationIsStable: harness.contentOperationIsStable,
+    preserveContentOperationChanges: harness.preserveContentOperationChanges,
+    endContentOperation: harness.endContentOperation,
+    CONTENT_CHANGED_DURING_SAVE_MESSAGE: '正文在保存期间又有修改，请先保存后重试',
+  });
+
+  const pending = layoutContent(harness.contentId, 'style_10.html');
+  await layoutGate.started;
+  const editorLocked = harness.$('[data-content-body]').getAttribute('contenteditable') === 'false';
+  const revision = harness.state.contentEditRevisions.get(harness.contentId);
+  const inputBlocked = harness.markContentDirty(harness.contentId) === false;
+  const revisionBlocked = harness.state.contentEditRevisions.get(harness.contentId) === revision;
+  harness.programmaticEdit();
+  layoutGate.resolve();
+
+  assert.equal(await pending, false);
+  assert.equal(editorLocked, true);
+  assert.equal(inputBlocked, true);
+  assert.equal(revisionBlocked, true);
+  assert.equal(harness.requests.filter(key => key === 'bootstrap').length, 0);
+  assert.equal(previews, 0);
+  assert.equal(harness.$('[data-content-body]').innerHTML, '<p>programmatic newer body</p>');
+  assert.equal(harness.state.dirtyContentIds.has(harness.contentId), true);
+  assert.equal(harness.$('[data-content-body]').getAttribute('contenteditable'), 'true');
+  assert.equal(harness.$$('[data-action]').every(button => !button.disabled), true);
+});
+
+test('draft operation aborts refresh after a programmatic edit during draft request', async () => {
+  const harness = createFullContentOperationHarness('draft-full-lock');
+  const draftGate = harness.defer('draft');
+  const source = extractFunctionSource('saveDraft', 'publishContent');
+  const saveDraft = vm.runInNewContext(`(${source})`, {
+    state: harness.state,
+    $: harness.$,
+    request: harness.request,
+    saveContent: harness.saveContent,
+    beginContentOperation: harness.beginContentOperation,
+    contentOperationIsStable: harness.contentOperationIsStable,
+    preserveContentOperationChanges: harness.preserveContentOperationChanges,
+    endContentOperation: harness.endContentOperation,
+    loadData: harness.loadData,
+    toast: harness.toast,
+    readSelectedPlatforms: () => ['zhihu'],
+    beginContentOperation: harness.beginContentOperation,
+    contentOperationIsStable: harness.contentOperationIsStable,
+    preserveContentOperationChanges: harness.preserveContentOperationChanges,
+    endContentOperation: harness.endContentOperation,
+    CONTENT_CHANGED_DURING_SAVE_MESSAGE: '正文在保存期间又有修改，请先保存后重试',
+  });
+
+  const pending = saveDraft(harness.contentId);
+  await draftGate.started;
+  const inputBlocked = harness.markContentDirty(harness.contentId) === false;
+  harness.programmaticEdit();
+  draftGate.resolve();
+
+  assert.equal(await pending, false);
+  assert.equal(inputBlocked, true);
+  assert.equal(harness.requests.filter(key => key === 'bootstrap').length, 0);
+  assert.equal(harness.$('[data-content-body]').innerHTML, '<p>programmatic newer body</p>');
+  assert.equal(harness.$('[data-content-body]').getAttribute('contenteditable'), 'true');
+});
+
+test('guarded loadData does not render or overwrite DOM when revision changes while bootstrap is pending', async () => {
+  const harness = createFullContentOperationHarness('load-full-lock');
+  const bootstrapGate = harness.defer('bootstrap');
+  const operation = harness.beginContentOperation(harness.contentId);
+  const pending = harness.loadData({ operationContext: operation });
+  await bootstrapGate.started;
+  const inputBlocked = harness.markContentDirty(harness.contentId) === false;
+  harness.programmaticEdit();
+  bootstrapGate.resolve();
+
+  const result = await pending;
+  assert.equal(inputBlocked, true);
+  assert.equal(result.applied, false);
+  assert.equal(harness.renderCount(), 0);
+  assert.equal(harness.state.data.contents[0].body, '<p>live body</p>');
+  assert.equal(harness.$('[data-content-body]').innerHTML, '<p>programmatic newer body</p>');
+  harness.preserveContentOperationChanges(operation);
+  harness.endContentOperation(operation);
+  assert.equal(harness.$('[data-content-body]').getAttribute('contenteditable'), 'true');
+});
+
+test('layout operation releases editor and controls when downstream request throws', async () => {
+  const harness = createFullContentOperationHarness('layout-error-unlock');
+  const layoutGate = harness.defer('layout');
+  const source = extractFunctionSource('layoutContent', 'saveDraft');
+  let lockedAtRequest = false;
+  const request = async (url, options) => {
+    if (url.endsWith('/layout')) lockedAtRequest = harness.$('[data-content-body]').getAttribute('contenteditable') === 'false';
+    return harness.request(url, options);
+  };
+  const layoutContent = vm.runInNewContext(`(${source})`, {
+    state: harness.state,
+    $: harness.$,
+    request,
+    saveContent: harness.saveContent,
+    loadData: harness.loadData,
+    toast: harness.toast,
+    openLayoutDialog: () => {},
+    getSelectedContent: () => harness.state.data.contents[0],
+    encodeURIComponent,
+    beginContentOperation: harness.beginContentOperation,
+    contentOperationIsStable: harness.contentOperationIsStable,
+    preserveContentOperationChanges: harness.preserveContentOperationChanges,
+    endContentOperation: harness.endContentOperation,
+    CONTENT_CHANGED_DURING_SAVE_MESSAGE: '正文在保存期间又有修改，请先保存后重试',
+  });
+
+  const pending = layoutContent(harness.contentId, 'style_10.html');
+  await layoutGate.started;
+  layoutGate.reject(new Error('layout unavailable'));
+  await assert.rejects(pending, /layout unavailable/);
+  assert.equal(lockedAtRequest, true);
+  assert.equal(harness.$('[data-content-body]').getAttribute('contenteditable'), 'true');
+  assert.equal(harness.$$('[data-action]').every(button => !button.disabled), true);
+});
+
 function createDeferredCanonicalSaveHarness(contentId = 'content-downstream-race') {
   const editor = { isContentEditable: true, innerHTML: '<p>saved revision</p>' };
   const titleEditor = { value: 'Saved title' };
@@ -524,6 +937,8 @@ function createDeferredCanonicalSaveHarness(contentId = 'content-downstream-race
     data: { contents: [content] },
     dirtyContentIds: new Set(),
     contentEditRevisions: new Map(),
+    contentOperationLocks: new Map(),
+    contentOperationSequence: 0,
     contentTransitionInFlight: false,
     selectedPlatforms: new Set(['zhihu']),
     batchPublishSubmitting: false,
@@ -553,11 +968,25 @@ function createDeferredCanonicalSaveHarness(contentId = 'content-downstream-race
   };
   let reloads = 0;
   const toasts = [];
-  const loadData = async () => { reloads += 1; };
+  const loadData = async () => { reloads += 1; return { applied: true }; };
   const toast = (message, type) => toasts.push({ message, type: type || '' });
   const dirtySource = extractFunctionSource('markContentDirty', 'bindContentEditorDirtyTracking');
   const saveSource = extractFunctionSource('saveContent', 'markContentDirty');
   const markContentDirty = vm.runInNewContext(`(${dirtySource})`, { state, $ });
+  const snapshotSource = extractFunctionSource('contentOperationSnapshot', 'setContentOperationBusy');
+  const stableSource = extractFunctionSource('contentOperationIsStable', 'preserveContentOperationChanges');
+  const preserveSource = extractFunctionSource('preserveContentOperationChanges', 'endContentOperation');
+  const contentOperationSnapshot = vm.runInNewContext(`(${snapshotSource})`, { state, $ });
+  const contentOperationIsStable = vm.runInNewContext(`(${stableSource})`, { state, contentOperationSnapshot });
+  const preserveContentOperationChanges = vm.runInNewContext(`(${preserveSource})`, { state, contentOperationSnapshot });
+  const beginContentOperation = target => {
+    const key = String(target);
+    if (state.contentOperationLocks.has(key)) return null;
+    const context = { contentId: key, token: `deferred-${key}`, snapshot: contentOperationSnapshot(key) };
+    state.contentOperationLocks.set(key, context);
+    return context;
+  };
+  const endContentOperation = context => state.contentOperationLocks.delete(context.contentId);
   const saveContent = vm.runInNewContext(`(${saveSource})`, {
     state,
     $,
@@ -566,6 +995,10 @@ function createDeferredCanonicalSaveHarness(contentId = 'content-downstream-race
     toast,
     loadData,
     encodeURIComponent,
+    beginContentOperation,
+    contentOperationIsStable,
+    preserveContentOperationChanges,
+    endContentOperation,
   });
   markContentDirty(contentId);
 
@@ -578,12 +1011,17 @@ function createDeferredCanonicalSaveHarness(contentId = 'content-downstream-race
     saveStarted,
     downstreamRequests,
     toasts,
+    beginContentOperation,
+    contentOperationIsStable,
+    preserveContentOperationChanges,
+    endContentOperation,
     reloadCount: () => reloads,
     editAndResolve() {
       editor.innerHTML = '<p>newer live revision</p>';
       titleEditor.value = 'Newer live title';
       summaryEditor.value = 'Newer live summary';
-      markContentDirty(contentId);
+      assert.equal(markContentDirty(contentId), false);
+      state.contentEditRevisions.set(contentId, state.contentEditRevisions.get(contentId) + 1);
       resolveSave({
         content: {
           ...content,
@@ -604,6 +1042,10 @@ test('layout aborts when the canonical body changes during its deferred save', a
     state: harness.state,
     $: harness.$,
     saveContent: harness.saveContent,
+    beginContentOperation: harness.beginContentOperation,
+    contentOperationIsStable: harness.contentOperationIsStable,
+    preserveContentOperationChanges: harness.preserveContentOperationChanges,
+    endContentOperation: harness.endContentOperation,
     request: harness.request,
     toast: (message, type) => harness.toasts.push({ message, type: type || '' }),
     loadData: async () => { throw new Error('unstable layout must not reload'); },
@@ -629,6 +1071,10 @@ test('saveDraft aborts when the canonical body changes during its deferred save'
     state: harness.state,
     $: harness.$,
     saveContent: harness.saveContent,
+    beginContentOperation: harness.beginContentOperation,
+    contentOperationIsStable: harness.contentOperationIsStable,
+    preserveContentOperationChanges: harness.preserveContentOperationChanges,
+    endContentOperation: harness.endContentOperation,
     readSelectedPlatforms: () => ['zhihu'],
     request: harness.request,
     toast: (message, type) => harness.toasts.push({ message, type: type || '' }),
@@ -663,6 +1109,10 @@ test('batch publish aborts when the canonical body changes during its deferred s
     readSelectedPlatforms: () => ['zhihu'],
     beginBatchPublishOperation,
     finishBatchPublishOperation,
+    beginContentOperation: harness.beginContentOperation,
+    contentOperationIsStable: harness.contentOperationIsStable,
+    preserveContentOperationChanges: harness.preserveContentOperationChanges,
+    endContentOperation: harness.endContentOperation,
     setBatchPublishBusy: busy => busyStates.push(busy),
     saveContent: harness.saveContent,
     renderProgress: () => { throw new Error('unstable publish must not render progress'); },
@@ -704,6 +1154,10 @@ test('single publish aborts when the canonical body changes during its deferred 
     state: harness.state,
     beginSinglePublishOperation,
     finishSinglePublishOperation,
+    beginContentOperation: harness.beginContentOperation,
+    contentOperationIsStable: harness.contentOperationIsStable,
+    preserveContentOperationChanges: harness.preserveContentOperationChanges,
+    endContentOperation: harness.endContentOperation,
     setSinglePublishBusy: () => {},
     setSinglePublishFeedback: (message, type) => feedback.push({ message, type: type || '' }),
     platformName: platform => platform,
@@ -733,6 +1187,10 @@ test('navigation and article selection stay put when the deferred save becomes u
   const runContentTransition = vm.runInNewContext(`(${source})`, {
     state: harness.state,
     saveContent: harness.saveContent,
+    beginContentOperation: harness.beginContentOperation,
+    contentOperationIsStable: harness.contentOperationIsStable,
+    preserveContentOperationChanges: harness.preserveContentOperationChanges,
+    endContentOperation: harness.endContentOperation,
     toast: (message, type) => harness.toasts.push({ message, type: type || '' }),
     CONTENT_CHANGED_DURING_SAVE_MESSAGE: '正文在保存期间又有修改，请先保存后重试',
   });

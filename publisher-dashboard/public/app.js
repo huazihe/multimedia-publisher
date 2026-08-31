@@ -150,6 +150,8 @@ const state = {
   contentPageSize: 8,
   dirtyContentIds: new Set(),
   contentEditRevisions: new Map(),
+  contentOperationLocks: new Map(),
+  contentOperationSequence: 0,
   layoutTemplates: [],
   layoutTemplatesLoaded: false,
   layoutTemplatesLoading: false,
@@ -446,8 +448,11 @@ async function loadLayoutTemplates() {
   return layoutTemplatesRequest;
 }
 
-async function loadData() {
+async function loadData(options = {}) {
   const res = await request('/api/bootstrap');
+  if (options.operationContext && !contentOperationIsStable(options.operationContext)) {
+    return { applied: false, data: res.data };
+  }
   state.workbenchCsrfToken = res.data.csrfToken || '';
   state.data = res.data;
   state.selectedDate ||= res.data.today;
@@ -467,6 +472,7 @@ async function loadData() {
     state.authAutoChecked = true;
     setTimeout(() => checkAllAuth({ silent: true }), 250);
   }
+  return { applied: true, data: res.data };
 }
 
 function getSelectedContent() {
@@ -1976,6 +1982,112 @@ function retryPlatformPreview(platform) {
   void loadPlatformPreview(content, platform);
 }
 
+function contentOperationSnapshot(id) {
+  const target = String(id || '');
+  const editor = $(`[data-content-body="${target}"]`);
+  const titleEditor = $(`[data-content-title="${target}"]`);
+  const summaryEditor = $(`[data-content-summary="${target}"]`);
+  return {
+    revision: state.contentEditRevisions.get(target) || 0,
+    body: editor ? (editor.innerHTML ?? editor.value ?? '') : null,
+    title: titleEditor ? titleEditor.value : null,
+    summary: summaryEditor ? summaryEditor.value : null,
+  };
+}
+
+function setContentOperationBusy(context, busy) {
+  const target = context.contentId;
+  if (busy) {
+    context.restore = [];
+    const fields = [
+      $(`[data-content-body="${target}"]`),
+      $(`[data-content-title="${target}"]`),
+      $(`[data-content-summary="${target}"]`),
+    ].filter(Boolean);
+    for (const field of fields) {
+      if (field.matches?.('[data-content-body]')) {
+        context.restore.push({ element: field, type: 'contenteditable', value: field.getAttribute('contenteditable') });
+        field.setAttribute('contenteditable', 'false');
+        field.setAttribute('aria-busy', 'true');
+      } else {
+        context.restore.push({ element: field, type: 'disabled', value: Boolean(field.disabled) });
+        field.disabled = true;
+      }
+    }
+    const actions = new Set([
+      'save-content', 'layout-selected', 'layout-content', 'generate-wechat-layout',
+      'save-draft', 'publish-content', 'publish-selected', 'open-platform-draft', 'open-platform-direct',
+    ]);
+    for (const control of $$('[data-action]')) {
+      if (!actions.has(control.dataset.action)) continue;
+      if (control.dataset.id && String(control.dataset.id) !== target) continue;
+      if (!control.dataset.id && state.selectedContentId && String(state.selectedContentId) !== target) continue;
+      context.restore.push({ element: control, type: 'disabled', value: Boolean(control.disabled) });
+      control.disabled = true;
+    }
+    return;
+  }
+  for (const item of context.restore || []) {
+    if (item.type === 'contenteditable') {
+      if (item.value === null) item.element.removeAttribute('contenteditable');
+      else item.element.setAttribute('contenteditable', item.value);
+      item.element.removeAttribute('aria-busy');
+    } else {
+      item.element.disabled = item.value;
+    }
+  }
+  context.restore = [];
+}
+
+function beginContentOperation(id) {
+  const target = String(id || '');
+  if (!target || state.contentOperationLocks.has(target)) return null;
+  const sequence = Number(state.contentOperationSequence || 0) + 1;
+  state.contentOperationSequence = sequence;
+  const context = {
+    contentId: target,
+    token: `content-operation-${sequence}`,
+    snapshot: contentOperationSnapshot(target),
+    restore: [],
+  };
+  state.contentOperationLocks.set(target, context);
+  setContentOperationBusy(context, true);
+  return context;
+}
+
+function contentOperationIsStable(context) {
+  if (!context || state.contentOperationLocks.get(context.contentId)?.token !== context.token) return false;
+  const current = contentOperationSnapshot(context.contentId);
+  return current.revision === context.snapshot.revision
+    && current.body === context.snapshot.body
+    && current.title === context.snapshot.title
+    && current.summary === context.snapshot.summary;
+}
+
+function preserveContentOperationChanges(context, serverContent = null) {
+  if (!context) return;
+  const target = context.contentId;
+  const current = contentOperationSnapshot(target);
+  state.dirtyContentIds.add(target);
+  const contentIndex = state.data?.contents?.findIndex(content => String(content.id) === target) ?? -1;
+  if (contentIndex < 0) return;
+  const existing = state.data.contents[contentIndex];
+  state.data.contents[contentIndex] = {
+    ...existing,
+    ...(serverContent || {}),
+    title: current.title ?? existing.title,
+    summary: current.summary ?? existing.summary,
+    body: current.body ?? existing.body,
+  };
+}
+
+function endContentOperation(context) {
+  if (!context || state.contentOperationLocks.get(context.contentId)?.token !== context.token) return false;
+  state.contentOperationLocks.delete(context.contentId);
+  setContentOperationBusy(context, false);
+  return true;
+}
+
 function createPublishOperationId(cryptoSource = crypto) {
   if (typeof cryptoSource?.randomUUID === 'function') return cryptoSource.randomUUID();
   const bytes = new Uint8Array(24);
@@ -2093,11 +2205,22 @@ async function confirmSinglePlatformPublish() {
   const operation = beginSinglePublishOperation(state, state.pendingSinglePublish);
   if (!operation) return false;
   let operationFinished = false;
+  let operationContext = null;
   setSinglePublishBusy(true);
   setSinglePublishFeedback(`正在${operation.mode === 'draft' ? '保存草稿到' : '发布到'}${platformName(operation.platform)}…`);
   try {
+    operationContext = beginContentOperation(operation.contentId);
+    if (!operationContext) {
+      setSinglePublishFeedback('正文操作正在进行，请稍候', 'error');
+      toast('正文操作正在进行，请稍候', 'error');
+      return false;
+    }
     if ($(`[data-content-body="${operation.contentId}"]`)) {
-      const saveResult = await saveContent(operation.contentId, { silent: true });
+      const saveResult = await saveContent(operation.contentId, {
+        silent: true,
+        skipReload: true,
+        operationContext,
+      });
       if (!saveResult.stable) {
         setSinglePublishFeedback(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
         toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
@@ -2114,6 +2237,12 @@ async function confirmSinglePlatformPublish() {
     });
     const platformResult = result.job?.results?.find(item => item.platform === operation.platform);
     if (state.singlePublishOperationToken !== operation.token) return false;
+    if (!contentOperationIsStable(operationContext)) {
+      preserveContentOperationChanges(operationContext);
+      setSinglePublishFeedback(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
+      toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
+      return false;
+    }
     $('#platform-publish-dialog').close();
     state.pendingSinglePublish = null;
     operationFinished = finishSinglePublishOperation(state, operation.token);
@@ -2125,7 +2254,12 @@ async function confirmSinglePlatformPublish() {
       toast(`${platformName(operation.platform)}：${platformResult?.message || '平台未返回成功结果'}`, 'error');
     }
     try {
-      await loadData();
+      const loaded = await loadData({ operationContext });
+      if (!loaded.applied) {
+        preserveContentOperationChanges(operationContext);
+        toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
+        return false;
+      }
     } catch {
       toast('发布成功，但列表刷新失败', 'error');
     }
@@ -2137,6 +2271,7 @@ async function confirmSinglePlatformPublish() {
     }
     return false;
   } finally {
+    if (operationContext) endContentOperation(operationContext);
     if (!operationFinished && finishSinglePublishOperation(state, operation.token)) {
       setSinglePublishBusy(false);
     }
@@ -2151,13 +2286,30 @@ async function runContentTransition(transition) {
   if (state.contentTransitionInFlight) return false;
   state.contentTransitionInFlight = true;
   const currentId = state.selectedContentId;
+  let operationContext = null;
   try {
+    if (currentId) {
+      operationContext = beginContentOperation(currentId);
+      if (!operationContext) {
+        toast('正文操作正在进行，请稍候', 'error');
+        return false;
+      }
+    }
     if (currentId && state.dirtyContentIds.has(String(currentId))) {
-      const saveResult = await saveContent(currentId, { silent: true });
+      const saveResult = await saveContent(currentId, {
+        silent: true,
+        skipReload: true,
+        operationContext,
+      });
       if (!saveResult.stable) {
         toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
         return false;
       }
+    }
+    if (operationContext && !contentOperationIsStable(operationContext)) {
+      preserveContentOperationChanges(operationContext);
+      toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
+      return false;
     }
     await transition();
     return true;
@@ -2165,6 +2317,7 @@ async function runContentTransition(transition) {
     toast(`正文保存失败，已留在当前页面：${error.message || '未知错误'}`, 'error');
     return false;
   } finally {
+    if (operationContext) endContentOperation(operationContext);
     state.contentTransitionInFlight = false;
   }
 }
@@ -2192,47 +2345,52 @@ async function saveContent(id, options = {}) {
   const target = id || state.selectedContentId;
   if (!target) return { content: null, stable: true };
   const targetKey = String(target);
-  const editor = $(`[data-content-body="${target}"]`);
-  const titleEditor = $(`[data-content-title="${target}"]`);
-  const summaryEditor = $(`[data-content-summary="${target}"]`);
-  const body = editor?.isContentEditable ? editor.innerHTML : editor?.value;
-  const current = state.data.contents.find(content => content.id === target);
-  const revision = state.contentEditRevisions.get(targetKey) || 0;
-  const res = await request(`/api/content/${encodeURIComponent(target)}`, {
-    method: 'POST',
-    body: JSON.stringify({
-      title: titleEditor?.value ?? current?.title,
-      summary: summaryEditor?.value ?? current?.summary,
-      type: current?.type,
-      body: body ?? current?.body ?? '',
-    }),
-  });
-  state.selectedContentId = res.content.id;
-  clearPlatformPreviews(target);
-  if ((state.contentEditRevisions.get(targetKey) || 0) !== revision) {
-    const contentIndex = state.data.contents.findIndex(content => content.id === target);
-    if (contentIndex >= 0) {
-      const existing = state.data.contents[contentIndex];
-      state.data.contents[contentIndex] = {
-        ...existing,
-        ...res.content,
-        title: titleEditor?.value ?? existing.title,
-        summary: summaryEditor?.value ?? existing.summary,
-        body: (editor?.isContentEditable ? editor.innerHTML : editor?.value) ?? existing.body,
-      };
-    }
-    state.dirtyContentIds.add(targetKey);
-    return { content: res.content, stable: false };
+  const ownsOperation = !options.operationContext;
+  const operationContext = options.operationContext || beginContentOperation(targetKey);
+  if (!operationContext) {
+    if (!options.silent) toast('正文操作正在进行，请稍候', 'error');
+    return { content: null, stable: false, busy: true };
   }
-  state.dirtyContentIds.delete(targetKey);
-  if (!options.silent) toast('正文已保存');
-  await loadData();
-  return { content: res.content, stable: true };
+  try {
+    const editor = $(`[data-content-body="${target}"]`);
+    const titleEditor = $(`[data-content-title="${target}"]`);
+    const summaryEditor = $(`[data-content-summary="${target}"]`);
+    const body = editor ? (editor.innerHTML ?? editor.value) : undefined;
+    const current = state.data.contents.find(content => content.id === target);
+    const res = await request(`/api/content/${encodeURIComponent(target)}`, {
+      method: 'POST',
+      body: JSON.stringify({
+        title: titleEditor?.value ?? current?.title,
+        summary: summaryEditor?.value ?? current?.summary,
+        type: current?.type,
+        body: body ?? current?.body ?? '',
+      }),
+    });
+    state.selectedContentId = res.content.id;
+    clearPlatformPreviews(target);
+    if (!contentOperationIsStable(operationContext)) {
+      preserveContentOperationChanges(operationContext, res.content);
+      return { content: res.content, stable: false };
+    }
+    state.dirtyContentIds.delete(targetKey);
+    if (!options.skipReload) {
+      const loaded = await loadData({ operationContext });
+      if (!loaded.applied) {
+        preserveContentOperationChanges(operationContext, res.content);
+        return { content: res.content, stable: false };
+      }
+    }
+    if (!options.silent) toast('正文已保存');
+    return { content: res.content, stable: true };
+  } finally {
+    if (ownsOperation) endContentOperation(operationContext);
+  }
 }
 
 function markContentDirty(id) {
-  if (!id) return;
+  if (!id) return false;
   const target = String(id);
+  if (state.contentOperationLocks.has(target)) return false;
   state.contentEditRevisions.set(target, (state.contentEditRevisions.get(target) || 0) + 1);
   state.dirtyContentIds.add(target);
   $(`[data-save-content-button="${id}"]`)?.classList.remove('is-hidden');
@@ -2241,6 +2399,7 @@ function markContentDirty(id) {
     saveState.textContent = '有未保存更改';
     saveState.classList.add('is-dirty');
   }
+  return true;
 }
 
 function bindContentEditorDirtyTracking(id) {
@@ -2260,42 +2419,74 @@ async function layoutContent(id, template) {
   const templateProvided = arguments.length >= 2;
   if (templateProvided && !template) throw new Error('请选择有效的公众号排版模板');
   if (!target) return toast('请选择内容', 'error');
-  if ($(`[data-content-body="${target}"]`)) {
-    const saveResult = await saveContent(target, { silent: true });
-    if (!saveResult.stable) {
+  const operationContext = beginContentOperation(target);
+  if (!operationContext) return toast('正文操作正在进行，请稍候', 'error');
+  try {
+    if ($(`[data-content-body="${target}"]`)) {
+      const saveResult = await saveContent(target, { silent: true, skipReload: true, operationContext });
+      if (!saveResult.stable) {
+        toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
+        return false;
+      }
+    }
+    const requestOptions = templateProvided
+      ? { method: 'POST', body: JSON.stringify({ template }) }
+      : { method: 'POST' };
+    const res = await request(`/api/content/${encodeURIComponent(target)}/layout`, requestOptions);
+    if (!contentOperationIsStable(operationContext)) {
+      preserveContentOperationChanges(operationContext, res.content);
       toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
       return false;
     }
+    state.selectedContentId = res.content.id;
+    const loaded = await loadData({ operationContext });
+    if (!loaded.applied) {
+      preserveContentOperationChanges(operationContext, res.content);
+      toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
+      return false;
+    }
+    openLayoutDialog(getSelectedContent());
+    toast('排版预览已生成');
+    return true;
+  } finally {
+    endContentOperation(operationContext);
   }
-  const requestOptions = templateProvided
-    ? { method: 'POST', body: JSON.stringify({ template }) }
-    : { method: 'POST' };
-  const res = await request(`/api/content/${encodeURIComponent(target)}/layout`, requestOptions);
-  state.selectedContentId = res.content.id;
-  await loadData();
-  openLayoutDialog(getSelectedContent());
-  toast('排版预览已生成');
-  return true;
 }
 
 async function saveDraft(id) {
   const target = id || state.selectedContentId;
   const selectedPlatforms = readSelectedPlatforms();
   if (!target) return toast('请选择内容', 'error');
-  if ($(`[data-content-body="${target}"]`)) {
-    const saveResult = await saveContent(target, { silent: true });
-    if (!saveResult.stable) {
+  const operationContext = beginContentOperation(target);
+  if (!operationContext) return toast('正文操作正在进行，请稍候', 'error');
+  try {
+    if ($(`[data-content-body="${target}"]`)) {
+      const saveResult = await saveContent(target, { silent: true, skipReload: true, operationContext });
+      if (!saveResult.stable) {
+        toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
+        return false;
+      }
+    }
+    await request(`/api/content/${target}/save-draft`, {
+      method: 'POST',
+      body: JSON.stringify({ platforms: selectedPlatforms }),
+    });
+    if (!contentOperationIsStable(operationContext)) {
+      preserveContentOperationChanges(operationContext);
       toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
       return false;
     }
+    const loaded = await loadData({ operationContext });
+    if (!loaded.applied) {
+      preserveContentOperationChanges(operationContext);
+      toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
+      return false;
+    }
+    toast('已保存到内容中心草稿');
+    return true;
+  } finally {
+    endContentOperation(operationContext);
   }
-  await request(`/api/content/${target}/save-draft`, {
-    method: 'POST',
-    body: JSON.stringify({ platforms: selectedPlatforms }),
-  });
-  toast('已保存到内容中心草稿');
-  await loadData();
-  return true;
 }
 
 async function publishContent(id) {
@@ -2309,10 +2500,16 @@ async function publishContent(id) {
     publishMode: 'direct',
   });
   if (!operation) return false;
+  const operationContext = beginContentOperation(target);
+  if (!operationContext) {
+    finishBatchPublishOperation(state, operation.operationId);
+    toast('正文操作正在进行，请稍候', 'error');
+    return false;
+  }
   setBatchPublishBusy(true);
   try {
     if ($(`[data-content-body="${target}"]`)) {
-      const saveResult = await saveContent(target, { silent: true });
+      const saveResult = await saveContent(target, { silent: true, skipReload: true, operationContext });
       if (!saveResult.stable) {
         toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
         return false;
@@ -2325,15 +2522,31 @@ async function publishContent(id) {
       method: 'POST',
       body: JSON.stringify(operation),
     });
+    if (!contentOperationIsStable(operationContext)) {
+      preserveContentOperationChanges(operationContext);
+      toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
+      return false;
+    }
+    const loaded = await loadData({ operationContext });
+    if (!loaded.applied) {
+      preserveContentOperationChanges(operationContext);
+      toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
+      return false;
+    }
     toast('发布流程完成，请查看平台结果');
-    await loadData();
     switchView('publish');
     return true;
   } catch (error) {
     toast(error.message, 'error');
-    await loadData();
+    try {
+      const loaded = await loadData({ operationContext });
+      if (!loaded.applied) preserveContentOperationChanges(operationContext);
+    } catch {
+      // Preserve the original publish error when refresh also fails.
+    }
     return false;
   } finally {
+    endContentOperation(operationContext);
     if (finishBatchPublishOperation(state, operation.operationId)) setBatchPublishBusy(false);
   }
 }

@@ -1075,8 +1075,36 @@ test('a second journal instance replays a completed signature across operationId
 
   const replay = secondJournal.begin('shared-completed-operation-0002', signature);
   assert.equal(replay.kind, 'replay');
-  assert.equal(replay.record.operationId, 'shared-completed-operation-0001');
+  assert.equal(replay.record.operationId, 'shared-completed-operation-0002');
+  assert.equal(replay.record.aliasOf, 'shared-completed-operation-0001');
   assert.equal(replay.record.result.jobId, 'job-shared-completed');
+});
+
+test('completed signature replay atomically persists an alias for the incoming operationId', () => {
+  const operationsFile = path.join(testDataDir, 'operation-journal-completed-alias.json');
+  const signature = {
+    contentId: 'content-completed-alias',
+    platforms: ['zhihu'],
+    publishMode: 'direct',
+    contentHash: 'e'.repeat(64),
+  };
+  const journal = createOperationJournal({ filePath: operationsFile, limit: 8 });
+  journal.begin('completed-alias-operation-0001', signature);
+  journal.complete('completed-alias-operation-0001', {
+    jobId: 'job-completed-alias',
+    jobStatus: 'published',
+    platformResults: [{ platform: 'zhihu', status: 'success' }],
+  });
+
+  const replay = journal.begin('completed-alias-operation-0002', signature);
+  assert.equal(replay.kind, 'replay');
+  assert.equal(replay.record.operationId, 'completed-alias-operation-0002');
+  assert.equal(replay.record.aliasOf, 'completed-alias-operation-0001');
+  const document = JSON.parse(fs.readFileSync(operationsFile, 'utf8'));
+  const alias = document.records.find(record => record.operationId === 'completed-alias-operation-0002');
+  assert.equal(alias.state, 'completed');
+  assert.deepEqual(alias.signature, signature);
+  assert.equal(alias.result.jobId, 'job-completed-alias');
 });
 
 test('uncertain journal records survive short TTL pruning and block new IDs for the same signature', () => {
@@ -1194,6 +1222,199 @@ test('publisher side-effect exception marks signature uncertain and blocks a new
     assert.equal(response.status, 409);
     assert.match((await response.json()).error, /不确定|人工核对/);
     assert.equal(publisherCalls, 1);
+  } finally {
+    await closeServer(testServer);
+    cleanupPublishStateFixture(fixture);
+  }
+});
+
+test('all preflight failures record failed and allow a new operationId retry', async () => {
+  let fixture;
+  let testServer;
+  let preflightCalls = 0;
+  let publisherCalls = 0;
+  const operationsFile = path.join(testDataDir, 'preflight-failed-operations.json');
+  try {
+    fixture = createPublishStateFixture({
+      key: 'preflight-failed-retry',
+      planDate: '2099-06-09',
+      selectedPlatforms: ['zhihu'],
+      contentStatus: '已排版',
+      planStatus: '已排版',
+    });
+    testServer = createDashboardServer({
+      operationsFile,
+      preflight: async () => {
+        preflightCalls += 1;
+        return 'authentication unavailable before publisher start';
+      },
+      platformPublisher: async () => {
+        publisherCalls += 1;
+        return successfulPlatformPublisher()();
+      },
+    });
+    const port = await listenOnRandomPort(testServer);
+    const endpoint = `http://127.0.0.1:${port}/api/content/${fixture.id}/publish-platform`;
+    const publish = operationId => workbenchFetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId }),
+    });
+
+    let response = await publish('preflight-failed-operation-0001');
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).job.status, 'failed');
+    response = await publish('preflight-failed-operation-0002');
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).cached, false);
+    assert.equal(preflightCalls, 2);
+    assert.equal(publisherCalls, 0);
+    const document = JSON.parse(fs.readFileSync(operationsFile, 'utf8'));
+    assert.deepEqual(document.records.map(record => record.state), ['failed', 'failed']);
+  } finally {
+    await closeServer(testServer);
+    cleanupPublishStateFixture(fixture);
+  }
+});
+
+test('publisher-started all-failed result records uncertain and blocks a new operationId', async () => {
+  let fixture;
+  let testServer;
+  let publisherCalls = 0;
+  const operationsFile = path.join(testDataDir, 'publisher-all-failed-operations.json');
+  try {
+    fixture = createPublishStateFixture({
+      key: 'publisher-all-failed',
+      planDate: '2099-06-10',
+      selectedPlatforms: ['zhihu'],
+      contentStatus: '已排版',
+      planStatus: '已排版',
+    });
+    testServer = createDashboardServer({
+      operationsFile,
+      preflight: async () => null,
+      platformPublisher: async () => {
+        publisherCalls += 1;
+        return { output: '', info: { status: 'failed', error: 'ambiguous adapter failure' } };
+      },
+    });
+    const port = await listenOnRandomPort(testServer);
+    const endpoint = `http://127.0.0.1:${port}/api/content/${fixture.id}/publish-platform`;
+    const publish = operationId => workbenchFetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId }),
+    });
+
+    let response = await publish('publisher-all-failed-operation-0001');
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).job.status, 'failed');
+    assert.equal(JSON.parse(fs.readFileSync(operationsFile, 'utf8')).records[0].state, 'uncertain');
+    response = await publish('publisher-all-failed-operation-0002');
+    assert.equal(response.status, 409);
+    assert.match((await response.json()).error, /不确定|人工核对/);
+    assert.equal(publisherCalls, 1);
+  } finally {
+    await closeServer(testServer);
+    cleanupPublishStateFixture(fixture);
+  }
+});
+
+test('partial publisher success records completed and replays without another publisher call', async () => {
+  let fixture;
+  let testServer;
+  let publisherCalls = 0;
+  const operationsFile = path.join(testDataDir, 'publisher-partial-completed-operations.json');
+  try {
+    fixture = createPublishStateFixture({
+      key: 'publisher-partial-completed',
+      planDate: '2099-06-11',
+      selectedPlatforms: ['zhihu', 'juejin'],
+      contentStatus: '已排版',
+      planStatus: '已排版',
+    });
+    testServer = createDashboardServer({
+      operationsFile,
+      preflight: async () => null,
+      platformPublisher: async (markdownFile, platform) => {
+        publisherCalls += 1;
+        return platform === 'zhihu'
+          ? { output: '', info: { status: 'success', message: 'published' } }
+          : { output: '', info: { status: 'failed', error: 'known platform failure' } };
+      },
+    });
+    const port = await listenOnRandomPort(testServer);
+    const endpoint = `http://127.0.0.1:${port}/api/publish`;
+    const publish = operationId => workbenchFetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contentId: fixture.id,
+        platforms: ['zhihu', 'juejin'],
+        publishMode: 'direct',
+        operationId,
+      }),
+    });
+
+    let response = await publish('publisher-partial-operation-0001');
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).job.status, 'partial_failed');
+    assert.equal(JSON.parse(fs.readFileSync(operationsFile, 'utf8')).records[0].state, 'completed');
+    response = await publish('publisher-partial-operation-0002');
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).cached, true);
+    assert.equal(publisherCalls, 2);
+  } finally {
+    await closeServer(testServer);
+    cleanupPublishStateFixture(fixture);
+  }
+});
+
+test('lost completed response persists replay alias and changed alias signature never republishes', async () => {
+  let fixture;
+  let testServer;
+  let publisherCalls = 0;
+  const operationsFile = path.join(testDataDir, 'lost-response-alias-operations.json');
+  try {
+    fixture = createPublishStateFixture({
+      key: 'lost-response-alias',
+      planDate: '2099-06-12',
+      selectedPlatforms: ['zhihu'],
+      contentStatus: '已排版',
+      planStatus: '已排版',
+    });
+    testServer = createDashboardServer({
+      operationsFile,
+      preflight: async () => null,
+      platformPublisher: async () => {
+        publisherCalls += 1;
+        return { output: '', info: { status: 'success', message: 'published once' } };
+      },
+    });
+    const port = await listenOnRandomPort(testServer);
+    const endpoint = `http://127.0.0.1:${port}/api/content/${fixture.id}/publish-platform`;
+    const publish = operationId => workbenchFetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId }),
+    });
+
+    const lostResponse = await publish('lost-response-operation-0001');
+    assert.equal(lostResponse.status, 200);
+    await lostResponse.body?.cancel();
+    let response = await publish('lost-response-operation-0002');
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).cached, true);
+    let document = JSON.parse(fs.readFileSync(operationsFile, 'utf8'));
+    assert.equal(document.records.find(record => record.operationId === 'lost-response-operation-0002').aliasOf, 'lost-response-operation-0001');
+
+    updateContent(fixture.id, { body: '# Changed after lost response\n\nNew canonical signature.' });
+    response = await publish('lost-response-operation-0002');
+    assert.equal(response.status, 409);
+    assert.match((await response.json()).error, /operationId|内容版本|发布参数/);
+    assert.equal(publisherCalls, 1);
+    document = JSON.parse(fs.readFileSync(operationsFile, 'utf8'));
+    assert.equal(document.records.filter(record => record.operationId === 'lost-response-operation-0002').length, 1);
   } finally {
     await closeServer(testServer);
     cleanupPublishStateFixture(fixture);

@@ -173,6 +173,7 @@ const CONTENT_TYPES = ['行业分析', '案例复盘', '方法论', '清单指�
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 const MAX_IMPORTED_BODY_BYTES = 5 * 1024 * 1024;
 const MAX_IMPORT_REQUEST_BYTES = 32 * 1024 * 1024;
+const PUBLISH_EXECUTION_META = Symbol('publisher-dashboard.publish-execution');
 const canonicalTurndown = new TurndownService({
   headingStyle: 'atx',
   bulletListMarker: '-',
@@ -335,7 +336,7 @@ function createOperationJournal(options = {}) {
     begin(operationId, signature) {
       const canonicalSignature = normalizeOperationSignature(signature);
       const signatureKey = operationSignatureKey(canonicalSignature);
-      const pruned = reloadAndPrune();
+      reloadAndPrune();
 
       const existing = records.find(record => record.operationId === operationId);
       if (existing) {
@@ -362,8 +363,32 @@ function createOperationJournal(options = {}) {
       }
       const completed = matchingSignature.find(record => record.state === 'completed');
       if (completed) {
-        if (pruned) persist();
-        return { kind: 'replay', record: completed };
+        const timestamp = operationTimestamp(nowMs);
+        const alias = {
+          operationId,
+          signature: canonicalSignature,
+          state: 'completed',
+          result: normalizeJournalResult(completed.result),
+          aliasOf: completed.aliasOf || completed.operationId,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          completedAt: timestamp,
+        };
+        if (records.length >= limit) {
+          const removable = records
+            .filter(record => record.state !== 'running' && record.state !== 'uncertain')
+            .sort((left, right) => Date.parse(left.updatedAt || left.createdAt || 0) - Date.parse(right.updatedAt || right.createdAt || 0));
+          while (records.length >= limit && removable.length) {
+            const oldest = removable.shift();
+            records = records.filter(record => record !== oldest);
+          }
+        }
+        if (records.length >= limit) {
+          throw statusError('已完成操作无法安全写入回放别名，请使用原 operationId 查询结果', 409);
+        }
+        records.push(alias);
+        persist();
+        return { kind: 'replay', record: alias };
       }
       if (records.length >= limit) {
         records = records.filter(record => record.state === 'running' || record.state === 'uncertain');
@@ -2552,6 +2577,7 @@ async function publishContent(contentId, platforms = [], options = {}) {
 
   const finalResults = {};
   const rawOutputs = [];
+  let publisherCallsStarted = 0;
   const preflight = options.preflight || browserSessionFailureForPublish;
   const platformPublisher = options.platformPublisher || publishOnePlatform;
   for (const platform of selected) {
@@ -2562,8 +2588,18 @@ async function publishContent(contentId, platforms = [], options = {}) {
       continue;
     }
 
+    publisherCallsStarted += 1;
     if (typeof options.onPublisherStart === 'function') options.onPublisherStart(platform);
-    const single = await platformPublisher(markdownFile, platform, content.title, publishMode);
+    let single;
+    try {
+      single = await platformPublisher(markdownFile, platform, content.title, publishMode);
+    } catch (error) {
+      Object.defineProperty(error, PUBLISH_EXECUTION_META, {
+        value: { publisherCallsStarted },
+        enumerable: false,
+      });
+      throw error;
+    }
     finalResults[platform] = single.info;
     rawOutputs.push(single.output);
   }
@@ -2616,10 +2652,15 @@ async function publishContent(contentId, platforms = [], options = {}) {
 
   const activityVerb = publishMode === 'draft' ? '保存平台草稿' : '一键发布';
   addActivity(`${activityVerb}《${content.title}》到 ${selected.length} 个平台，成功 ${successCount} 个`, 'publish_job', jobId, '运营');
-  return {
+  const result = {
     job: normalizeJob(one('SELECT * FROM publish_jobs WHERE id = ?', jobId)),
     rawOutput: rawOutputs.join('\n\n'),
   };
+  Object.defineProperty(result, PUBLISH_EXECUTION_META, {
+    value: { publisherCallsStarted, successCount, jobStatus },
+    enumerable: false,
+  });
+  return result;
 }
 
 function recordCommand(type, text, progress, status = 'success', result = null) {
@@ -2925,10 +2966,18 @@ function createDashboardServer(options = {}) {
         updateAggregateStatus,
         onPublisherStart: () => { publisherStarted = true; },
       });
-      operationJournal.complete(operationId, journalResultForPublish(result));
+      const execution = result[PUBLISH_EXECUTION_META] || {};
+      const journalResult = journalResultForPublish(result);
+      if (result.job?.status === 'failed') {
+        if (execution.publisherCallsStarted > 0) operationJournal.markUncertain(operationId, journalResult);
+        else operationJournal.fail(operationId, journalResult);
+      } else {
+        operationJournal.complete(operationId, journalResult);
+      }
       return { ...result, cached: false };
     } catch (error) {
-      if (publisherStarted) operationJournal.markUncertain(operationId);
+      const execution = error?.[PUBLISH_EXECUTION_META] || {};
+      if (publisherStarted || execution.publisherCallsStarted > 0) operationJournal.markUncertain(operationId);
       else operationJournal.fail(operationId);
       throw error;
     }
