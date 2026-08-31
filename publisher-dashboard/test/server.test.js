@@ -1,8 +1,41 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const { after, test } = require('node:test');
+const nativeFetch = globalThis.fetch;
+
+async function workbenchFetch(input, options = {}) {
+  const target = new URL(input);
+  const method = String(options.method || 'GET').toUpperCase();
+  const headers = new Headers(options.headers || {});
+  if (method === 'POST') {
+    const bootstrap = await nativeFetch(`${target.origin}/api/bootstrap`, {
+      headers: { Origin: target.origin },
+    });
+    const bootstrapBody = await bootstrap.json();
+    headers.set('Origin', target.origin);
+    headers.set('X-Workbench-CSRF', bootstrapBody.data.csrfToken);
+  }
+  return nativeFetch(input, { ...options, headers });
+}
+
+function rawHttpRequest(input, options = {}) {
+  return new Promise((resolve, reject) => {
+    const request = http.request(input, options, response => {
+      const chunks = [];
+      response.on('data', chunk => chunks.push(chunk));
+      response.on('end', () => resolve({
+        status: response.statusCode,
+        headers: response.headers,
+        body: Buffer.concat(chunks).toString('utf8'),
+      }));
+    });
+    request.on('error', reject);
+    request.end(options.body || '');
+  });
+}
 
 const testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'publisher-dashboard-test-'));
 process.env.PUBLISHER_DB = path.join(testDataDir, 'publisher.sqlite');
@@ -179,6 +212,170 @@ function successfulPlatformPublisher(calls = []) {
     };
   };
 }
+
+test('local API requires trusted origin and per-server CSRF for mutations', async () => {
+  let imported;
+  let firstServer;
+  let secondServer;
+  let publisherCalls = 0;
+  try {
+    firstServer = createDashboardServer({
+      preflight: async () => null,
+      platformPublisher: async () => {
+        publisherCalls += 1;
+        return { output: '', info: { status: 'success', message: 'csrf publish success' } };
+      },
+    });
+    secondServer = createDashboardServer();
+    const firstPort = await listenOnRandomPort(firstServer);
+    const secondPort = await listenOnRandomPort(secondServer);
+    const firstOrigin = `http://127.0.0.1:${firstPort}`;
+    const secondOrigin = `http://127.0.0.1:${secondPort}`;
+
+    const firstBootstrap = await nativeFetch(`${firstOrigin}/api/bootstrap`, { headers: { Origin: firstOrigin } });
+    const firstBootstrapBody = await firstBootstrap.json();
+    const secondBootstrap = await nativeFetch(`${secondOrigin}/api/bootstrap`, { headers: { Origin: secondOrigin } });
+    const secondBootstrapBody = await secondBootstrap.json();
+    const firstToken = firstBootstrapBody.data.csrfToken;
+    assert.equal(firstBootstrap.status, 200);
+    assert.match(firstToken, /^[A-Za-z0-9_-]{32,}$/);
+    assert.notEqual(firstToken, secondBootstrapBody.data.csrfToken);
+    assert.notEqual(firstBootstrap.headers.get('access-control-allow-origin'), '*');
+
+    let rawResponse = await rawHttpRequest(`${firstOrigin}/api/bootstrap`, {
+      headers: { Host: `attacker.invalid:${firstPort}` },
+    });
+    assert.equal(rawResponse.status, 403);
+    rawResponse = await rawHttpRequest(`${firstOrigin}/api/bootstrap`, {
+      headers: {
+        Host: `attacker.invalid:${firstPort}`,
+        Origin: `http://attacker.invalid:${firstPort}`,
+      },
+    });
+    assert.equal(rawResponse.status, 403);
+
+    const importEndpoint = `${firstOrigin}/api/content/import`;
+    const importBody = JSON.stringify({ filename: 'csrf.md', body: '# CSRF 文章\n\n正文' });
+    let response = await nativeFetch(importEndpoint, {
+      method: 'POST',
+      headers: { Origin: firstOrigin, 'Content-Type': 'application/json' },
+      body: importBody,
+    });
+    assert.equal(response.status, 403);
+
+    response = await nativeFetch(importEndpoint, {
+      method: 'POST',
+      headers: {
+        Origin: 'http://attacker.invalid',
+        'Content-Type': 'text/plain',
+        'X-Workbench-CSRF': firstToken,
+      },
+      body: importBody,
+    });
+    assert.equal(response.status, 403);
+    assert.notEqual(response.headers.get('access-control-allow-origin'), '*');
+
+    response = await nativeFetch(importEndpoint, {
+      method: 'POST',
+      headers: {
+        Origin: `${firstOrigin}/not-an-origin`,
+        'Content-Type': 'application/json',
+        'X-Workbench-CSRF': firstToken,
+      },
+      body: importBody,
+    });
+    assert.equal(response.status, 403);
+
+    response = await nativeFetch(importEndpoint, {
+      method: 'POST',
+      headers: {
+        Origin: firstOrigin,
+        'Content-Type': 'application/json',
+        'X-Workbench-CSRF': 'wrong-token',
+      },
+      body: importBody,
+    });
+    assert.equal(response.status, 403);
+
+    response = await nativeFetch(importEndpoint, {
+      method: 'POST',
+      headers: {
+        Origin: firstOrigin,
+        'Content-Type': 'application/json',
+        'X-Workbench-CSRF': firstToken,
+      },
+      body: importBody,
+    });
+    const importResult = await response.json();
+    imported = importResult.content;
+    assert.equal(response.status, 200);
+
+    const publishEndpoint = `${firstOrigin}/api/content/${imported.id}/publish-platform`;
+    const publishBody = JSON.stringify({
+      platform: 'zhihu',
+      publishMode: 'direct',
+      operationId: 'csrf-publish-operation-0001',
+    });
+    response = await nativeFetch(publishEndpoint, {
+      method: 'POST',
+      headers: { Origin: firstOrigin, 'Content-Type': 'application/json' },
+      body: publishBody,
+    });
+    assert.equal(response.status, 403);
+    assert.equal(publisherCalls, 0);
+
+    response = await nativeFetch(publishEndpoint, {
+      method: 'POST',
+      headers: {
+        Origin: 'http://attacker.invalid',
+        'Content-Type': 'text/plain',
+        'X-Workbench-CSRF': firstToken,
+      },
+      body: publishBody,
+    });
+    assert.equal(response.status, 403);
+    assert.equal(publisherCalls, 0);
+
+    response = await nativeFetch(publishEndpoint, {
+      method: 'POST',
+      headers: {
+        Origin: firstOrigin,
+        'Content-Type': 'application/json',
+        'X-Workbench-CSRF': firstToken,
+      },
+      body: publishBody,
+    });
+    assert.equal(response.status, 200);
+    assert.equal(publisherCalls, 1);
+
+    response = await nativeFetch(firstOrigin, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'http://attacker.invalid',
+        'Access-Control-Request-Method': 'POST',
+      },
+    });
+    assert.equal(response.status, 403);
+    assert.equal(response.headers.get('access-control-allow-origin'), null);
+
+    const localhostOrigin = `http://localhost:${firstPort}`;
+    response = await nativeFetch(firstOrigin, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: localhostOrigin,
+        'Access-Control-Request-Method': 'POST',
+        'Access-Control-Request-Headers': 'Content-Type, X-Workbench-CSRF',
+      },
+    });
+    assert.equal(response.status, 204);
+    assert.equal(response.headers.get('access-control-allow-origin'), localhostOrigin);
+    assert.match(response.headers.get('access-control-allow-headers') || '', /X-Workbench-CSRF/i);
+  } finally {
+    await closeServer(firstServer);
+    await closeServer(secondServer);
+    cleanupImportedContent(imported);
+  }
+});
 
 test('parsePlatformOutput reads CLI platform list', () => {
   const output = [
@@ -636,7 +833,7 @@ test('GET platform-preview returns structured 504, 503, and 502 errors', async (
     ];
 
     for (const [status, code, message] of expected) {
-      const response = await fetch(endpoint);
+      const response = await workbenchFetch(endpoint);
       const body = await response.json();
       assert.equal(response.status, status);
       assert.equal(body.ok, false);
@@ -677,7 +874,7 @@ test('GET platform-preview returns the injected CLI preview result', async () =>
       },
     });
     const port = await listenOnRandomPort(testServer);
-    const response = await fetch(
+    const response = await workbenchFetch(
       `http://127.0.0.1:${port}/api/content/${encodeURIComponent(content.id)}/platform-preview?platform=xiaohongshu`
     );
 
@@ -710,15 +907,15 @@ test('GET platform-preview maps platform validation to 400 and missing content t
     const port = await listenOnRandomPort(testServer);
     const base = `http://127.0.0.1:${port}/api/content`;
 
-    let response = await fetch(`${base}/${encodeURIComponent(content.id)}/platform-preview`);
+    let response = await workbenchFetch(`${base}/${encodeURIComponent(content.id)}/platform-preview`);
     assert.equal(response.status, 400);
     assert.match((await response.json()).error, /缺少平台/);
 
-    response = await fetch(`${base}/${encodeURIComponent(content.id)}/platform-preview?platform=unknown-platform`);
+    response = await workbenchFetch(`${base}/${encodeURIComponent(content.id)}/platform-preview?platform=unknown-platform`);
     assert.equal(response.status, 400);
     assert.match((await response.json()).error, /平台不存在/);
 
-    response = await fetch(`${base}/missing-content/platform-preview?platform=xiaohongshu`);
+    response = await workbenchFetch(`${base}/missing-content/platform-preview?platform=xiaohongshu`);
     assert.equal(response.status, 404);
     assert.match((await response.json()).error, /内容不存在/);
     assert.equal(runnerCalls, 0);
@@ -883,10 +1080,10 @@ test('POST publish-platform records sequential jobs without changing aggregate c
     const port = await listenOnRandomPort(testServer);
     const endpoint = `http://127.0.0.1:${port}/api/content/${encodeURIComponent(fixture.id)}/publish-platform`;
 
-    let response = await fetch(endpoint, {
+    let response = await workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ platform: ' ZHIHU ', publishMode: 'draft' }),
+      body: JSON.stringify({ platform: ' ZHIHU ', publishMode: 'draft', operationId: 'sequential-operation-0001' }),
     });
     assert.equal(response.status, 200);
     let result = await response.json();
@@ -900,10 +1097,10 @@ test('POST publish-platform records sequential jobs without changing aggregate c
       planStatus: '选题已确认',
     });
 
-    response = await fetch(endpoint, {
+    response = await workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ platform: 'juejin', publishMode: 'direct' }),
+      body: JSON.stringify({ platform: 'juejin', publishMode: 'direct', operationId: 'sequential-operation-0002' }),
     });
     assert.equal(response.status, 200);
     result = await response.json();
@@ -966,15 +1163,15 @@ test('POST publish-platform keeps state stable across concurrent single-platform
     });
     const port = await listenOnRandomPort(testServer);
     const endpoint = `http://127.0.0.1:${port}/api/content/${encodeURIComponent(fixture.id)}/publish-platform`;
-    const request = (platform, publishMode) => fetch(endpoint, {
+    const request = (platform, publishMode, operationId) => workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ platform, publishMode }),
+      body: JSON.stringify({ platform, publishMode, operationId }),
     });
 
     const responses = await Promise.all([
-      request('zhihu', 'draft'),
-      request('juejin', 'direct'),
+      request('zhihu', 'draft', 'concurrent-operation-0001'),
+      request('juejin', 'direct', 'concurrent-operation-0002'),
     ]);
     const payloads = await Promise.all(responses.map(response => response.json()));
 
@@ -1035,28 +1232,102 @@ test('POST publish-platform rejects an in-flight duplicate and releases the guar
     });
     const port = await listenOnRandomPort(testServer);
     const endpoint = `http://127.0.0.1:${port}/api/content/${fixture.id}/publish-platform`;
-    const publish = () => fetch(endpoint, {
+    const publish = operationId => workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct' }),
+      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId }),
     });
 
-    const firstRequest = publish();
+    const operationId = 'in-flight-operation-0001';
+    const firstRequest = publish(operationId);
     await firstEntered;
-    const duplicateResponse = await publish();
+    const duplicateResponse = await publish(operationId);
     assert.equal(duplicateResponse.status, 409);
     assert.match((await duplicateResponse.json()).error, /正在进行|重复发布/);
     assert.equal(calls, 1);
 
     releaseFirst();
     const firstResponse = await firstRequest;
+    const firstResult = await firstResponse.json();
     assert.equal(firstResponse.status, 200);
 
-    const retryResponse = await publish();
+    const retryResponse = await publish(operationId);
+    const retryResult = await retryResponse.json();
     assert.equal(retryResponse.status, 200);
+    assert.equal(retryResult.cached, true);
+    assert.equal(retryResult.job.id, firstResult.job.id);
+    assert.equal(calls, 1);
+
+    const conflictingResponse = await workbenchFetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        platform: 'juejin',
+        publishMode: 'direct',
+        operationId,
+      }),
+    });
+    assert.equal(conflictingResponse.status, 409);
+
+    const newOperationResponse = await publish('in-flight-operation-0002');
+    assert.equal(newOperationResponse.status, 200);
     assert.equal(calls, 2);
   } finally {
     releaseFirst?.();
+    await closeServer(testServer);
+    cleanupPublishStateFixture(fixture);
+  }
+});
+
+test('single publish completed cache expires by TTL and evicts oldest entries when bounded', async () => {
+  let fixture;
+  let testServer;
+  let currentTime = 1_000;
+  let calls = 0;
+  try {
+    fixture = createPublishStateFixture({
+      key: 'single-platform-cache-policy',
+      planDate: '2099-06-06',
+      selectedPlatforms: ['weixin'],
+      contentStatus: '已排版',
+      planStatus: '已排版',
+    });
+    testServer = createDashboardServer({
+      preflight: async () => null,
+      singlePublishCacheTtlMs: 50,
+      singlePublishCacheLimit: 1,
+      nowMs: () => currentTime,
+      platformPublisher: async () => {
+        calls += 1;
+        return { output: '', info: { status: 'success', message: `cache call ${calls}` } };
+      },
+    });
+    const port = await listenOnRandomPort(testServer);
+    const endpoint = `http://127.0.0.1:${port}/api/content/${fixture.id}/publish-platform`;
+    const publish = operationId => workbenchFetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId }),
+    });
+
+    let response = await publish('cache-policy-operation-0001');
+    assert.equal(response.status, 200);
+    response = await publish('cache-policy-operation-0001');
+    assert.equal((await response.json()).cached, true);
+    assert.equal(calls, 1);
+
+    currentTime += 51;
+    response = await publish('cache-policy-operation-0001');
+    assert.equal(response.status, 200);
+    assert.equal(calls, 2);
+
+    response = await publish('cache-policy-operation-0002');
+    assert.equal(response.status, 200);
+    assert.equal(calls, 3);
+    response = await publish('cache-policy-operation-0001');
+    assert.equal(response.status, 200);
+    assert.equal(calls, 4);
+  } finally {
     await closeServer(testServer);
     cleanupPublishStateFixture(fixture);
   }
@@ -1077,18 +1348,21 @@ test('POST publish-platform validates one known platform, mode, body, and conten
     });
     const port = await listenOnRandomPort(testServer);
     const endpoint = `http://127.0.0.1:${port}/api/content/${encodeURIComponent(content.id)}/publish-platform`;
+    const operationId = 'validation-operation-0001';
     const invalidCases = [
-      [{ publishMode: 'draft' }, /必须且只能指定一个平台/],
-      [{ platform: ['zhihu'], publishMode: 'draft' }, /必须且只能指定一个平台/],
-      [{ platform: 'zhihu,juejin', publishMode: 'draft' }, /必须且只能指定一个平台/],
-      [{ platform: 'unknown-platform', publishMode: 'draft' }, /平台不存在/],
-      [{ platform: 'zhihu' }, /publishMode.*draft.*direct/],
-      [{ platform: 'zhihu', publishMode: 'scheduled' }, /publishMode.*draft.*direct/],
+      [{ publishMode: 'draft', operationId }, /必须且只能指定一个平台/],
+      [{ platform: ['zhihu'], publishMode: 'draft', operationId }, /必须且只能指定一个平台/],
+      [{ platform: 'zhihu,juejin', publishMode: 'draft', operationId }, /必须且只能指定一个平台/],
+      [{ platform: 'unknown-platform', publishMode: 'draft', operationId }, /平台不存在/],
+      [{ platform: 'zhihu', operationId }, /publishMode.*draft.*direct/],
+      [{ platform: 'zhihu', publishMode: 'scheduled', operationId }, /publishMode.*draft.*direct/],
+      [{ platform: 'zhihu', publishMode: 'draft' }, /operationId/],
+      [{ platform: 'zhihu', publishMode: 'draft', operationId: 'bad operation id' }, /operationId/],
       [[], /JSON 对象/],
     ];
 
     for (const [body, messagePattern] of invalidCases) {
-      const response = await fetch(endpoint, {
+      const response = await workbenchFetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -1097,7 +1371,7 @@ test('POST publish-platform validates one known platform, mode, body, and conten
       assert.match((await response.json()).error, messagePattern);
     }
 
-    const malformedResponse = await fetch(endpoint, {
+    const malformedResponse = await workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: '{"platform":',
@@ -1105,12 +1379,12 @@ test('POST publish-platform validates one known platform, mode, body, and conten
     assert.equal(malformedResponse.status, 400);
     assert.match((await malformedResponse.json()).error, /JSON 格式无效/);
 
-    const missingResponse = await fetch(
+    const missingResponse = await workbenchFetch(
       `http://127.0.0.1:${port}/api/content/missing-content/publish-platform`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct' }),
+        body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId }),
       }
     );
     assert.equal(missingResponse.status, 404);
@@ -1144,7 +1418,7 @@ test('POST /api/publish keeps the existing batch publisher contract', async () =
       platformPublisher: successfulPlatformPublisher(platformCalls),
     });
     const port = await listenOnRandomPort(testServer);
-    let response = await fetch(`http://127.0.0.1:${port}/api/publish`, {
+    let response = await workbenchFetch(`http://127.0.0.1:${port}/api/publish`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1171,7 +1445,7 @@ test('POST /api/publish keeps the existing batch publisher contract', async () =
       planStatus: '已发布',
     });
 
-    response = await fetch(`http://127.0.0.1:${port}/api/publish`, {
+    response = await workbenchFetch(`http://127.0.0.1:${port}/api/publish`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1284,7 +1558,7 @@ test('content update endpoint and bootstrap normalize unsafe canonical bodies', 
     testServer = createDashboardServer();
     const port = await listenOnRandomPort(testServer);
     const unsafeBody = '<p id="legacy" style="color:red" onclick="alert(1)" data-action="publish">可见正文</p><script>alert(1)</script>';
-    const updateResponse = await fetch(`http://127.0.0.1:${port}/api/content/${content.id}`, {
+    const updateResponse = await workbenchFetch(`http://127.0.0.1:${port}/api/content/${content.id}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ body: unsafeBody }),
@@ -1295,7 +1569,7 @@ test('content update endpoint and bootstrap normalize unsafe canonical bodies', 
     assert.equal(updateResult.content.body, '<p>可见正文</p>');
 
     db.prepare('UPDATE contents SET body = ? WHERE id = ?').run(unsafeBody, content.id);
-    const bootstrapResponse = await fetch(`http://127.0.0.1:${port}/api/bootstrap`);
+    const bootstrapResponse = await workbenchFetch(`http://127.0.0.1:${port}/api/bootstrap`);
     const bootstrapResult = await bootstrapResponse.json();
     const legacyContent = bootstrapResult.data.contents.find(item => item.id === content.id);
     assert.equal(bootstrapResponse.status, 200);
@@ -2137,7 +2411,7 @@ test('POST /api/content/import imports and returns content', async () => {
 
   try {
     const { port } = server.address();
-    const response = await fetch(`http://127.0.0.1:${port}/api/content/import`, {
+    const response = await workbenchFetch(`http://127.0.0.1:${port}/api/content/import`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ filename: 'endpoint.md', title, body: '# 被覆盖标题\n\n端点正文' }),
@@ -2177,7 +2451,7 @@ test('POST /api/content/import returns validation and request-size status codes'
   try {
     const { port } = server.address();
     const endpoint = `http://127.0.0.1:${port}/api/content/import`;
-    const post = (url, body) => fetch(url, {
+    const post = (url, body) => workbenchFetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body,

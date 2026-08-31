@@ -51,6 +51,24 @@ test('client format inference treats .txt as authoritative', () => {
   assert.equal(inferImportFormat('article.html', '# markdown heading'), 'html');
 });
 
+test('request sends the bootstrap CSRF token on mutations only', async () => {
+  const source = extractFunctionSource('request', 'loadLayoutTemplates');
+  assert.ok(source);
+  const calls = [];
+  const request = vm.runInNewContext(`(${source})`, {
+    API: 'http://127.0.0.1:18810',
+    state: { workbenchCsrfToken: 'csrf-token-for-test' },
+    fetch: async (url, options) => {
+      calls.push({ url, options });
+      return { json: async () => ({ ok: true }) };
+    },
+  });
+  await request('/api/content/import', { method: 'POST', body: '{}' });
+  await request('/api/bootstrap');
+  assert.equal(calls[0].options.headers['X-Workbench-CSRF'], 'csrf-token-for-test');
+  assert.equal(calls[1].options.headers['X-Workbench-CSRF'], undefined);
+});
+
 test('defensive client sanitizer removes active content while keeping safe article and code markup', () => {
   const source = extractFunctionSource('sanitizeClientCanonicalHtml', 'editableArticleHtml');
   assert.ok(source, '缺少客户端 canonical HTML 防御性净化函数');
@@ -92,6 +110,90 @@ test('single publish operation token rejects overlap and stale completion', () =
   assert.equal(finishSinglePublishOperation(publishState, first.token), true);
   assert.equal(publishState.singlePublishSubmitting, false);
   assert.equal(canCancelSinglePublish(publishState), true);
+});
+
+test('opening publish confirmation creates an immutable operationId', () => {
+  const createSource = extractFunctionSource('createPublishOperationId', 'beginSinglePublishOperation');
+  const openSource = extractFunctionSource('openSinglePublishConfirmation', 'cancelSinglePublish');
+  assert.ok(createSource && openSource);
+  const createPublishOperationId = vm.runInNewContext(`(${createSource})`, {
+    crypto: { randomUUID: () => '12345678-1234-4123-8123-123456789abc' },
+  });
+  const state = {
+    singlePublishSubmitting: false,
+    pendingSinglePublish: null,
+    data: { contents: [{ id: 'c1', title: '确认文章' }] },
+  };
+  const dialog = { showModal: () => {} };
+  const fields = {
+    '#single-publish-article': { textContent: '' },
+    '#single-publish-platform': { textContent: '' },
+    '#single-publish-mode': { textContent: '' },
+    '#platform-publish-dialog': dialog,
+  };
+  const openSinglePublishConfirmation = vm.runInNewContext(`(${openSource})`, {
+    state,
+    canCancelSinglePublish: publishState => !publishState.singlePublishSubmitting,
+    createPublishOperationId,
+    toast: () => {},
+    $: selector => fields[selector],
+    platformName: platform => platform,
+    setSinglePublishFeedback: () => {},
+  });
+  assert.equal(openSinglePublishConfirmation({ contentId: 'c1', platform: 'zhihu', mode: 'direct' }), true);
+  assert.equal(state.pendingSinglePublish.operationId, '12345678-1234-4123-8123-123456789abc');
+  assert.equal(Object.isFrozen(state.pendingSinglePublish), true);
+});
+
+test('full publish confirmation stays successful when post-success refresh fails', async () => {
+  const source = extractFunctionSource('confirmSinglePlatformPublish', 'hasDirtyCanonicalContent');
+  const beginSource = extractFunctionSource('beginSinglePublishOperation', 'finishSinglePublishOperation');
+  const finishSource = extractFunctionSource('finishSinglePublishOperation', 'canCancelSinglePublish');
+  assert.ok(source && beginSource && finishSource);
+  const beginSinglePublishOperation = vm.runInNewContext(`(${beginSource})`);
+  const finishSinglePublishOperation = vm.runInNewContext(`(${finishSource})`);
+  const state = {
+    pendingSinglePublish: Object.freeze({
+      contentId: 'c1',
+      platform: 'zhihu',
+      mode: 'direct',
+      operationId: 'full-confirm-operation-0001',
+    }),
+    singlePublishSubmitting: false,
+    singlePublishOperationToken: '',
+    singlePublishOperationSequence: 0,
+  };
+  const events = [];
+  let requestBody;
+  const dialog = { close: () => events.push('close') };
+  const confirmSinglePlatformPublish = vm.runInNewContext(`(${source})`, {
+    state,
+    beginSinglePublishOperation,
+    finishSinglePublishOperation,
+    setSinglePublishBusy: busy => events.push(`busy:${busy}`),
+    setSinglePublishFeedback: message => events.push(`feedback:${message}`),
+    platformName: platform => platform,
+    $: selector => selector.startsWith('[data-content-body') ? null : dialog,
+    request: async (url, options) => {
+      events.push('post-success');
+      requestBody = JSON.parse(options.body);
+      return { job: { results: [{ platform: 'zhihu', status: 'success', message: 'published' }] } };
+    },
+    loadData: async () => {
+      events.push('refresh-failed');
+      throw new Error('refresh offline');
+    },
+    toast: (message, type) => events.push(`toast:${type || 'ok'}:${message}`),
+    encodeURIComponent,
+  });
+
+  assert.equal(await confirmSinglePlatformPublish(), true);
+  assert.equal(requestBody.operationId, 'full-confirm-operation-0001');
+  assert.equal(state.pendingSinglePublish, null);
+  assert.equal(state.singlePublishSubmitting, false);
+  assert.ok(events.indexOf('close') < events.indexOf('refresh-failed'));
+  assert.ok(events.some(event => event.includes('发布成功，但列表刷新失败')));
+  assert.equal(events.some(event => event.includes('平台操作失败')), false);
 });
 
 test('publish dialog cancel handler blocks Escape while an operation is busy', () => {
@@ -187,6 +289,93 @@ test('dirty transition saves first and never calls transition after save failure
     hasDirtyCanonicalContent: () => false,
   });
   assert.equal(cleanUnload({ preventDefault: () => { prevented += 1; } }), undefined);
+});
+
+function importFlowDocument() {
+  const nodes = {
+    '#import-content-input': { value: '# 新文章\n\n正文' },
+    '#import-title-input': { value: '新文章' },
+    '[data-action="submit-import"]': { disabled: false, textContent: '导入并打开' },
+    '#import-dialog': { closeCalls: 0, close() { this.closeCalls += 1; } },
+  };
+  return { nodes, $: selector => nodes[selector] || null };
+}
+
+test('full submitImport flow does not post when dirty canonical save fails', async () => {
+  const source = extractFunctionSource('submitImport', 'chooseRandomWechatTemplate');
+  assert.ok(source);
+  const { nodes, $ } = importFlowDocument();
+  const state = {
+    importSubmitting: false,
+    importTab: 'paste',
+    importFileName: '',
+    selectedContentId: 'current-content',
+  };
+  let requests = 0;
+  let feedback = '';
+  const submitImport = vm.runInNewContext(`(${source})`, {
+    state,
+    $,
+    importedBodyByteLength: value => value.length,
+    MAX_IMPORT_FILE_BYTES: 5 * 1024 * 1024,
+    inferImportFormat: () => 'markdown',
+    runContentTransition: async () => false,
+    request: async () => { requests += 1; },
+    setImportFeedback: message => { feedback = message; },
+    resetImportDialog: () => {},
+    loadData: async () => {},
+    switchView: () => {},
+    toast: () => {},
+  });
+
+  assert.equal(await submitImport(), false);
+  assert.equal(requests, 0);
+  assert.equal(state.selectedContentId, 'current-content');
+  assert.equal(nodes['#import-dialog'].closeCalls, 0);
+  assert.equal(nodes['#import-content-input'].value, '# 新文章\n\n正文');
+  assert.match(feedback, /保存失败|未导入/);
+});
+
+test('full submitImport flow posts and selects content after dirty guard succeeds', async () => {
+  const source = extractFunctionSource('submitImport', 'chooseRandomWechatTemplate');
+  assert.ok(source);
+  const { nodes, $ } = importFlowDocument();
+  const state = {
+    importSubmitting: false,
+    importTab: 'paste',
+    importFileName: '',
+    selectedContentId: 'current-content',
+  };
+  const events = [];
+  let requestBody;
+  const submitImport = vm.runInNewContext(`(${source})`, {
+    state,
+    $,
+    importedBodyByteLength: value => value.length,
+    MAX_IMPORT_FILE_BYTES: 5 * 1024 * 1024,
+    inferImportFormat: () => 'markdown',
+    runContentTransition: async transition => {
+      events.push('dirty-saved');
+      return transition();
+    },
+    request: async (url, options) => {
+      events.push('import-posted');
+      requestBody = JSON.parse(options.body);
+      return { content: { id: 'imported-content', title: '新文章' } };
+    },
+    setImportFeedback: () => {},
+    resetImportDialog: () => events.push('dialog-reset'),
+    loadData: async () => events.push('data-loaded'),
+    switchView: view => events.push(`view:${view}`),
+    toast: () => {},
+  });
+
+  assert.equal(await submitImport(), true);
+  assert.deepEqual(events.slice(0, 2), ['dirty-saved', 'import-posted']);
+  assert.equal(requestBody.format, 'markdown');
+  assert.equal(state.selectedContentId, 'imported-content');
+  assert.equal(nodes['#import-dialog'].closeCalls, 1);
+  assert.ok(events.includes('view:content'));
 });
 
 test('import read token aborts stale readers and only applies the latest result', () => {

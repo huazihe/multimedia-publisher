@@ -355,7 +355,12 @@ test('implements import, lazy adaptation preview, templated WeChat layout, and s
   assert.match(appSource, /if\s*\((?:templateProvided\s*&&\s*)?!template\)\s*(?:\{|)\s*throw\s+new Error/);
   assert.match(appSource, /mode:\s*['"]draft['"]/);
   assert.match(appSource, /mode:\s*['"]direct['"]/);
-  assert.match(appSource, /await loadData\(\)[\s\S]*?platformResult\?\.status === ['"]success['"]/, '单平台结果必须回载数据后再按真实状态提示');
+  assert.match(appSource, /operationId:\s*operation\.operationId/);
+  assert.match(appSource, /platform-publish-dialog['"]\)\.close\(\)[\s\S]*?await loadData\(\)/, '发布成功必须先关闭确认框再刷新数据');
+  assert.match(appSource, /发布成功，但列表刷新失败/);
+  assert.match(appSource, /workbenchCsrfToken/);
+  assert.match(appSource, /X-Workbench-CSRF/);
+  assert.match(appSource, /state\.workbenchCsrfToken\s*=\s*res\.data\.csrfToken/);
   assert.match(appSource, /selected\s*&&\s*state\.activeView === ['"]content['"]/, '平台预览只应在内容中心激活时懒加载');
 });
 

@@ -4,7 +4,7 @@ const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { randomBytes } = require('node:crypto');
+const { randomBytes, timingSafeEqual } = require('node:crypto');
 const { execFile, spawn } = require('child_process');
 const net = require('net');
 const { DatabaseSync } = require('node:sqlite');
@@ -186,6 +186,40 @@ function statusError(message, statusCode) {
   const error = new Error(message);
   error.statusCode = statusCode;
   return error;
+}
+
+function loopbackHostname(hostname) {
+  const normalized = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1';
+}
+
+function requestOriginIsTrusted(req, originHeader) {
+  if (!req.headers.host) return false;
+  try {
+    const requestHost = new URL(`http://${req.headers.host}`);
+    if (!loopbackHostname(requestHost.hostname)) return false;
+    if (!originHeader) return true;
+    if (originHeader === 'null') return false;
+    const origin = new URL(originHeader);
+    if (origin.protocol !== 'http:'
+      || origin.username
+      || origin.password
+      || origin.pathname !== '/'
+      || origin.search
+      || origin.hash
+      || !loopbackHostname(origin.hostname)) return false;
+    return origin.port === requestHost.port;
+  } catch {
+    return false;
+  }
+}
+
+function csrfTokenMatches(expected, supplied) {
+  if (typeof supplied !== 'string') return false;
+  const expectedBuffer = Buffer.from(expected);
+  const suppliedBuffer = Buffer.from(supplied);
+  return expectedBuffer.length === suppliedBuffer.length
+    && timingSafeEqual(expectedBuffer, suppliedBuffer);
 }
 
 function makeId(prefix) {
@@ -2458,7 +2492,6 @@ function readBody(req, options = {}) {
 function sendJson(res, data, code = 200) {
   res.writeHead(code, {
     'Content-Type': 'application/json; charset=utf-8',
-    'Access-Control-Allow-Origin': '*',
   });
   res.end(JSON.stringify(data));
 }
@@ -2569,15 +2602,41 @@ function createDashboardServer(options = {}) {
     ...(options.preflight ? { preflight: options.preflight } : {}),
     ...(options.platformPublisher ? { platformPublisher: options.platformPublisher } : {}),
   };
-  const inFlightSinglePlatformPublishes = new Set();
+  const inFlightSinglePlatformPublishes = new Map();
+  const inFlightSinglePlatformSignatures = new Set();
+  const completedSinglePlatformPublishes = new Map();
+  const completedPublishTtlMs = Number.isFinite(options.singlePublishCacheTtlMs)
+    ? Math.max(1, options.singlePublishCacheTtlMs)
+    : 10 * 60 * 1000;
+  const completedPublishLimit = Number.isInteger(options.singlePublishCacheLimit)
+    ? Math.max(1, options.singlePublishCacheLimit)
+    : 128;
+  const nowMs = typeof options.nowMs === 'function' ? options.nowMs : Date.now;
+  const workbenchCsrfToken = randomBytes(32).toString('base64url');
 
   return http.createServer(async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  const origin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
+  if (!requestOriginIsTrusted(req, origin)) {
+    sendJson(res, { ok: false, error: 'Origin 不受信任' }, 403);
+    return;
+  }
+  if (origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  }
   if (req.method === 'OPTIONS') {
+    if (!origin) {
+      sendJson(res, { ok: false, error: 'OPTIONS 请求缺少可信 Origin' }, 403);
+      return;
+    }
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Workbench-CSRF');
     res.writeHead(204);
     res.end();
+    return;
+  }
+  if (req.method === 'POST' && !csrfTokenMatches(workbenchCsrfToken, req.headers['x-workbench-csrf'])) {
+    sendJson(res, { ok: false, error: 'Workbench CSRF 校验失败' }, 403);
     return;
   }
 
@@ -2595,7 +2654,7 @@ function createDashboardServer(options = {}) {
     }
 
     if (url.pathname === '/api/bootstrap' && req.method === 'GET') {
-      sendJson(res, { ok: true, data: getDashboardData() });
+      sendJson(res, { ok: true, data: { ...getDashboardData(), csrfToken: workbenchCsrfToken } });
       return;
     }
 
@@ -2834,16 +2893,37 @@ function createDashboardServer(options = {}) {
       if (body.publishMode !== 'draft' && body.publishMode !== 'direct') {
         throw statusError('publishMode 必须是 draft 或 direct', 400);
       }
+      if (typeof body.operationId !== 'string'
+        || !/^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/.test(body.operationId)) {
+        throw statusError('operationId 必须是 16-128 位字母、数字、下划线或连字符', 400);
+      }
+      const operationId = body.operationId;
       const contentId = singlePlatformPublishMatch[1];
       if (!one('SELECT id FROM contents WHERE id = ?', contentId)) {
         throw statusError('内容不存在', 404);
       }
 
-      const operationKey = JSON.stringify([contentId, platform, body.publishMode]);
-      if (inFlightSinglePlatformPublishes.has(operationKey)) {
+      const operationSignature = JSON.stringify([contentId, platform, body.publishMode]);
+      const currentTime = nowMs();
+      for (const [cachedOperationId, cached] of completedSinglePlatformPublishes) {
+        if (cached.expiresAt <= currentTime) completedSinglePlatformPublishes.delete(cachedOperationId);
+      }
+      const completed = completedSinglePlatformPublishes.get(operationId);
+      if (completed) {
+        if (completed.signature !== operationSignature) {
+          throw statusError('operationId 已用于其他发布参数', 409);
+        }
+        sendJson(res, { ok: true, ...completed.result, cached: true });
+        return;
+      }
+      if (inFlightSinglePlatformPublishes.has(operationId)) {
+        throw statusError('相同 operationId 的发布正在进行，请勿重复提交', 409);
+      }
+      if (inFlightSinglePlatformSignatures.has(operationSignature)) {
         throw statusError('相同内容的平台发布正在进行，请勿重复提交', 409);
       }
-      inFlightSinglePlatformPublishes.add(operationKey);
+      inFlightSinglePlatformPublishes.set(operationId, operationSignature);
+      inFlightSinglePlatformSignatures.add(operationSignature);
       try {
         const result = await publishContent(contentId, [platform], {
           ...publishDependencies,
@@ -2851,9 +2931,18 @@ function createDashboardServer(options = {}) {
           persistSelection: false,
           updateAggregateStatus: false,
         });
-        sendJson(res, { ok: true, ...result });
+        completedSinglePlatformPublishes.set(operationId, {
+          signature: operationSignature,
+          result,
+          expiresAt: nowMs() + completedPublishTtlMs,
+        });
+        while (completedSinglePlatformPublishes.size > completedPublishLimit) {
+          completedSinglePlatformPublishes.delete(completedSinglePlatformPublishes.keys().next().value);
+        }
+        sendJson(res, { ok: true, ...result, cached: false });
       } finally {
-        inFlightSinglePlatformPublishes.delete(operationKey);
+        inFlightSinglePlatformPublishes.delete(operationId);
+        inFlightSinglePlatformSignatures.delete(operationSignature);
       }
       return;
     }

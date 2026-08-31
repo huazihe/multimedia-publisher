@@ -6,6 +6,22 @@ const os = require('node:os');
 const path = require('node:path');
 const { createRequire } = require('node:module');
 const { after, test } = require('node:test');
+const nativeFetch = globalThis.fetch;
+
+async function workbenchFetch(input, options = {}) {
+  const target = new URL(input);
+  const method = String(options.method || 'GET').toUpperCase();
+  const headers = new Headers(options.headers || {});
+  if (method === 'POST') {
+    const bootstrap = await nativeFetch(`${target.origin}/api/bootstrap`, {
+      headers: { Origin: target.origin },
+    });
+    const bootstrapBody = await bootstrap.json();
+    headers.set('Origin', target.origin);
+    headers.set('X-Workbench-CSRF', bootstrapBody.data.csrfToken);
+  }
+  return nativeFetch(input, { ...options, headers });
+}
 
 const {
   listLayoutTemplates,
@@ -496,7 +512,7 @@ test('POST layout falls back only when template is omitted and rejects explicit 
       body: '# 路由参数校验标题\n\n路由参数校验正文',
     });
     const endpoint = `http://127.0.0.1:${port}/api/content/${content.id}/layout`;
-    const postLayout = templateBody => fetch(endpoint, {
+    const postLayout = templateBody => workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(templateBody),
@@ -529,7 +545,7 @@ test('POST layout returns 400 for malformed template paths and 404 for absent fi
       body: '# 模板错误标题\n\n模板错误正文',
     });
     const endpoint = `http://127.0.0.1:${port}/api/content/${content.id}/layout`;
-    const postTemplate = template => fetch(endpoint, {
+    const postTemplate = template => workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ template }),
@@ -556,7 +572,7 @@ test('GET template list and POST selected layout return preview-compatible full 
   let content;
   const port = await listenOnRandomPort();
   try {
-    const listResponse = await fetch(`http://127.0.0.1:${port}/api/layout-templates`);
+    const listResponse = await workbenchFetch(`http://127.0.0.1:${port}/api/layout-templates`);
     const listResult = await listResponse.json();
     assert.equal(listResponse.status, 200);
     assert.equal(listResult.ok, true);
@@ -568,7 +584,7 @@ test('GET template list and POST selected layout return preview-compatible full 
       summary: '路由排版导语',
       body: '# 路由排版标题\n\n路由排版正文',
     });
-    const layoutResponse = await fetch(`http://127.0.0.1:${port}/api/content/${content.id}/layout`, {
+    const layoutResponse = await workbenchFetch(`http://127.0.0.1:${port}/api/content/${content.id}/layout`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ template: 'style_11.html' }),
@@ -580,7 +596,7 @@ test('GET template list and POST selected layout return preview-compatible full 
     assert.match(layoutResult.content.layout_html, /data-wechat-template="style_11\.html"/);
     assert.equal(db.prepare('SELECT layout_html FROM contents WHERE id = ?').get(content.id).layout_html, layoutResult.content.layout_html);
 
-    const previewResponse = await fetch(`http://127.0.0.1:${port}/content/${content.id}/preview.html`);
+    const previewResponse = await workbenchFetch(`http://127.0.0.1:${port}/content/${content.id}/preview.html`);
     const previewHtml = await previewResponse.text();
     assert.equal(previewResponse.status, 200);
     assert.match(previewHtml, /^<!doctype html>/i);

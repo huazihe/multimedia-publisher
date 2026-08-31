@@ -137,6 +137,7 @@ const PREVIEW_FORMAT_LABELS = {
 const state = {
   activeView: 'dashboard',
   data: null,
+  workbenchCsrfToken: '',
   activeEmployeeId: getStoredEmployeeId(),
   employeeMenuOpen: false,
   selectedDate: '',
@@ -388,9 +389,14 @@ function toast(message, type = '') {
 }
 
 async function request(path, options = {}) {
+  const method = String(options.method || 'GET').toUpperCase();
+  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && state.workbenchCsrfToken) {
+    headers['X-Workbench-CSRF'] = state.workbenchCsrfToken;
+  }
   const res = await fetch(`${API}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
     ...options,
+    headers,
   });
   const data = await res.json().catch(() => ({}));
   if (!data.ok) throw new Error(data.error || `HTTP ${res.status}`);
@@ -435,6 +441,7 @@ async function loadLayoutTemplates() {
 
 async function loadData() {
   const res = await request('/api/bootstrap');
+  state.workbenchCsrfToken = res.data.csrfToken || '';
   state.data = res.data;
   state.selectedDate ||= res.data.today;
   if (!state.planStartDate || !state.planEndDate) {
@@ -1945,20 +1952,33 @@ async function submitImport() {
   state.importSubmitting = true;
   submit.disabled = true;
   submit.textContent = '正在导入…';
-  setImportFeedback('正在创建内容记录…');
+  let importSucceeded = false;
   try {
-    const result = await request('/api/content/import', {
-      method: 'POST',
-      body: JSON.stringify({ filename, title, body, format }),
+    const transitioned = await runContentTransition(async () => {
+      setImportFeedback('正在创建内容记录…');
+      try {
+        const result = await request('/api/content/import', {
+          method: 'POST',
+          body: JSON.stringify({ filename, title, body, format }),
+        });
+        state.selectedContentId = result.content.id;
+        $('#import-dialog').close();
+        resetImportDialog();
+        await loadData();
+        switchView('content');
+        toast(`已导入《${result.content.title}》`);
+        importSucceeded = true;
+        return true;
+      } catch (error) {
+        setImportFeedback(error.message || '文章导入失败', 'error');
+        return false;
+      }
     });
-    state.selectedContentId = result.content.id;
-    $('#import-dialog').close();
-    resetImportDialog();
-    await loadData();
-    switchView('content');
-    toast(`已导入《${result.content.title}》`);
-  } catch (error) {
-    setImportFeedback(error.message || '文章导入失败', 'error');
+    if (!transitioned) {
+      setImportFeedback('当前正文保存失败，未导入文章', 'error');
+      return false;
+    }
+    return importSucceeded;
   } finally {
     state.importSubmitting = false;
     if (submit) {
@@ -2003,6 +2023,13 @@ function retryPlatformPreview(platform) {
   state.previewErrors.delete(platformPreviewKey(content, platform));
   renderPlatformAdaptationPane();
   void loadPlatformPreview(content, platform);
+}
+
+function createPublishOperationId(cryptoSource = crypto) {
+  if (typeof cryptoSource?.randomUUID === 'function') return cryptoSource.randomUUID();
+  const bytes = new Uint8Array(24);
+  cryptoSource.getRandomValues(bytes);
+  return [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
 function beginSinglePublishOperation(publishState, pending) {
@@ -2062,12 +2089,13 @@ function openSinglePublishConfirmation({ contentId, platform, mode }) {
     toast('缺少平台发布信息', 'error');
     return false;
   }
-  state.pendingSinglePublish = {
+  state.pendingSinglePublish = Object.freeze({
     contentId,
     articleTitle: content.title,
     platform,
     mode,
-  };
+    operationId: createPublishOperationId(),
+  });
   $('#single-publish-article').textContent = content.title;
   $('#single-publish-platform').textContent = platformName(platform);
   $('#single-publish-mode').textContent = mode === 'draft' ? '保存平台草稿' : '直接发布';
@@ -2087,6 +2115,7 @@ function cancelSinglePublish() {
 async function confirmSinglePlatformPublish() {
   const operation = beginSinglePublishOperation(state, state.pendingSinglePublish);
   if (!operation) return false;
+  let operationFinished = false;
   setSinglePublishBusy(true);
   setSinglePublishFeedback(`正在${operation.mode === 'draft' ? '保存草稿到' : '发布到'}${platformName(operation.platform)}…`);
   try {
@@ -2095,18 +2124,28 @@ async function confirmSinglePlatformPublish() {
     }
     const result = await request(`/api/content/${encodeURIComponent(operation.contentId)}/publish-platform`, {
       method: 'POST',
-      body: JSON.stringify({ platform: operation.platform, publishMode: operation.mode }),
+      body: JSON.stringify({
+        platform: operation.platform,
+        publishMode: operation.mode,
+        operationId: operation.operationId,
+      }),
     });
     const platformResult = result.job?.results?.find(item => item.platform === operation.platform);
-    await loadData();
     if (state.singlePublishOperationToken !== operation.token) return false;
     $('#platform-publish-dialog').close();
     state.pendingSinglePublish = null;
+    operationFinished = finishSinglePublishOperation(state, operation.token);
+    if (operationFinished) setSinglePublishBusy(false);
     if (platformResult?.status === 'success') {
       const fallback = operation.mode === 'draft' ? '平台草稿已保存' : '平台发布成功';
       toast(`${platformName(operation.platform)}：${platformResult.message || fallback}`);
     } else {
       toast(`${platformName(operation.platform)}：${platformResult?.message || '平台未返回成功结果'}`, 'error');
+    }
+    try {
+      await loadData();
+    } catch {
+      toast('发布成功，但列表刷新失败', 'error');
     }
     return true;
   } catch (error) {
@@ -2116,7 +2155,9 @@ async function confirmSinglePlatformPublish() {
     }
     return false;
   } finally {
-    if (finishSinglePublishOperation(state, operation.token)) setSinglePublishBusy(false);
+    if (!operationFinished && finishSinglePublishOperation(state, operation.token)) {
+      setSinglePublishBusy(false);
+    }
   }
 }
 
