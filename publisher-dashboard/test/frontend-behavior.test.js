@@ -78,11 +78,13 @@ test('defensive client sanitizer removes active content while keeping safe artic
     '<p id="x" style="color:red" onclick="alert(1)" data-action="publish">正文 ',
     '<a href="javascript:alert(1)">链接</a></p>',
     '<img src="data:text/html;base64,PHNjcmlwdD4=" onerror="alert(1)" alt="图">',
+    '<table><tr><th align="left">Name</th><td align="right">Value</td></tr></table>',
     '<script>alert(1)</script><button controls>发布</button>',
     '<pre><code class="language-html">&lt;button data-action="code"&gt;示例&lt;/button&gt;</code></pre>',
   ].join(''), document);
 
   assert.match(sanitized, /<p>正文 <a>链接<\/a><\/p>/);
+  assert.match(sanitized, /<th align="left">Name<\/th><td align="right">Value<\/td>/);
   assert.match(sanitized, /<pre><code class="language-html">/);
   assert.doesNotMatch(sanitized, /<script|<button\b|<[^>]+\s(?:on\w+|style|data-action|id)\s*=|<[^>]+\scontrols(?:\s|>|=)|(?:href|src)="(?:javascript:|data:text\/html)/i);
 });
@@ -113,7 +115,7 @@ test('single publish operation token rejects overlap and stale completion', () =
 });
 
 test('opening publish confirmation creates an immutable operationId', () => {
-  const createSource = extractFunctionSource('createPublishOperationId', 'beginSinglePublishOperation');
+  const createSource = extractFunctionSource('createPublishOperationId', 'beginBatchPublishOperation');
   const openSource = extractFunctionSource('openSinglePublishConfirmation', 'cancelSinglePublish');
   assert.ok(createSource && openSource);
   const createPublishOperationId = vm.runInNewContext(`(${createSource})`, {
@@ -143,6 +145,62 @@ test('opening publish confirmation creates an immutable operationId', () => {
   assert.equal(openSinglePublishConfirmation({ contentId: 'c1', platform: 'zhihu', mode: 'direct' }), true);
   assert.equal(state.pendingSinglePublish.operationId, '12345678-1234-4123-8123-123456789abc');
   assert.equal(Object.isFrozen(state.pendingSinglePublish), true);
+});
+
+test('batch double-click keeps one immutable operationId and sends one publish request', async () => {
+  const createSource = extractFunctionSource('createPublishOperationId', 'beginBatchPublishOperation');
+  const beginSource = extractFunctionSource('beginBatchPublishOperation', 'finishBatchPublishOperation');
+  const finishSource = extractFunctionSource('finishBatchPublishOperation', 'setBatchPublishBusy');
+  const publishSource = extractFunctionSource('publishContent', 'checkAuth');
+  assert.ok(createSource && beginSource && finishSource && publishSource, '缺少批量发布幂等 helpers');
+
+  const createPublishOperationId = vm.runInNewContext(`(${createSource})`, {
+    crypto: { randomUUID: () => 'batch-operation-00000001' },
+  });
+  const beginBatchPublishOperation = vm.runInNewContext(`(${beginSource})`, { createPublishOperationId });
+  const finishBatchPublishOperation = vm.runInNewContext(`(${finishSource})`);
+  const state = {
+    selectedContentId: 'content-batch-double-click',
+    selectedPlatforms: new Set(['zhihu']),
+    batchPublishSubmitting: false,
+    batchPublishOperation: null,
+    lastProgress: [],
+  };
+  let releaseRequest;
+  const requestGate = new Promise(resolve => { releaseRequest = resolve; });
+  const requests = [];
+  const busyStates = [];
+  const publishContent = vm.runInNewContext(`(${publishSource})`, {
+    state,
+    $: () => null,
+    readSelectedPlatforms: () => ['zhihu'],
+    beginBatchPublishOperation,
+    finishBatchPublishOperation,
+    setBatchPublishBusy: busy => busyStates.push(busy),
+    saveContent: async () => {},
+    renderProgress: () => {},
+    request: async (url, options) => {
+      requests.push({ url, body: JSON.parse(options.body) });
+      return requestGate;
+    },
+    toast: () => {},
+    loadData: async () => {},
+    switchView: () => {},
+  });
+
+  const first = publishContent();
+  const second = publishContent();
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].body.operationId, 'batch-operation-00000001');
+  assert.equal(Object.isFrozen(state.batchPublishOperation), true);
+  assert.deepEqual(busyStates, [true]);
+  assert.equal(await second, false);
+
+  releaseRequest({ ok: true });
+  assert.equal(await first, true);
+  assert.deepEqual(busyStates, [true, false]);
+  assert.equal(state.batchPublishSubmitting, false);
+  assert.equal(state.batchPublishOperation, null);
 });
 
 test('full publish confirmation stays successful when post-success refresh fails', async () => {
@@ -194,6 +252,72 @@ test('full publish confirmation stays successful when post-success refresh fails
   assert.ok(events.indexOf('close') < events.indexOf('refresh-failed'));
   assert.ok(events.some(event => event.includes('发布成功，但列表刷新失败')));
   assert.equal(events.some(event => event.includes('平台操作失败')), false);
+});
+
+test('draft job and platform statuses render as saved drafts across results and history', () => {
+  const classSource = extractFunctionSource('statusClass', 'statusLabel');
+  const labelSource = extractFunctionSource('statusLabel', 'toast');
+  const platformSource = extractFunctionSource('resultPlatformNode', 'resultDetailNode');
+  const historySource = extractFunctionSource('historyResultChip', 'historyJobResult');
+  assert.ok(classSource && labelSource && platformSource && historySource);
+  const statusClass = vm.runInNewContext(`(${classSource})`);
+  const statusLabel = vm.runInNewContext(`(${labelSource})`);
+  const resultPlatformNode = vm.runInNewContext(`(${platformSource})`, {
+    platformName: platform => platform,
+    escapeHtml: value => String(value),
+  });
+  const historyResultChip = vm.runInNewContext(`(${historySource})`, {
+    platformName: platform => platform,
+    statusLabel,
+    escapeHtml: value => String(value),
+    resultPlatformNode,
+    resultDetailNode: () => '',
+  });
+
+  assert.equal(statusClass('draft_saved'), 'draft');
+  assert.equal(statusClass('platform_draft'), 'draft');
+  assert.equal(statusLabel('draft_saved'), '草稿已保存');
+  assert.equal(statusLabel('platform_draft'), '平台草稿已保存');
+  assert.match(resultPlatformNode({ platform: 'zhihu', status: 'platform_draft', url: 'https://example.invalid/draft' }), /<button/);
+  assert.match(historyResultChip({ platform: 'zhihu', status: 'platform_draft', message: '' }), /平台草稿已保存/);
+});
+
+test('single draft confirmation treats platform_draft as a successful result', async () => {
+  const source = extractFunctionSource('confirmSinglePlatformPublish', 'hasDirtyCanonicalContent');
+  const beginSource = extractFunctionSource('beginSinglePublishOperation', 'finishSinglePublishOperation');
+  const finishSource = extractFunctionSource('finishSinglePublishOperation', 'canCancelSinglePublish');
+  const beginSinglePublishOperation = vm.runInNewContext(`(${beginSource})`);
+  const finishSinglePublishOperation = vm.runInNewContext(`(${finishSource})`);
+  const state = {
+    pendingSinglePublish: Object.freeze({
+      contentId: 'draft-content',
+      platform: 'zhihu',
+      mode: 'draft',
+      operationId: 'draft-confirm-operation-0001',
+    }),
+    singlePublishSubmitting: false,
+    singlePublishOperationToken: '',
+    singlePublishOperationSequence: 0,
+  };
+  const toasts = [];
+  const confirmSinglePlatformPublish = vm.runInNewContext(`(${source})`, {
+    state,
+    beginSinglePublishOperation,
+    finishSinglePublishOperation,
+    setSinglePublishBusy: () => {},
+    setSinglePublishFeedback: () => {},
+    platformName: platform => platform,
+    $: selector => selector.startsWith('[data-content-body') ? null : { close() {} },
+    request: async () => ({
+      job: { results: [{ platform: 'zhihu', status: 'platform_draft', message: '草稿写入完成' }] },
+    }),
+    loadData: async () => {},
+    toast: (message, type) => toasts.push({ message, type: type || '' }),
+    encodeURIComponent,
+  });
+
+  assert.equal(await confirmSinglePlatformPublish(), true);
+  assert.deepEqual(toasts, [{ message: 'zhihu：草稿写入完成', type: '' }]);
 });
 
 test('publish dialog cancel handler blocks Escape while an operation is busy', () => {
@@ -289,6 +413,92 @@ test('dirty transition saves first and never calls transition after save failure
     hasDirtyCanonicalContent: () => false,
   });
   assert.equal(cleanUnload({ preventDefault: () => { prevented += 1; } }), undefined);
+});
+
+test('deferred save preserves a newer editor revision and merges only server metadata', async () => {
+  const saveSource = extractFunctionSource('saveContent', 'markContentDirty');
+  const dirtySource = extractFunctionSource('markContentDirty', 'bindContentEditorDirtyTracking');
+  assert.ok(saveSource && dirtySource, '缺少 revision-aware canonical save helpers');
+  const contentId = 'content-revision-race';
+  const editor = { isContentEditable: true, innerHTML: '<p>first revision</p>' };
+  const titleEditor = { value: 'First title' };
+  const summaryEditor = { value: 'First summary' };
+  const saveButton = { classList: { remove() {} } };
+  const saveState = { textContent: '', classList: { add() {} } };
+  const content = {
+    id: contentId,
+    title: 'Stored title',
+    summary: 'Stored summary',
+    body: '<p>stored body</p>',
+    type: '行业分析',
+    status: '已排版',
+    updated_at: '2026-08-31T01:00:00.000Z',
+  };
+  const state = {
+    selectedContentId: contentId,
+    data: { contents: [content] },
+    dirtyContentIds: new Set(),
+    contentEditRevisions: new Map(),
+  };
+  const nodes = new Map([
+    [`[data-content-body="${contentId}"]`, editor],
+    [`[data-content-title="${contentId}"]`, titleEditor],
+    [`[data-content-summary="${contentId}"]`, summaryEditor],
+    [`[data-save-content-button="${contentId}"]`, saveButton],
+    [`[data-content-save-state="${contentId}"]`, saveState],
+  ]);
+  const $ = selector => nodes.get(selector) || null;
+  const markContentDirty = vm.runInNewContext(`(${dirtySource})`, { state, $ });
+  markContentDirty(contentId);
+
+  let resolveRequest;
+  let submittedBody;
+  const requestGate = new Promise(resolve => { resolveRequest = resolve; });
+  let reloads = 0;
+  const saveContent = vm.runInNewContext(`(${saveSource})`, {
+    state,
+    $,
+    request: async (url, options) => {
+      submittedBody = JSON.parse(options.body);
+      return requestGate;
+    },
+    clearPlatformPreviews: () => {},
+    toast: () => {},
+    loadData: async () => { reloads += 1; },
+    encodeURIComponent,
+  });
+
+  const pendingSave = saveContent(contentId, { silent: true });
+  assert.equal(submittedBody.body, '<p>first revision</p>');
+
+  editor.innerHTML = '<p>second revision stays live</p>';
+  titleEditor.value = 'Second title stays live';
+  summaryEditor.value = 'Second summary stays live';
+  markContentDirty(contentId);
+  resolveRequest({
+    content: {
+      ...content,
+      title: 'First title',
+      summary: 'First summary',
+      body: '<p>first revision normalized</p>',
+      status: '草稿已保存',
+      updated_at: '2026-08-31T02:00:00.000Z',
+    },
+  });
+
+  await pendingSave;
+
+  assert.equal(editor.innerHTML, '<p>second revision stays live</p>');
+  assert.equal(titleEditor.value, 'Second title stays live');
+  assert.equal(summaryEditor.value, 'Second summary stays live');
+  assert.equal(state.dirtyContentIds.has(contentId), true);
+  assert.equal(state.contentEditRevisions.get(contentId), 2);
+  assert.equal(state.data.contents[0].body, '<p>second revision stays live</p>');
+  assert.equal(state.data.contents[0].title, 'Second title stays live');
+  assert.equal(state.data.contents[0].summary, 'Second summary stays live');
+  assert.equal(state.data.contents[0].status, '草稿已保存');
+  assert.equal(state.data.contents[0].updated_at, '2026-08-31T02:00:00.000Z');
+  assert.equal(reloads, 0);
 });
 
 function importFlowDocument() {

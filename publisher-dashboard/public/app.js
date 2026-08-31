@@ -113,6 +113,7 @@ const PLAN_STATUSES = ['待选题', '选题已确认', '正文已生成', '已�
 const HISTORY_STATUSES = [
   ['all', '全部状态'],
   ['published', '发布成功'],
+  ['draft_saved', '草稿已保存'],
   ['partial_failed', '部分失败'],
   ['failed', '发布失败'],
   ['local_draft', '本地草稿'],
@@ -147,6 +148,7 @@ const state = {
   contentPage: 1,
   contentPageSize: 8,
   dirtyContentIds: new Set(),
+  contentEditRevisions: new Map(),
   layoutTemplates: [],
   layoutTemplatesLoaded: false,
   layoutTemplatesLoading: false,
@@ -161,6 +163,8 @@ const state = {
   singlePublishSubmitting: false,
   singlePublishOperationToken: '',
   singlePublishOperationSequence: 0,
+  batchPublishSubmitting: false,
+  batchPublishOperation: null,
   contentTransitionInFlight: false,
   importTab: 'paste',
   importFileName: '',
@@ -359,7 +363,7 @@ function planStatusOptions(status) {
 
 function statusClass(status) {
   if (status === '已发布' || status === 'published' || status === 'success') return 'done';
-  if (status === '草稿已保存' || status === 'local_draft') return 'draft';
+  if (status === '草稿已保存' || status === 'local_draft' || status === 'draft_saved' || status === 'platform_draft') return 'draft';
   if (status === '正文已生成' || status === '选题已确认') return 'generated';
   if (status === '已排版') return 'layout';
   if (status === '部分失败' || status === 'partial_failed') return 'partial';
@@ -372,6 +376,8 @@ function statusLabel(status) {
   const labels = {
     published: '发布成功',
     success: '发布成功',
+    draft_saved: '草稿已保存',
+    platform_draft: '平台草稿已保存',
     partial_failed: '部分失败',
     failed: '发布失败',
     local_draft: '本地草稿',
@@ -547,52 +553,6 @@ function normalizeImageSrc(src) {
   return normalized;
 }
 
-function isHtmlString(value) {
-  return /<(article|section|p|div|h[1-6]|img|figure|br|ul|ol|li|blockquote|strong|em)\b/i.test(String(value || ''));
-}
-
-function markdownToEditableHtml(markdown) {
-  const lines = String(markdown || '').replace(/^\s*---[\s\S]*?---\s*/, '').split(/\r?\n/);
-  const blocks = [];
-  let paragraph = [];
-  const flush = () => {
-    if (!paragraph.length) return;
-    blocks.push(`<p>${escapeHtml(paragraph.join('\n')).replace(/\n/g, '<br>')}</p>`);
-    paragraph = [];
-  };
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      flush();
-      continue;
-    }
-    const image = trimmed.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
-    if (image) {
-      flush();
-      blocks.push(`<figure><img src="${escapeHtml(normalizeImageSrc(image[2]))}" alt="${escapeHtml(image[1])}"></figure>`);
-      continue;
-    }
-    if (trimmed.startsWith('### ')) {
-      flush();
-      blocks.push(`<h3>${escapeHtml(trimmed.slice(4))}</h3>`);
-      continue;
-    }
-    if (trimmed.startsWith('## ')) {
-      flush();
-      blocks.push(`<h2>${escapeHtml(trimmed.slice(3))}</h2>`);
-      continue;
-    }
-    if (trimmed.startsWith('# ')) {
-      flush();
-      blocks.push(`<h1>${escapeHtml(trimmed.slice(2))}</h1>`);
-      continue;
-    }
-    paragraph.push(line);
-  }
-  flush();
-  return blocks.join('\n') || '<p><br></p>';
-}
-
 function contentImagesHtml(content, existingHtml = '') {
   const existing = String(existingHtml || '');
   const images = (content.images || [])
@@ -625,8 +585,8 @@ function sanitizeClientCanonicalHtml(value, documentRef = document) {
     code: new Set(['class', 'title']),
     ol: new Set(['start', 'reversed', 'title']),
     li: new Set(['value', 'title']),
-    th: new Set(['colspan', 'rowspan', 'scope', 'title']),
-    td: new Set(['colspan', 'rowspan', 'title']),
+    th: new Set(['align', 'colspan', 'rowspan', 'scope', 'title']),
+    td: new Set(['align', 'colspan', 'rowspan', 'title']),
     col: new Set(['span', 'title']),
     colgroup: new Set(['span', 'title']),
   };
@@ -661,6 +621,7 @@ function sanitizeClientCanonicalHtml(value, documentRef = document) {
         && (name === 'href' || name === 'src' ? safeUrl(attributeValue, name) : true)
         && (!numeric || /^\d{1,5}$/.test(attributeValue))
         && (!integer || /^-?\d+$/.test(attributeValue))
+        && (name !== 'align' || /^(?:left|center|right)$/i.test(attributeValue))
         && (name !== 'scope' || /^(?:row|col|rowgroup|colgroup)$/i.test(attributeValue))
         && (name !== 'class' || /^language-[A-Za-z0-9_+-]+$/.test(attributeValue));
       if (!valid) element.removeAttribute(attribute.name);
@@ -671,8 +632,7 @@ function sanitizeClientCanonicalHtml(value, documentRef = document) {
 
 function editableArticleHtml(content) {
   const body = String(content.body || '');
-  const html = isHtmlString(body) ? body : markdownToEditableHtml(body);
-  return sanitizeClientCanonicalHtml(`${html}${contentImagesHtml(content, html)}`);
+  return sanitizeClientCanonicalHtml(`${body}${contentImagesHtml(content, body)}`);
 }
 
 function render() {
@@ -708,7 +668,7 @@ function renderDashboard() {
           <strong>${escapeHtml(job.title)}</strong>
           <em>${formatTime(job.created_at)} · ${job.platforms.map(platformName).join('、')}</em>
         </span>
-        ${statePill(job.status === 'published' ? '已发布' : job.status === 'failed' ? '发布失败' : '发布中')}
+        ${statePill(job.status)}
       </button>
     `).join('')
     : '<div class="empty compact-empty">暂无发布记录</div>';
@@ -1263,18 +1223,6 @@ function contentPagination(total, totalPages) {
   `;
 }
 
-function markdownPreview(markdown) {
-  return escapeHtml(markdown)
-    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
-    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
-    .replace(/\n{2,}/g, '</p><p>')
-    .replace(/^/, '<p>')
-    .replace(/$/, '</p>')
-    .replace(/<p><h/g, '<h')
-    .replace(/<\/h1><\/p>/g, '</h1>')
-    .replace(/<\/h2><\/p>/g, '</h2>');
-}
-
 function layoutPreviewFrame(content) {
   const previewUrl = `/content/${encodeURIComponent(content?.id || '')}/preview.html`;
   if (!content?.layout_html) {
@@ -1377,7 +1325,7 @@ function renderPublish() {
       </div>
       <div class="publish-bottom-actions">
         <span class="tag" data-selected-platform-count>已选择 ${state.selectedPlatforms.size} 个平台</span>
-        <button class="primary publish-bottom-button" data-action="publish-selected" ${!content || state.selectedPlatforms.size === 0 ? 'disabled' : ''}>直接发布</button>
+        <button class="primary publish-bottom-button" data-action="publish-selected" ${!content || state.selectedPlatforms.size === 0 || state.batchPublishSubmitting ? 'disabled' : ''}>${state.batchPublishSubmitting ? '发布中…' : '直接发布'}</button>
       </div>
     </div>
   `;
@@ -1389,7 +1337,7 @@ function sessionOpenButton(platform, url, label) {
 
 function resultPlatformNode(result) {
   const name = platformName(result.platform);
-  if (result.status === 'success' && result.url) {
+  if ((result.status === 'success' || result.status === 'platform_draft') && result.url) {
     return `<button class="result-platform-link" data-action="open-platform-session" data-platform="${escapeHtml(result.platform)}" data-url="${escapeHtml(result.url)}" title="使用该平台登录会话打开">${escapeHtml(name)}</button>`;
   }
   return `<span class="result-platform-name">${escapeHtml(name)}</span>`;
@@ -1408,6 +1356,7 @@ function jobResult(job) {
   return job.results.map(result => `
     <div class="result-line compact-result ${result.status === 'failed' ? 'failed-result' : ''}">
       ${resultPlatformNode(result)}
+      <span class="result-status-label">${escapeHtml(statusLabel(result.status))}</span>
       ${resultDetailNode(result)}
     </div>
   `).join('');
@@ -1420,6 +1369,7 @@ function historyResultChip(result) {
   return `
     <span class="history-result-chip ${failed ? 'failed' : 'success'}" title="${escapeHtml(message || label)}">
       ${resultPlatformNode(result)}
+      <span class="result-status-label">${escapeHtml(statusLabel(result.status))}</span>
       ${failed ? resultDetailNode(result) : ''}
     </span>
   `;
@@ -1625,7 +1575,7 @@ function syncPublishSelectionUi() {
     node.textContent = `已选择 ${count} 个平台`;
   });
   $$('[data-action="publish-selected"]').forEach(button => {
-    button.disabled = count === 0 || !getSelectedContent();
+    button.disabled = state.batchPublishSubmitting || count === 0 || !getSelectedContent();
   });
 }
 
@@ -2032,6 +1982,32 @@ function createPublishOperationId(cryptoSource = crypto) {
   return [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
+function beginBatchPublishOperation(publishState, pending) {
+  if (!pending || publishState.batchPublishSubmitting) return null;
+  const operation = Object.freeze({
+    ...pending,
+    platforms: Object.freeze([...(pending.platforms || [])]),
+    operationId: createPublishOperationId(),
+  });
+  publishState.batchPublishSubmitting = true;
+  publishState.batchPublishOperation = operation;
+  return operation;
+}
+
+function finishBatchPublishOperation(publishState, operationId) {
+  if (!operationId || publishState.batchPublishOperation?.operationId !== operationId) return false;
+  publishState.batchPublishSubmitting = false;
+  publishState.batchPublishOperation = null;
+  return true;
+}
+
+function setBatchPublishBusy(busy) {
+  $$('[data-action="publish-selected"]').forEach(button => {
+    button.disabled = busy || state.selectedPlatforms.size === 0 || !getSelectedContent();
+    button.textContent = busy ? '发布中…' : '直接发布';
+  });
+}
+
 function beginSinglePublishOperation(publishState, pending) {
   if (!pending || publishState.singlePublishSubmitting) return null;
   const sequence = Number(publishState.singlePublishOperationSequence || 0) + 1;
@@ -2136,7 +2112,7 @@ async function confirmSinglePlatformPublish() {
     state.pendingSinglePublish = null;
     operationFinished = finishSinglePublishOperation(state, operation.token);
     if (operationFinished) setSinglePublishBusy(false);
-    if (platformResult?.status === 'success') {
+    if (platformResult?.status === 'success' || platformResult?.status === 'platform_draft') {
       const fallback = operation.mode === 'draft' ? '平台草稿已保存' : '平台发布成功';
       toast(`${platformName(operation.platform)}：${platformResult.message || fallback}`);
     } else {
@@ -2205,11 +2181,13 @@ async function generateContent(date) {
 async function saveContent(id, options = {}) {
   const target = id || state.selectedContentId;
   if (!target) return null;
+  const targetKey = String(target);
   const editor = $(`[data-content-body="${target}"]`);
   const titleEditor = $(`[data-content-title="${target}"]`);
   const summaryEditor = $(`[data-content-summary="${target}"]`);
   const body = editor?.isContentEditable ? editor.innerHTML : editor?.value;
   const current = state.data.contents.find(content => content.id === target);
+  const revision = state.contentEditRevisions.get(targetKey) || 0;
   const res = await request(`/api/content/${encodeURIComponent(target)}`, {
     method: 'POST',
     body: JSON.stringify({
@@ -2220,8 +2198,23 @@ async function saveContent(id, options = {}) {
     }),
   });
   state.selectedContentId = res.content.id;
-  state.dirtyContentIds.delete(String(target));
   clearPlatformPreviews(target);
+  if ((state.contentEditRevisions.get(targetKey) || 0) !== revision) {
+    const contentIndex = state.data.contents.findIndex(content => content.id === target);
+    if (contentIndex >= 0) {
+      const existing = state.data.contents[contentIndex];
+      state.data.contents[contentIndex] = {
+        ...existing,
+        ...res.content,
+        title: titleEditor?.value ?? existing.title,
+        summary: summaryEditor?.value ?? existing.summary,
+        body: (editor?.isContentEditable ? editor.innerHTML : editor?.value) ?? existing.body,
+      };
+    }
+    state.dirtyContentIds.add(targetKey);
+    return res.content;
+  }
+  state.dirtyContentIds.delete(targetKey);
   if (!options.silent) toast('正文已保存');
   await loadData();
   return res.content;
@@ -2229,7 +2222,9 @@ async function saveContent(id, options = {}) {
 
 function markContentDirty(id) {
   if (!id) return;
-  state.dirtyContentIds.add(String(id));
+  const target = String(id);
+  state.contentEditRevisions.set(target, (state.contentEditRevisions.get(target) || 0) + 1);
+  state.dirtyContentIds.add(target);
   $(`[data-save-content-button="${id}"]`)?.classList.remove('is-hidden');
   const saveState = $(`[data-content-save-state="${id}"]`);
   if (saveState) {
@@ -2284,21 +2279,32 @@ async function publishContent(id) {
   const selectedPlatforms = readSelectedPlatforms();
   if (!target) return toast('请选择内容', 'error');
   if (!state.selectedPlatforms.size) return toast('请选择至少一个发布平台', 'error');
-  if ($(`[data-content-body="${target}"]`)) await saveContent(target, { silent: true });
-  state.selectedPlatforms = new Set(selectedPlatforms);
-  state.lastProgress = [`正在直接发布到 ${state.selectedPlatforms.size} 个平台`, '进入多平台直发流程'];
-  renderProgress(state.lastProgress);
+  const operation = beginBatchPublishOperation(state, {
+    contentId: target,
+    platforms: selectedPlatforms,
+    publishMode: 'direct',
+  });
+  if (!operation) return false;
+  setBatchPublishBusy(true);
   try {
+    if ($(`[data-content-body="${target}"]`)) await saveContent(target, { silent: true });
+    state.selectedPlatforms = new Set(operation.platforms);
+    state.lastProgress = [`正在直接发布到 ${operation.platforms.length} 个平台`, '进入多平台直发流程'];
+    renderProgress(state.lastProgress);
     await request('/api/publish', {
       method: 'POST',
-      body: JSON.stringify({ contentId: target, platforms: [...state.selectedPlatforms], publishMode: 'direct' }),
+      body: JSON.stringify(operation),
     });
     toast('发布流程完成，请查看平台结果');
     await loadData();
     switchView('publish');
+    return true;
   } catch (error) {
     toast(error.message, 'error');
     await loadData();
+    return false;
+  } finally {
+    if (finishBatchPublishOperation(state, operation.operationId)) setBatchPublishBusy(false);
   }
 }
 

@@ -398,3 +398,8 @@ test('keeps the browser JavaScript syntactically valid', () => {
   const result = spawnSync(process.execPath, ['--check', appPath], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
+
+test('browser consumes server-normalized canonical HTML without an ad-hoc Markdown parser', () => {
+  assert.doesNotMatch(appSource, /function\s+markdownToEditableHtml\s*\(/);
+  assert.match(appSource, /sanitizeClientCanonicalHtml\(`\$\{body\}\$\{contentImagesHtml/);
+});

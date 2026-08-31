@@ -4,10 +4,13 @@ const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { randomBytes, timingSafeEqual } = require('node:crypto');
+const { createHash, randomBytes, timingSafeEqual } = require('node:crypto');
 const { execFile, spawn } = require('child_process');
 const net = require('net');
 const { DatabaseSync } = require('node:sqlite');
+const { marked, Renderer } = require('marked');
+const TurndownService = require('turndown');
+const { gfm: turndownGfm } = require('turndown-plugin-gfm');
 const { listLayoutTemplates, renderLayoutTemplate } = require('./layout-templates');
 
 const ROOT = __dirname;
@@ -17,6 +20,7 @@ const DATA_DIR = path.join(ROOT, 'data');
 const DRAFTS_DIR = path.join(DATA_DIR, 'drafts');
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 const DB_PATH = process.env.PUBLISHER_DB || path.join(DATA_DIR, 'publisher.sqlite');
+const OPERATIONS_FILE = process.env.PUBLISHER_OPERATIONS_FILE || path.join(DATA_DIR, 'publish-operations.json');
 const CLI_PATH = path.join(REPO_ROOT, 'packages', 'cli', 'dist', 'index.js');
 const COOKIE_FILE = process.env.WEIBOT_COOKIE_FILE || path.join(REPO_ROOT, 'cookies.json');
 const LOGIN_DIR = path.join(REPO_ROOT, '.weibot-login');
@@ -169,6 +173,23 @@ const CONTENT_TYPES = ['行业分析', '案例复盘', '方法论', '清单指�
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 const MAX_IMPORTED_BODY_BYTES = 5 * 1024 * 1024;
 const MAX_IMPORT_REQUEST_BYTES = 32 * 1024 * 1024;
+const canonicalTurndown = new TurndownService({
+  headingStyle: 'atx',
+  bulletListMarker: '-',
+  codeBlockStyle: 'fenced',
+  fence: '```',
+  emDelimiter: '*',
+  strongDelimiter: '**',
+  linkStyle: 'inlined',
+});
+canonicalTurndown.use(turndownGfm);
+const canonicalMarkdownRenderer = new Renderer();
+const renderCanonicalMarkdownLink = canonicalMarkdownRenderer.link;
+canonicalMarkdownRenderer.link = function renderSafeCanonicalMarkdownLink(token) {
+  const scheme = String(token.href || '').match(/^([a-z][a-z0-9+.-]*):/i)?.[1]?.toLowerCase() || '';
+  if (['javascript', 'data', 'vbscript'].includes(scheme)) return '';
+  return renderCanonicalMarkdownLink.call(this, token);
+};
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(DRAFTS_DIR, { recursive: true });
@@ -186,6 +207,176 @@ function statusError(message, statusCode) {
   const error = new Error(message);
   error.statusCode = statusCode;
   return error;
+}
+
+function operationTimestamp(nowMs) {
+  return new Date(nowMs()).toISOString();
+}
+
+function normalizeOperationSignature(signature) {
+  if (!signature || typeof signature !== 'object' || Array.isArray(signature)) {
+    throw new Error('发布操作签名无效');
+  }
+  const contentId = String(signature.contentId || '');
+  const platforms = Array.isArray(signature.platforms)
+    ? [...new Set(signature.platforms.map(platform => String(platform || '').trim().toLowerCase()).filter(Boolean))].sort()
+    : [];
+  const publishMode = signature.publishMode === 'draft' ? 'draft' : signature.publishMode === 'direct' ? 'direct' : '';
+  const contentHash = String(signature.contentHash || '').toLowerCase();
+  if (!contentId || !platforms.length || !publishMode || !/^[a-f0-9]{64}$/.test(contentHash)) {
+    throw new Error('发布操作签名无效');
+  }
+  return { contentId, platforms, publishMode, contentHash };
+}
+
+function operationSignatureKey(signature) {
+  return JSON.stringify(normalizeOperationSignature(signature));
+}
+
+function normalizeJournalResult(result) {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return null;
+  const jobId = typeof result.jobId === 'string' ? result.jobId : '';
+  const jobStatus = typeof result.jobStatus === 'string' ? result.jobStatus : '';
+  const platformResults = Array.isArray(result.platformResults)
+    ? result.platformResults.map(item => ({
+      platform: String(item?.platform || '').trim().toLowerCase(),
+      status: String(item?.status || ''),
+    })).filter(item => item.platform && item.status)
+    : [];
+  return {
+    ...(jobId ? { jobId } : {}),
+    ...(jobStatus ? { jobStatus } : {}),
+    ...(platformResults.length ? { platformResults } : {}),
+  };
+}
+
+function createOperationJournal(options = {}) {
+  const filePath = path.resolve(options.filePath || OPERATIONS_FILE);
+  const nowMs = typeof options.nowMs === 'function' ? options.nowMs : Date.now;
+  const ttlMs = Number.isFinite(options.ttlMs) ? Math.max(1, options.ttlMs) : 30 * 24 * 60 * 60 * 1000;
+  const limit = Number.isInteger(options.limit) ? Math.max(1, options.limit) : 1000;
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+
+  let records = [];
+  if (fs.existsSync(filePath)) {
+    let document;
+    try {
+      document = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    } catch (error) {
+      throw new Error(`发布操作日志损坏: ${error.message}`);
+    }
+    if (document?.version !== 1 || !Array.isArray(document.records)) {
+      throw new Error('发布操作日志格式无效');
+    }
+    records = document.records.filter(record => record && typeof record === 'object');
+  }
+
+  const persist = () => {
+    const temporaryPath = `${filePath}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
+    try {
+      fs.writeFileSync(temporaryPath, `${JSON.stringify({ version: 1, records }, null, 2)}\n`, {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
+      fs.renameSync(temporaryPath, filePath);
+    } finally {
+      if (fs.existsSync(temporaryPath)) fs.rmSync(temporaryPath, { force: true });
+    }
+  };
+
+  const prune = currentTime => {
+    const cutoff = currentTime - ttlMs;
+    const retained = records.filter(record => {
+      const updatedAt = Date.parse(record.updatedAt || record.createdAt || '');
+      return !Number.isFinite(updatedAt) || updatedAt >= cutoff;
+    });
+    retained.sort((left, right) => Date.parse(left.updatedAt || left.createdAt || 0) - Date.parse(right.updatedAt || right.createdAt || 0));
+    records = retained.slice(Math.max(0, retained.length - limit));
+  };
+
+  let startupChanged = false;
+  const startupTime = nowMs();
+  for (const record of records) {
+    if (record.state !== 'running') continue;
+    record.state = 'uncertain';
+    record.updatedAt = new Date(startupTime).toISOString();
+    record.uncertainAt = record.updatedAt;
+    startupChanged = true;
+  }
+  const startupCount = records.length;
+  prune(startupTime);
+  if (records.length !== startupCount) startupChanged = true;
+  if (startupChanged) persist();
+
+  return {
+    filePath,
+    get(operationId) {
+      return records.find(record => record.operationId === operationId) || null;
+    },
+    begin(operationId, signature) {
+      const canonicalSignature = normalizeOperationSignature(signature);
+      const signatureKey = operationSignatureKey(canonicalSignature);
+      const currentTime = nowMs();
+      const beforePrune = records.length;
+      prune(currentTime);
+      if (records.length !== beforePrune) persist();
+
+      const existing = records.find(record => record.operationId === operationId);
+      if (existing) {
+        if (operationSignatureKey(existing.signature) !== signatureKey) {
+          throw statusError('operationId 已用于其他发布参数或内容版本', 409);
+        }
+        if (existing.state === 'completed') return { kind: 'replay', record: existing };
+        if (existing.state === 'uncertain') {
+          throw statusError('该发布操作结果不确定，禁止自动重试；请人工核对平台结果', 409);
+        }
+        if (existing.state === 'failed') {
+          throw statusError('该发布操作已失败，禁止用相同 operationId 自动重试', 409);
+        }
+        throw statusError('相同 operationId 的发布正在进行，请勿重复提交', 409);
+      }
+      if (records.some(record => record.state === 'running' && operationSignatureKey(record.signature) === signatureKey)) {
+        throw statusError('相同内容与平台的发布正在进行，请勿重复提交', 409);
+      }
+
+      const timestamp = operationTimestamp(nowMs);
+      const record = {
+        operationId,
+        signature: canonicalSignature,
+        state: 'running',
+        result: null,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      records.push(record);
+      prune(nowMs());
+      if (!records.includes(record)) throw statusError('发布操作过多，请稍后重试', 503);
+      persist();
+      return { kind: 'started', record };
+    },
+    complete(operationId, result) {
+      const record = records.find(item => item.operationId === operationId);
+      if (!record || record.state !== 'running') throw new Error('发布操作不在运行状态');
+      const timestamp = operationTimestamp(nowMs);
+      record.state = 'completed';
+      record.result = normalizeJournalResult(result);
+      record.updatedAt = timestamp;
+      record.completedAt = timestamp;
+      persist();
+      return record;
+    },
+    fail(operationId, result = null) {
+      const record = records.find(item => item.operationId === operationId);
+      if (!record || record.state !== 'running') return record || null;
+      const timestamp = operationTimestamp(nowMs);
+      record.state = 'failed';
+      record.result = normalizeJournalResult(result);
+      record.updatedAt = timestamp;
+      record.failedAt = timestamp;
+      persist();
+      return record;
+    },
+  };
 }
 
 function loopbackHostname(hostname) {
@@ -492,116 +683,42 @@ function buildArticleBody(topic, type = '行业分析', audience = '内容运营
   ].join('\n');
 }
 
-function renderImportedMarkdownInline(value) {
-  const source = String(value || '');
-  let namespace;
-  do {
-    namespace = `__WEIBOT_INLINE_${randomBytes(18).toString('hex')}_`;
-  } while (source.includes(namespace));
-
-  const replacements = [];
-  const protect = html => {
-    const token = `${namespace}${replacements.length}__`;
-    replacements.push(html);
-    return token;
-  };
-  let rendered = protectImportedInlineCode(source, literal => {
-    const markerLength = literal.match(/^`+/)?.[0].length || 1;
-    return protect(`<code>${escapeHtml(literal.slice(markerLength, -markerLength))}</code>`);
-  });
-  rendered = replaceImportedMarkdownAutolinks(rendered, autolink => {
-    const label = autolink.slice(1, -1);
-    const href = label.includes(':') ? label : `mailto:${label}`;
-    return protect(`<a href="${escapeHtml(href)}">${escapeHtml(label)}</a>`);
-  }, () => '');
-  rendered = rendered.replace(/<[^>]+>/g, tag => protect(tag));
-  rendered = escapeHtml(rendered);
-  const tokenPattern = new RegExp(`${namespace}(\\d+)__`, 'g');
-  return rendered.replace(tokenPattern, (token, index) => replacements[Number(index)] ?? token);
+function separateLegacyIndentedHtmlCode(markdown) {
+  const lines = String(markdown || '').split(/\r?\n/);
+  const output = [];
+  let fenceCharacter = '';
+  let fenceLength = 0;
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+    const fence = line.match(/^[ \t]{0,3}(`{3,}|~{3,})/);
+    if (fence) {
+      if (!fenceCharacter) {
+        fenceCharacter = fence[1][0];
+        fenceLength = fence[1].length;
+      } else if (fence[1][0] === fenceCharacter && fence[1].length >= fenceLength) {
+        fenceCharacter = '';
+        fenceLength = 0;
+      }
+      output.push(line);
+      continue;
+    }
+    const legacyIndentedHtml = !fenceCharacter && /^(?: {4}|\t)<[^>\r\n]+>/.test(line);
+    if (legacyIndentedHtml && output.length && output[output.length - 1].trim()) output.push('');
+    output.push(line);
+    const nextLine = lines[index + 1];
+    if (legacyIndentedHtml && nextLine !== undefined && nextLine.trim() && !/^(?: {4}|\t)/.test(nextLine)) {
+      output.push('');
+    }
+  }
+  return output.join('\n');
 }
 
 function markdownToImportedHtml(markdown) {
-  const lines = String(markdown || '').split(/\r?\n/);
-  const output = [];
-  let paragraph = [];
-
-  const flushParagraph = () => {
-    if (!paragraph.length) return;
-    output.push(`<p>${paragraph.map(renderImportedMarkdownInline).join('<br>')}</p>`);
-    paragraph = [];
-  };
-
-  for (let index = 0; index < lines.length;) {
-    const line = lines[index];
-    const openingFence = line.match(/^[ \t]{0,3}(`{3,}|~{3,})/);
-    if (openingFence) {
-      flushParagraph();
-      const fenceCharacter = openingFence[1][0];
-      const fenceLength = openingFence[1].length;
-      const info = line.slice(openingFence[0].length).trim().split(/\s+/)[0] || '';
-      const language = /^[A-Za-z0-9_+-]+$/.test(info) ? info : '';
-      const codeLines = [];
-      index++;
-      while (index < lines.length) {
-        const closingFence = lines[index].match(/^[ \t]{0,3}(`+|~+)[ \t]*$/);
-        if (closingFence
-          && closingFence[1][0] === fenceCharacter
-          && closingFence[1].length >= fenceLength) {
-          index++;
-          break;
-        }
-        codeLines.push(lines[index]);
-        index++;
-      }
-      output.push(`<pre><code${language ? ` class="language-${escapeHtml(language)}"` : ''}>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
-      continue;
-    }
-
-    if (/^(?: {4}|\t)/.test(line)) {
-      flushParagraph();
-      const codeLines = [];
-      while (index < lines.length && /^(?: {4}|\t)/.test(lines[index])) {
-        codeLines.push(lines[index].startsWith('\t') ? lines[index].slice(1) : lines[index].slice(4));
-        index++;
-      }
-      output.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
-      continue;
-    }
-
-    if (!line.trim()) {
-      flushParagraph();
-      index++;
-      continue;
-    }
-
-    const heading = line.match(/^[ \t]{0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/);
-    if (heading) {
-      flushParagraph();
-      output.push(`<h${heading[1].length}>${renderImportedMarkdownInline(heading[2])}</h${heading[1].length}>`);
-      index++;
-      continue;
-    }
-
-    const image = line.match(/^[ \t]*!\[([^\]]*)\]\(([^)]+)\)[ \t]*$/);
-    if (image) {
-      flushParagraph();
-      output.push(`<figure><img src="${escapeHtml(image[2])}" alt="${escapeHtml(image[1])}"></figure>`);
-      index++;
-      continue;
-    }
-
-    if (/^[ \t]*<\/?[A-Za-z][^>]*>/.test(line)) {
-      flushParagraph();
-      output.push(renderImportedMarkdownInline(line));
-      index++;
-      continue;
-    }
-
-    paragraph.push(line);
-    index++;
-  }
-  flushParagraph();
-  return output.join('\n');
+  return marked.parse(separateLegacyIndentedHtmlCode(markdown), {
+    async: false,
+    gfm: true,
+    renderer: canonicalMarkdownRenderer,
+  });
 }
 
 function textToImportedHtml(text) {
@@ -614,17 +731,7 @@ function textToImportedHtml(text) {
 function markdownToHtml(markdown, options = {}) {
   if (options.imported) return markdownToImportedHtml(markdown);
   if (isHtmlBody(markdown)) return String(markdown || '');
-  return String(markdown || '')
-    .split(/\r?\n/)
-    .map(line => {
-      if (line.startsWith('# ')) return `<h1>${escapeHtml(line.slice(2))}</h1>`;
-      if (line.startsWith('## ')) return `<h2>${escapeHtml(line.slice(3))}</h2>`;
-      const image = line.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
-      if (image) return `<figure><img src="${escapeHtml(image[2])}" alt="${escapeHtml(image[1])}"></figure>`;
-      if (!line.trim()) return '';
-      return `<p>${escapeHtml(line)}</p>`;
-    })
-    .join('\n');
+  return markdownToImportedHtml(markdown);
 }
 
 function isHtmlBody(value) {
@@ -661,85 +768,8 @@ function extractEmbeddedHtmlDocument(value) {
   return isFullHtmlDocument(documentText) ? documentText : '';
 }
 
-function decodeHtmlText(value) {
-  return String(value || '')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&(?:#x([0-9a-f]+)|#([0-9]+)|(amp|lt|gt|quot|apos|nbsp));/gi, (entity, hex, decimal, name) => {
-      if (hex || decimal) {
-        const codePoint = Number.parseInt(hex || decimal, hex ? 16 : 10);
-        if (Number.isInteger(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff) {
-          try {
-            return String.fromCodePoint(codePoint);
-          } catch {
-            return entity;
-          }
-        }
-        return entity;
-      }
-      return ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' })[name.toLowerCase()] || entity;
-    });
-}
-
-function longestBacktickRun(value) {
-  let longest = 0;
-  for (const match of String(value || '').matchAll(/`+/g)) longest = Math.max(longest, match[0].length);
-  return longest;
-}
-
-function inlineCodeToMarkdown(value) {
-  const code = decodeHtmlText(value).replace(/\r\n?|\n/g, ' ');
-  const delimiter = '`'.repeat(Math.max(1, longestBacktickRun(code) + 1));
-  const padding = /^(?:`| )|(?:`| )$/.test(code) ? ' ' : '';
-  return `${delimiter}${padding}${code}${padding}${delimiter}`;
-}
-
-function fencedCodeToMarkdown(value, language = '') {
-  const code = decodeHtmlText(value).replace(/\r\n?/g, '\n');
-  const fence = '`'.repeat(Math.max(3, longestBacktickRun(code) + 1));
-  return `${fence}${language}\n${code}${code.endsWith('\n') ? '' : '\n'}${fence}`;
-}
-
-function codeLanguageFromAttributes(attributes) {
-  const classMatch = String(attributes || '').match(/\bclass\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/i);
-  const classes = (classMatch?.[1] || classMatch?.[2] || classMatch?.[3] || '').split(/\s+/);
-  return classes.map(className => className.match(/^language-([A-Za-z0-9_+-]+)$/)?.[1]).find(Boolean) || '';
-}
-
 function htmlToMarkdown(html) {
-  const source = String(html || '');
-  let namespace;
-  do {
-    namespace = `__WEIBOT_CODE_${randomBytes(18).toString('hex')}_`;
-  } while (source.includes(namespace));
-  const codeBlocks = [];
-  const protectCode = markdown => {
-    const token = `${namespace}${codeBlocks.length}__`;
-    codeBlocks.push(markdown);
-    return token;
-  };
-
-  let converted = source
-    .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(/<style[\s\S]*?<\/style>/gi, '')
-    .replace(/<pre\b[^>]*>\s*<code\b([^>]*)>([\s\S]*?)<\/code>\s*<\/pre>/gi,
-      (_, attributes, code) => `\n\n${protectCode(fencedCodeToMarkdown(code, codeLanguageFromAttributes(attributes)))}\n\n`)
-    .replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, (_, code) => protectCode(inlineCodeToMarkdown(code)))
-    .replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, (_, text) => `\n# ${stripHtml(text)}\n`)
-    .replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, (_, text) => `\n## ${stripHtml(text)}\n`)
-    .replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, (_, text) => `\n### ${stripHtml(text)}\n`)
-    .replace(/<img[^>]*src=["']([^"']+)["'][^>]*alt=["']([^"']*)["'][^>]*>/gi, (_, src, alt) => `\n![${alt}](${src})\n`)
-    .replace(/<img[^>]*alt=["']([^"']*)["'][^>]*src=["']([^"']+)["'][^>]*>/gi, (_, alt, src) => `\n![${alt}](${src})\n`)
-    .replace(/<img[^>]*src=["']([^"']+)["'][^>]*>/gi, (_, src) => `\n![](${src})\n`)
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(p|div|li|blockquote|figure)>/gi, '\n\n')
-    .replace(/<[^>]+>/g, '');
-  converted = stripHtml(converted).replace(/\n{3,}/g, '\n\n');
-  const tokenPattern = new RegExp(`${namespace}(\\d+)__`, 'g');
-  return converted
-    .replace(tokenPattern, (token, index) => codeBlocks[Number(index)] ?? token)
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  return canonicalTurndown.turndown(sanitizeImportedHtml(String(html || ''))).trim();
 }
 
 function contentBodyToMarkdown(body) {
@@ -1542,8 +1572,8 @@ const IMPORT_ALLOWED_ATTRIBUTES = {
   code: new Set(['class', 'title']),
   ol: new Set(['start', 'reversed', 'title']),
   li: new Set(['value', 'title']),
-  th: new Set(['colspan', 'rowspan', 'scope', 'title']),
-  td: new Set(['colspan', 'rowspan', 'title']),
+  th: new Set(['align', 'colspan', 'rowspan', 'scope', 'title']),
+  td: new Set(['align', 'colspan', 'rowspan', 'title']),
   col: new Set(['span', 'title']),
   colgroup: new Set(['span', 'title']),
 };
@@ -1585,6 +1615,7 @@ function isAllowedImportedAttribute(tagName, attributeName, attributeValue) {
     return /^\d{1,5}$/.test(attributeValue);
   }
   if (['start', 'value'].includes(attributeName)) return /^-?\d+$/.test(attributeValue);
+  if (attributeName === 'align') return /^(?:left|center|right)$/i.test(attributeValue);
   if (attributeName === 'scope') return /^(?:row|col|rowgroup|colgroup)$/i.test(attributeValue);
   if (attributeName === 'class') return /^language-[A-Za-z0-9_+-]+$/.test(attributeValue);
   return attributeName === 'reversed' || attributeName === 'title' || attributeName === 'alt';
@@ -2308,13 +2339,62 @@ function publishSnapshotName(jobId, contentId) {
   return `${job}-${content}.md`;
 }
 
+function normalizePublishPlatforms(content, platforms) {
+  return [...new Set((Array.isArray(platforms) && platforms.length ? platforms : content?.selected_platforms || [])
+    .map(platform => String(platform || '').trim().toLowerCase())
+    .filter(platform => platform && !RETIRED_PLATFORM_IDS.includes(platform)))];
+}
+
+function validatePublishOperationId(operationId) {
+  if (typeof operationId !== 'string'
+    || !/^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/.test(operationId)) {
+    throw statusError('operationId 必须是 16-128 位字母、数字、下划线或连字符', 400);
+  }
+  return operationId;
+}
+
+function buildPublishOperationSignature(content, platforms, publishMode) {
+  return normalizeOperationSignature({
+    contentId: content.id,
+    platforms: [...platforms].sort(),
+    publishMode,
+    contentHash: createHash('sha256').update(contentToMarkdown(content), 'utf8').digest('hex'),
+  });
+}
+
+function journalResultForPublish(result) {
+  return {
+    jobId: result.job?.id || '',
+    jobStatus: result.job?.status || '',
+    platformResults: (result.job?.results || []).map(item => ({
+      platform: item.platform,
+      status: item.status,
+    })),
+  };
+}
+
+function replayedPublishResult(record) {
+  const jobId = record.result?.jobId;
+  const storedJob = jobId ? normalizeJob(one('SELECT * FROM publish_jobs WHERE id = ?', jobId)) : null;
+  if (storedJob) return { job: storedJob, rawOutput: '' };
+  return {
+    job: {
+      id: jobId || record.operationId,
+      content_id: record.signature.contentId,
+      status: record.result?.jobStatus || 'published',
+      platforms: record.signature.platforms,
+      results: record.result?.platformResults || [],
+    },
+    rawOutput: '',
+  };
+}
+
 async function publishContent(contentId, platforms = [], options = {}) {
   const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
   if (!content) throw new Error('内容不存在');
-  const selected = [...new Set((Array.isArray(platforms) && platforms.length ? platforms : content.selected_platforms)
-    .map(platform => String(platform || '').trim().toLowerCase())
-    .filter(platform => platform && !RETIRED_PLATFORM_IDS.includes(platform)))];
+  const selected = normalizePublishPlatforms(content, platforms);
   if (!selected.length) throw new Error('请选择至少一个平台');
+  const publishMode = options.publishMode === 'draft' ? 'draft' : 'direct';
 
   const jobId = makeId('job');
   db.prepare(`
@@ -2337,7 +2417,7 @@ async function publishContent(contentId, platforms = [], options = {}) {
       continue;
     }
 
-    const single = await platformPublisher(markdownFile, platform, content.title, options.publishMode || 'direct');
+    const single = await platformPublisher(markdownFile, platform, content.title, publishMode);
     finalResults[platform] = single.info;
     rawOutputs.push(single.output);
   }
@@ -2345,11 +2425,12 @@ async function publishContent(contentId, platforms = [], options = {}) {
   let successCount = 0;
   for (const platform of selected) {
     const info = normalizeStoredPublishResult(platform, finalResults[platform] || { status: 'failed', error: '没有返回该平台结果' });
-    const status = info.status === 'success' ? 'success' : 'failed';
-    if (status === 'success') successCount++;
+    const succeeded = info.status === 'success' || info.status === 'platform_draft';
+    const status = succeeded ? (publishMode === 'draft' ? 'platform_draft' : 'success') : 'failed';
+    if (succeeded) successCount++;
     if (status === 'failed' && isAuthFailureMessage(info.error || info.message)) {
       setPlatformAuthStatus(platform, 'logged_out');
-    } else if (status === 'success') {
+    } else if (succeeded) {
       const existing = db.prepare('SELECT account FROM platforms WHERE id = ?').get(platform);
       setPlatformAuthStatus(platform, 'logged_in', existing?.account || null);
     }
@@ -2361,28 +2442,34 @@ async function publishContent(contentId, platforms = [], options = {}) {
       jobId,
       platform,
       status,
-      info.message || info.error || '',
+      info.message || info.error || (status === 'platform_draft' ? '平台草稿已保存' : status === 'success' ? '发布成功' : ''),
       info.url || null,
       info.postId || null,
       now()
     );
   }
 
-  const jobStatus = successCount === selected.length ? 'published' : (successCount > 0 ? 'partial_failed' : 'failed');
+  const jobStatus = successCount === selected.length
+    ? (publishMode === 'draft' ? 'draft_saved' : 'published')
+    : (successCount > 0 ? 'partial_failed' : 'failed');
   db.prepare('UPDATE publish_jobs SET status = ?, updated_at = ? WHERE id = ?').run(jobStatus, now(), jobId);
   if (options.persistSelection !== false) {
     db.prepare('UPDATE contents SET selected_platforms = ? WHERE id = ?').run(encodeJson(selected), contentId);
   }
   if (options.updateAggregateStatus !== false) {
+    const aggregateStatus = jobStatus === 'published'
+      ? '已发布'
+      : jobStatus === 'draft_saved' ? '草稿已保存' : '发布失败';
     db.prepare('UPDATE contents SET status = ?, updated_at = ? WHERE id = ?')
-      .run(jobStatus === 'published' ? '已发布' : '发布失败', now(), contentId);
+      .run(aggregateStatus, now(), contentId);
     if (content.plan_date) {
       db.prepare('UPDATE weekly_plans SET status = ?, updated_at = ? WHERE date = ?')
-        .run(jobStatus === 'published' ? '已发布' : '发布失败', now(), content.plan_date);
+        .run(aggregateStatus, now(), content.plan_date);
     }
   }
 
-  addActivity(`一键发布《${content.title}》到 ${selected.length} 个平台，成功 ${successCount} 个`, 'publish_job', jobId, '运营');
+  const activityVerb = publishMode === 'draft' ? '保存平台草稿' : '一键发布';
+  addActivity(`${activityVerb}《${content.title}》到 ${selected.length} 个平台，成功 ${successCount} 个`, 'publish_job', jobId, '运营');
   return {
     job: normalizeJob(one('SELECT * FROM publish_jobs WHERE id = ?', jobId)),
     rawOutput: rawOutputs.join('\n\n'),
@@ -2513,26 +2600,65 @@ function mimeTypeFor(filePath) {
   }[ext] || 'application/octet-stream';
 }
 
+function pathIsWithin(rootPath, candidatePath) {
+  const relative = path.relative(rootPath, candidatePath);
+  return relative === ''
+    || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+function resolveContainedPath(root, relativePath) {
+  const lexicalRoot = path.resolve(root);
+  const lexicalCandidate = path.resolve(lexicalRoot, String(relativePath || ''));
+  if (!pathIsWithin(lexicalRoot, lexicalCandidate) || !fs.existsSync(lexicalRoot)) return null;
+
+  let realRoot;
+  try {
+    realRoot = fs.realpathSync(lexicalRoot);
+  } catch {
+    return null;
+  }
+
+  let existingPath = lexicalCandidate;
+  while (!fs.existsSync(existingPath)) {
+    const parent = path.dirname(existingPath);
+    if (parent === existingPath) return null;
+    existingPath = parent;
+  }
+  try {
+    const realExistingPath = fs.realpathSync(existingPath);
+    const realCandidate = path.resolve(realExistingPath, path.relative(existingPath, lexicalCandidate));
+    return pathIsWithin(realRoot, realCandidate) ? realCandidate : null;
+  } catch {
+    return null;
+  }
+}
+
+function sendNotFound(res) {
+  sendJson(res, { ok: false, error: 'Not found' }, 404);
+}
+
 function sendStatic(req, res, pathname) {
   const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
-  const filePath = path.resolve(PUBLIC_DIR, relative);
-  if (!filePath.startsWith(PUBLIC_DIR)) {
-    sendJson(res, { ok: false, error: 'Not found' }, 404);
-    return;
-  }
-  if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
-    sendJson(res, { ok: false, error: 'Not found' }, 404);
+  const filePath = resolveContainedPath(PUBLIC_DIR, relative);
+  if (!filePath || !fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+    sendNotFound(res);
     return;
   }
   res.writeHead(200, { 'Content-Type': mimeTypeFor(filePath) });
   fs.createReadStream(filePath).pipe(res);
 }
 
-function sendUpload(res, pathname) {
-  const relative = decodeURIComponent(pathname.replace(/^\/uploads\/?/, ''));
-  const filePath = path.resolve(UPLOADS_DIR, relative);
-  if (!filePath.startsWith(UPLOADS_DIR) || !fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
-    sendJson(res, { ok: false, error: 'Not found' }, 404);
+function sendUpload(res, pathname, uploadsDir = UPLOADS_DIR) {
+  let relative;
+  try {
+    relative = decodeURIComponent(pathname.replace(/^\/uploads\/?/, ''));
+  } catch {
+    sendNotFound(res);
+    return;
+  }
+  const filePath = resolveContainedPath(uploadsDir, relative);
+  if (!filePath || !fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+    sendNotFound(res);
     return;
   }
   res.writeHead(200, { 'Content-Type': mimeTypeFor(filePath) });
@@ -2602,17 +2728,60 @@ function createDashboardServer(options = {}) {
     ...(options.preflight ? { preflight: options.preflight } : {}),
     ...(options.platformPublisher ? { platformPublisher: options.platformPublisher } : {}),
   };
-  const inFlightSinglePlatformPublishes = new Map();
-  const inFlightSinglePlatformSignatures = new Set();
-  const completedSinglePlatformPublishes = new Map();
-  const completedPublishTtlMs = Number.isFinite(options.singlePublishCacheTtlMs)
-    ? Math.max(1, options.singlePublishCacheTtlMs)
-    : 10 * 60 * 1000;
-  const completedPublishLimit = Number.isInteger(options.singlePublishCacheLimit)
-    ? Math.max(1, options.singlePublishCacheLimit)
-    : 128;
   const nowMs = typeof options.nowMs === 'function' ? options.nowMs : Date.now;
+  const operationJournal = options.operationJournal || createOperationJournal({
+    filePath: options.operationsFile || OPERATIONS_FILE,
+    nowMs,
+    ttlMs: options.operationJournalTtlMs ?? options.singlePublishCacheTtlMs,
+    limit: options.operationJournalLimit ?? options.singlePublishCacheLimit,
+  });
   const workbenchCsrfToken = randomBytes(32).toString('base64url');
+  const uploadsDir = path.resolve(options.uploadsDir || UPLOADS_DIR);
+
+  const executePublishOperation = async ({
+    operationId,
+    contentId,
+    platforms,
+    publishMode,
+    persistSelection = true,
+    updateAggregateStatus = true,
+  }) => {
+    validatePublishOperationId(operationId);
+    if (publishMode !== 'draft' && publishMode !== 'direct') {
+      throw statusError('publishMode 必须是 draft 或 direct', 400);
+    }
+    const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
+    if (!content) throw statusError('内容不存在', 404);
+    const selected = normalizePublishPlatforms(content, platforms);
+    if (!selected.length) throw statusError('请选择至少一个平台', 400);
+    for (const platform of selected) {
+      if (!one('SELECT id FROM platforms WHERE id = ?', platform)) {
+        throw statusError(`平台不存在: ${platform}`, 400);
+      }
+    }
+
+    const signature = buildPublishOperationSignature(content, selected, publishMode);
+    const admission = operationJournal.begin(operationId, signature);
+    if (admission.kind === 'replay') {
+      return { ...replayedPublishResult(admission.record), cached: true };
+    }
+
+    let publishFinished = false;
+    try {
+      const result = await publishContent(contentId, selected, {
+        ...publishDependencies,
+        publishMode,
+        persistSelection,
+        updateAggregateStatus,
+      });
+      publishFinished = true;
+      operationJournal.complete(operationId, journalResultForPublish(result));
+      return { ...result, cached: false };
+    } catch (error) {
+      if (!publishFinished) operationJournal.fail(operationId);
+      throw error;
+    }
+  };
 
   return http.createServer(async (req, res) => {
   const origin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
@@ -2649,7 +2818,7 @@ function createDashboardServer(options = {}) {
     }
 
     if (url.pathname.startsWith('/uploads/') && req.method === 'GET') {
-      sendUpload(res, url.pathname);
+      sendUpload(res, url.pathname, uploadsDir);
       return;
     }
 
@@ -2893,64 +3062,31 @@ function createDashboardServer(options = {}) {
       if (body.publishMode !== 'draft' && body.publishMode !== 'direct') {
         throw statusError('publishMode 必须是 draft 或 direct', 400);
       }
-      if (typeof body.operationId !== 'string'
-        || !/^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/.test(body.operationId)) {
-        throw statusError('operationId 必须是 16-128 位字母、数字、下划线或连字符', 400);
-      }
-      const operationId = body.operationId;
       const contentId = singlePlatformPublishMatch[1];
-      if (!one('SELECT id FROM contents WHERE id = ?', contentId)) {
-        throw statusError('内容不存在', 404);
-      }
-
-      const operationSignature = JSON.stringify([contentId, platform, body.publishMode]);
-      const currentTime = nowMs();
-      for (const [cachedOperationId, cached] of completedSinglePlatformPublishes) {
-        if (cached.expiresAt <= currentTime) completedSinglePlatformPublishes.delete(cachedOperationId);
-      }
-      const completed = completedSinglePlatformPublishes.get(operationId);
-      if (completed) {
-        if (completed.signature !== operationSignature) {
-          throw statusError('operationId 已用于其他发布参数', 409);
-        }
-        sendJson(res, { ok: true, ...completed.result, cached: true });
-        return;
-      }
-      if (inFlightSinglePlatformPublishes.has(operationId)) {
-        throw statusError('相同 operationId 的发布正在进行，请勿重复提交', 409);
-      }
-      if (inFlightSinglePlatformSignatures.has(operationSignature)) {
-        throw statusError('相同内容的平台发布正在进行，请勿重复提交', 409);
-      }
-      inFlightSinglePlatformPublishes.set(operationId, operationSignature);
-      inFlightSinglePlatformSignatures.add(operationSignature);
-      try {
-        const result = await publishContent(contentId, [platform], {
-          ...publishDependencies,
-          publishMode: body.publishMode,
-          persistSelection: false,
-          updateAggregateStatus: false,
-        });
-        completedSinglePlatformPublishes.set(operationId, {
-          signature: operationSignature,
-          result,
-          expiresAt: nowMs() + completedPublishTtlMs,
-        });
-        while (completedSinglePlatformPublishes.size > completedPublishLimit) {
-          completedSinglePlatformPublishes.delete(completedSinglePlatformPublishes.keys().next().value);
-        }
-        sendJson(res, { ok: true, ...result, cached: false });
-      } finally {
-        inFlightSinglePlatformPublishes.delete(operationId);
-        inFlightSinglePlatformSignatures.delete(operationSignature);
-      }
+      const result = await executePublishOperation({
+        operationId: body.operationId,
+        contentId,
+        platforms: [platform],
+        publishMode: body.publishMode,
+        persistSelection: false,
+        updateAggregateStatus: false,
+      });
+      sendJson(res, { ok: true, ...result });
       return;
     }
 
     if (url.pathname === '/api/publish' && req.method === 'POST') {
-      const body = await readBody(req);
-      const result = await publishContent(body.contentId, body.platforms || [], {
-        ...publishDependencies,
+      const body = await readBody(req, { invalidJsonStatusCode: 400 });
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        throw statusError('请求体必须是 JSON 对象', 400);
+      }
+      if (typeof body.contentId !== 'string' || !body.contentId) {
+        throw statusError('contentId 不能为空', 400);
+      }
+      const result = await executePublishOperation({
+        operationId: body.operationId,
+        contentId: body.contentId,
+        platforms: body.platforms || [],
         publishMode: body.publishMode || 'direct',
       });
       sendJson(res, { ok: true, ...result });
@@ -3038,6 +3174,7 @@ module.exports = {
   previewContentForPlatform,
   publishSnapshotName,
   publishContent,
+  createOperationJournal,
   getDashboardData,
   listenWithFallback,
 };

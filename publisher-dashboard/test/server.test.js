@@ -39,6 +39,7 @@ function rawHttpRequest(input, options = {}) {
 
 const testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'publisher-dashboard-test-'));
 process.env.PUBLISHER_DB = path.join(testDataDir, 'publisher.sqlite');
+process.env.PUBLISHER_OPERATIONS_FILE = path.join(testDataDir, 'publish-operations.json');
 const invalidPreviewCookieFile = path.join(testDataDir, 'invalid-preview-cookies.json');
 fs.writeFileSync(invalidPreviewCookieFile, 'not valid cookie JSON', 'utf8');
 process.env.WEIBOT_COOKIE_FILE = invalidPreviewCookieFile;
@@ -57,6 +58,7 @@ const {
   previewContentForPlatform,
   publishSnapshotName,
   publishContent,
+  createOperationJournal,
   createDashboardServer,
   getDashboardData,
   DRAFTS_DIR,
@@ -374,6 +376,51 @@ test('local API requires trusted origin and per-server CSRF for mutations', asyn
     await closeServer(firstServer);
     await closeServer(secondServer);
     cleanupImportedContent(imported);
+  }
+});
+
+test('upload serving rejects traversal, sibling-prefix, and symlink escapes without exposing paths', async () => {
+  const uploadRoot = fs.mkdtempSync(path.join(testDataDir, 'uploads-contained-'));
+  const siblingRoot = `${uploadRoot}-sibling`;
+  const outsideDirectory = fs.mkdtempSync(path.join(testDataDir, 'uploads-outside-'));
+  const outsideFile = path.join(testDataDir, 'outside-upload-secret.txt');
+  let testServer;
+  try {
+    fs.mkdirSync(siblingRoot, { recursive: true });
+    fs.writeFileSync(path.join(uploadRoot, 'safe.txt'), 'safe upload', 'utf8');
+    fs.writeFileSync(path.join(siblingRoot, 'sibling-secret.txt'), 'sibling secret', 'utf8');
+    fs.writeFileSync(outsideFile, 'outside secret', 'utf8');
+    fs.writeFileSync(path.join(outsideDirectory, 'nested-secret.txt'), 'nested secret', 'utf8');
+    fs.symlinkSync(outsideFile, path.join(uploadRoot, 'file-escape.txt'));
+    fs.symlinkSync(outsideDirectory, path.join(uploadRoot, 'directory-escape'));
+
+    testServer = createDashboardServer({ uploadsDir: uploadRoot });
+    const port = await listenOnRandomPort(testServer);
+    const origin = `http://127.0.0.1:${port}`;
+    let response = await workbenchFetch(`${origin}/uploads/safe.txt`);
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), 'safe upload');
+
+    const attacks = [
+      `/uploads/..%2F${encodeURIComponent(path.basename(outsideFile))}`,
+      `/uploads/..%2F${encodeURIComponent(path.basename(siblingRoot))}%2Fsibling-secret.txt`,
+      '/uploads/file-escape.txt',
+      '/uploads/directory-escape/nested-secret.txt',
+    ];
+    for (const attack of attacks) {
+      response = await workbenchFetch(`${origin}${attack}`);
+      const responseText = await response.text();
+      assert.equal(response.status, 404, attack);
+      assert.match(responseText, /Not found/);
+      assert.doesNotMatch(responseText, new RegExp(testDataDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+      assert.doesNotMatch(responseText, /outside secret|sibling secret|nested secret/);
+    }
+  } finally {
+    await closeServer(testServer);
+    fs.rmSync(uploadRoot, { recursive: true, force: true });
+    fs.rmSync(siblingRoot, { recursive: true, force: true });
+    fs.rmSync(outsideDirectory, { recursive: true, force: true });
+    fs.rmSync(outsideFile, { force: true });
   }
 });
 
@@ -940,6 +987,48 @@ test('publish snapshot names include safe job and content ids', () => {
   }
 });
 
+test('operation journal atomically persists running and reloads it as uncertain', () => {
+  const operationsFile = path.join(testDataDir, 'operation-journal-uncertain.json');
+  const signature = {
+    contentId: 'content-journal-test',
+    platforms: ['juejin', 'zhihu'],
+    publishMode: 'direct',
+    contentHash: 'a'.repeat(64),
+  };
+  let currentTime = 10_000;
+  const firstJournal = createOperationJournal({
+    filePath: operationsFile,
+    nowMs: () => currentTime,
+    ttlMs: 60_000,
+    limit: 8,
+  });
+  const started = firstJournal.begin('journal-operation-0001', signature);
+  assert.equal(started.kind, 'started');
+
+  const runningDocument = JSON.parse(fs.readFileSync(operationsFile, 'utf8'));
+  assert.equal(runningDocument.version, 1);
+  assert.deepEqual(runningDocument.records[0].signature, signature);
+  assert.equal(runningDocument.records[0].state, 'running');
+  assert.equal(
+    fs.readdirSync(path.dirname(operationsFile)).some(name => name.startsWith(`${path.basename(operationsFile)}.`) && name.endsWith('.tmp')),
+    false,
+  );
+
+  currentTime += 1;
+  const reloadedJournal = createOperationJournal({
+    filePath: operationsFile,
+    nowMs: () => currentTime,
+    ttlMs: 60_000,
+    limit: 8,
+  });
+  assert.equal(reloadedJournal.get('journal-operation-0001').state, 'uncertain');
+  assert.throws(
+    () => reloadedJournal.begin('journal-operation-0001', signature),
+    error => error?.statusCode === 409 && /不确定|重复/.test(error.message),
+  );
+  assert.doesNotMatch(fs.readFileSync(operationsFile, 'utf8'), /cookie|secret|正文内容/i);
+});
+
 test('repeated publish jobs keep different job-specific snapshots', async () => {
   let content;
   const jobIds = [];
@@ -991,7 +1080,7 @@ test('repeated publish jobs keep different job-specific snapshots', async () => 
   }
 });
 
-test('publishContent batch still updates selection and aggregate status for two platforms', async () => {
+test('publishContent batch draft uses distinct statuses without increasing published metrics', async () => {
   let fixture;
   const calls = [];
   try {
@@ -1002,23 +1091,34 @@ test('publishContent batch still updates selection and aggregate status for two 
       contentStatus: '已排版',
       planStatus: '正文已生成',
     });
+    const dashboardBefore = getDashboardData();
+    const publishedBefore = dashboardBefore.stats.thisWeekPublished;
+    const monthPublishedBefore = dashboardBefore.stats.monthPublished;
+    const distributionBefore = Object.fromEntries(dashboardBefore.platformDistribution.map(item => [item.id, item.count]));
     const result = await publishContent(fixture.id, ['zhihu', 'juejin'], {
       publishMode: 'draft',
       preflight: async () => null,
       platformPublisher: successfulPlatformPublisher(calls),
     });
 
-    assert.equal(result.job.status, 'published');
+    assert.equal(result.job.status, 'draft_saved');
     assert.deepEqual(result.job.platforms, ['zhihu', 'juejin']);
     assert.deepEqual(result.job.results.map(item => [item.platform, item.status]), [
-      ['zhihu', 'success'],
-      ['juejin', 'success'],
+      ['zhihu', 'platform_draft'],
+      ['juejin', 'platform_draft'],
     ]);
     assert.deepEqual(readPublishState(fixture), {
       selectedPlatforms: ['zhihu', 'juejin'],
-      contentStatus: '已发布',
-      planStatus: '已发布',
+      contentStatus: '草稿已保存',
+      planStatus: '草稿已保存',
     });
+    const dashboardAfter = getDashboardData();
+    assert.equal(dashboardAfter.stats.thisWeekPublished, publishedBefore);
+    assert.equal(dashboardAfter.stats.monthPublished, monthPublishedBefore);
+    assert.deepEqual(
+      Object.fromEntries(dashboardAfter.platformDistribution.map(item => [item.id, item.count])),
+      distributionBefore,
+    );
     assert.deepEqual(calls.map(call => call.platform), ['zhihu', 'juejin']);
   } finally {
     cleanupPublishStateFixture(fixture);
@@ -1088,8 +1188,9 @@ test('POST publish-platform records sequential jobs without changing aggregate c
     assert.equal(response.status, 200);
     let result = await response.json();
     assert.equal(result.ok, true);
+    assert.equal(result.job.status, 'draft_saved');
     assert.deepEqual(result.job.platforms, ['zhihu']);
-    assert.deepEqual(result.job.results.map(item => [item.platform, item.status]), [['zhihu', 'success']]);
+    assert.deepEqual(result.job.results.map(item => [item.platform, item.status]), [['zhihu', 'platform_draft']]);
     const firstJobId = result.job.id;
     assert.deepEqual(readPublishState(fixture), {
       selectedPlatforms: ['weixin', 'douyin'],
@@ -1182,8 +1283,14 @@ test('POST publish-platform keeps state stable across concurrent single-platform
       assert.equal(payload.ok, true);
       assert.equal(payload.job.results.length, 1);
       assert.equal(payload.job.results[0].platform, payload.job.platforms[0]);
-      assert.equal(payload.job.results[0].status, 'success');
     }
+    assert.deepEqual(Object.fromEntries(payloads.map(payload => [
+      payload.job.platforms[0],
+      [payload.job.status, payload.job.results[0].status],
+    ])), {
+      juejin: ['published', 'success'],
+      zhihu: ['draft_saved', 'platform_draft'],
+    });
     assert.deepEqual(readPublishState(fixture), {
       selectedPlatforms: ['weixin', 'douyin'],
       contentStatus: '草稿已保存',
@@ -1293,6 +1400,7 @@ test('single publish completed cache expires by TTL and evicts oldest entries wh
       planStatus: '已排版',
     });
     testServer = createDashboardServer({
+      operationsFile: path.join(testDataDir, 'single-cache-policy-operations.json'),
       preflight: async () => null,
       singlePublishCacheTtlMs: 50,
       singlePublishCacheLimit: 1,
@@ -1327,6 +1435,94 @@ test('single publish completed cache expires by TTL and evicts oldest entries wh
     response = await publish('cache-policy-operation-0001');
     assert.equal(response.status, 200);
     assert.equal(calls, 4);
+  } finally {
+    await closeServer(testServer);
+    cleanupPublishStateFixture(fixture);
+  }
+});
+
+test('batch publish journal survives server restart, replays completion, and rejects mismatch', async () => {
+  let fixture;
+  let testServer;
+  let calls = 0;
+  const operationsFile = path.join(testDataDir, 'batch-restart-operations.json');
+  const operationId = 'batch-restart-operation-0001';
+  const requestBody = {
+    contentId: '',
+    platforms: ['juejin', 'zhihu'],
+    publishMode: 'direct',
+    operationId,
+  };
+  const platformPublisher = async (markdownFile, platform) => {
+    calls += 1;
+    return {
+      output: `private raw output ${platform}`,
+      info: { status: 'success', message: `${platform} published` },
+    };
+  };
+  try {
+    fixture = createPublishStateFixture({
+      key: 'batch-journal-restart-secret-title',
+      planDate: '2099-06-07',
+      selectedPlatforms: ['weixin'],
+      contentStatus: '已排版',
+      planStatus: '已排版',
+    });
+    requestBody.contentId = fixture.id;
+    const startServer = async () => {
+      const instance = createDashboardServer({
+        operationsFile,
+        preflight: async () => null,
+        platformPublisher,
+      });
+      const port = await listenOnRandomPort(instance);
+      return { instance, endpoint: `http://127.0.0.1:${port}/api/publish` };
+    };
+    const post = (endpoint, body) => workbenchFetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    let running = await startServer();
+    testServer = running.instance;
+    let response = await post(running.endpoint, {
+      contentId: fixture.id,
+      platforms: ['zhihu'],
+      publishMode: 'direct',
+    });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /operationId/);
+    assert.equal(calls, 0);
+
+    response = await post(running.endpoint, requestBody);
+    const firstResult = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(firstResult.cached, false);
+    assert.equal(calls, 2);
+    const firstJobId = firstResult.job.id;
+    await closeServer(testServer);
+    testServer = null;
+
+    running = await startServer();
+    testServer = running.instance;
+    response = await post(running.endpoint, requestBody);
+    const replayResult = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(replayResult.cached, true);
+    assert.equal(replayResult.job.id, firstJobId);
+    assert.equal(calls, 2);
+
+    response = await post(running.endpoint, {
+      ...requestBody,
+      platforms: ['weixin'],
+    });
+    assert.equal(response.status, 409);
+    assert.match((await response.json()).error, /operationId|发布参数|内容版本/);
+    assert.equal(calls, 2);
+
+    const journalText = fs.readFileSync(operationsFile, 'utf8');
+    assert.doesNotMatch(journalText, /batch-journal-restart-secret-title|发布状态回归正文|private raw output/i);
   } finally {
     await closeServer(testServer);
     cleanupPublishStateFixture(fixture);
@@ -1425,6 +1621,7 @@ test('POST /api/publish keeps the existing batch publisher contract', async () =
         contentId: fixture.id,
         platforms: ['zhihu', 'juejin'],
         publishMode: 'draft',
+        operationId: 'batch-contract-operation-0001',
       }),
     });
     let result = await response.json();
@@ -1432,17 +1629,17 @@ test('POST /api/publish keeps the existing batch publisher contract', async () =
     assert.equal(response.status, 200);
     assert.equal(result.ok, true);
     assert.equal(result.job.content_id, fixture.id);
-    assert.equal(result.job.status, 'published');
+    assert.equal(result.job.status, 'draft_saved');
     assert.deepEqual(result.job.platforms, ['zhihu', 'juejin']);
     assert.deepEqual(result.job.results.map(item => [item.platform, item.status]), [
-      ['zhihu', 'success'],
-      ['juejin', 'success'],
+      ['zhihu', 'platform_draft'],
+      ['juejin', 'platform_draft'],
     ]);
     assert.equal(result.rawOutput, 'stub output zhihu\n\nstub output juejin');
     assert.deepEqual(readPublishState(fixture), {
       selectedPlatforms: ['zhihu', 'juejin'],
-      contentStatus: '已发布',
-      planStatus: '已发布',
+      contentStatus: '草稿已保存',
+      planStatus: '草稿已保存',
     });
 
     response = await workbenchFetch(`http://127.0.0.1:${port}/api/publish`, {
@@ -1451,6 +1648,7 @@ test('POST /api/publish keeps the existing batch publisher contract', async () =
       body: JSON.stringify({
         contentId: fixture.id,
         platforms: ['weixin'],
+        operationId: 'batch-contract-operation-0002',
       }),
     });
     result = await response.json();
@@ -1468,14 +1666,18 @@ test('POST /api/publish keeps the existing batch publisher contract', async () =
   }
 });
 
-test('root dashboard scripts build core and CLI without recursive test scripts', () => {
+test('root npm test runs focused core, CLI, and dashboard suites without recursion', () => {
   const rootPackagePath = path.resolve(__dirname, '..', '..', 'package.json');
   const rootPackage = JSON.parse(fs.readFileSync(rootPackagePath, 'utf8'));
 
   assert.equal(rootPackage.scripts.build, 'npm run build:core && npm run build:cli');
   assert.equal(rootPackage.scripts.dashboard, 'npm run build && npm --prefix publisher-dashboard start');
+  assert.equal(rootPackage.scripts['core:test'], 'npx -y pnpm@9.15.9 --filter @weibot/core test -- --run');
+  assert.equal(rootPackage.scripts['cli:test'], 'npx -y pnpm@9.15.9 --filter @weibot/cli test -- --run');
   assert.equal(rootPackage.scripts['dashboard:test'], 'npm run build && npm --prefix publisher-dashboard test');
-  assert.equal(rootPackage.scripts.test, 'npm run dashboard:test');
+  assert.equal(rootPackage.scripts.test, 'npm run core:test && npm run cli:test && npm run dashboard:test');
+  assert.doesNotMatch(rootPackage.scripts['core:test'], /npm (?:run )?test(?:\s|$)/);
+  assert.doesNotMatch(rootPackage.scripts['cli:test'], /npm (?:run )?test(?:\s|$)/);
   assert.doesNotMatch(rootPackage.scripts['dashboard:test'], /npm (?:run )?test(?:\s|$)/);
   assert.doesNotMatch(rootPackage.scripts['dashboard:test'], /dashboard:test/);
 });
@@ -1623,7 +1825,7 @@ test('renders fenced Markdown markup as escaped code nodes', () => {
     content = importContent({ filename: 'code-example.markdown', body });
 
     assert.match(content.body, /<h1>代码示例<\/h1>/);
-    assert.match(content.body, /<pre><code class="language-html">&lt;article data-action=&quot;publish&quot;&gt;&lt;script&gt;alert\(&quot;示例&quot;\)&lt;\/script&gt;&lt;\/article&gt;<\/code><\/pre>/);
+    assert.match(content.body, /<pre><code class="language-html">&lt;article data-action=&quot;publish&quot;&gt;&lt;script&gt;alert\(&quot;示例&quot;\)&lt;\/script&gt;&lt;\/article&gt;\n?<\/code><\/pre>/);
     assert.doesNotMatch(content.body, /<script\b|<[^>]+\sdata-action\s*=/i);
   } finally {
     cleanupImportedContent(content);
@@ -1658,7 +1860,7 @@ test('sanitizes mixed HTML while rendering protected Markdown literals safely', 
     assert.doesNotMatch(content.body, /onclick\s*=|href="javascript:|alert\("危险"\)/i);
     assert.match(content.body, /<article>\s*<p><a>保留正文<\/a><\/p>/);
     assert.match(content.body, /<a href="https:\/\/safe\.example\/path">https:\/\/safe\.example\/path<\/a>/);
-    assert.match(content.body, /<pre><code class="language-html">&lt;script&gt;alert\(&quot;示例&quot;\)&lt;\/script&gt;<\/code><\/pre>/);
+    assert.match(content.body, /<pre><code class="language-html">&lt;script&gt;alert\(&quot;示例&quot;\)&lt;\/script&gt;\n?<\/code><\/pre>/);
     assert.ok(content.body.includes(forgedToken));
   } finally {
     cleanupImportedContent(content);
@@ -1858,7 +2060,7 @@ test('renders inline and indented Markdown code safely during unnamed mixed infe
 
     assert.equal(content.title, '普通标题');
     assert.match(content.body, /<code>&lt;button data-action=&quot;inline&quot;&gt;行内按钮&lt;\/button&gt;<\/code>/);
-    assert.match(content.body, /<pre><code>&lt;script&gt;alert\(&quot;缩进代码&quot;\)&lt;\/script&gt;<\/code><\/pre>/);
+    assert.match(content.body, /<pre><code>&lt;script&gt;alert\(&quot;缩进代码&quot;\)&lt;\/script&gt;\n?<\/code><\/pre>/);
     assert.match(content.body, /<a href="https:\/\/safe\.example\/path">https:\/\/safe\.example\/path<\/a>/);
     assert.match(content.body, /<article>外部按钮<p>外部正文<\/p><\/article>/);
   } finally {
@@ -1974,6 +2176,91 @@ test('preserves inline and fenced code through import and contentToMarkdown', ()
     assert.match(content.body, /<pre><code class="language-js">/);
     assert.match(markdown, /Inline ``value with `tick` inside`` end\./);
     assert.match(markdown, /```js\nconst html = "<article data-action=\\"publish\\">";\nconsole\.log\(`tick`\);\n```/);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('mature GFM conversion preserves structure exactly through import edit and publish serialization', () => {
+  let content;
+  try {
+    const source = [
+      '# Format parity',
+      '',
+      'Paragraph with [docs](https://example.com/a?x=1&y=2#frag), **bold**, *emphasis*, and `inline <tag>`.',
+      '',
+      '- outer',
+      '  - inner [nested](https://nested.example/path?q=one&lang=zh)',
+      '  - inner `code`',
+      '',
+      '| Name | Value |',
+      '| :--- | ---: |',
+      '| **A** | `1 < 2` |',
+      '',
+      '```js',
+      'const url = "https://example.com?q=1&x=2";',
+      'console.log(`tick`);',
+      '```',
+    ].join('\n');
+    const expectedHtml = [
+      '<h1>Format parity</h1>',
+      '<p>Paragraph with <a href="https://example.com/a?x=1&y=2#frag">docs</a>, <strong>bold</strong>, <em>emphasis</em>, and <code>inline &lt;tag&gt;</code>.</p>',
+      '<ul>',
+      '<li>outer<ul>',
+      '<li>inner <a href="https://nested.example/path?q=one&lang=zh">nested</a></li>',
+      '<li>inner <code>code</code></li>',
+      '</ul>',
+      '</li>',
+      '</ul>',
+      '<table>',
+      '<thead>',
+      '<tr>',
+      '<th align="left">Name</th>',
+      '<th align="right">Value</th>',
+      '</tr>',
+      '</thead>',
+      '<tbody><tr>',
+      '<td align="left"><strong>A</strong></td>',
+      '<td align="right"><code>1 &lt; 2</code></td>',
+      '</tr>',
+      '</tbody></table>',
+      '<pre><code class="language-js">const url = &quot;https://example.com?q=1&amp;x=2&quot;;',
+      'console.log(`tick`);',
+      '</code></pre>',
+    ].join('\n');
+    const expectedMarkdown = [
+      '---',
+      'title: Format parity',
+      '---',
+      '',
+      '# Format parity',
+      '',
+      'Paragraph with [docs](https://example.com/a?x=1&y=2#frag), **bold**, *emphasis*, and `inline <tag>`.',
+      '',
+      '-   outer',
+      '    -   inner [nested](https://nested.example/path?q=one&lang=zh)',
+      '    -   inner `code`',
+      '',
+      '| Name | Value |',
+      '| :-- | --: |',
+      '| **A** | `1 < 2` |',
+      '',
+      '```js',
+      'const url = "https://example.com?q=1&x=2";',
+      'console.log(`tick`);',
+      '```',
+      '',
+    ].join('\n');
+
+    content = importContent({ filename: 'format-parity.md', body: source });
+    assert.equal(content.body, expectedHtml);
+    const edited = updateContent(content.id, {
+      title: content.title,
+      summary: content.summary,
+      body: content.body,
+    });
+    assert.equal(edited.body, expectedHtml);
+    assert.equal(contentToMarkdown(edited), expectedMarkdown);
   } finally {
     cleanupImportedContent(content);
   }
