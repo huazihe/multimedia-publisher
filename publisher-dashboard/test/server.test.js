@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
 const { after, test } = require('node:test');
+const { marked } = require('marked');
 const nativeFetch = globalThis.fetch;
 
 async function workbenchFetch(input, options = {}) {
@@ -106,6 +107,33 @@ function currentContentUpdatedAt(contentId) {
   const current = db.prepare('SELECT updated_at FROM contents WHERE id = ?').get(contentId);
   assert.ok(current, `内容不存在: ${contentId}`);
   return current.updated_at;
+}
+
+function decodeNumericHtmlEntities(value) {
+  return String(value || '').replace(
+    /&#(?:x([0-9a-f]+)|(\d+));/gi,
+    (_entity, hex, decimal) => String.fromCodePoint(Number.parseInt(hex || decimal, hex ? 16 : 10))
+  );
+}
+
+function assertRenderedTitleHeadingIsSafe(title) {
+  const markdown = contentToMarkdown({ title, body: '' });
+  const frontMatter = markdown.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n\r?\n/);
+  assert.ok(frontMatter);
+  const rendered = marked.parse(markdown.slice(frontMatter[0].length), {
+    async: false,
+    gfm: true,
+  });
+  assert.equal(typeof rendered, 'string');
+  assert.doesNotMatch(rendered, /<(?:a|img)\b/i);
+  assert.equal((rendered.match(/<h[1-6]\b/gi) || []).length, 1);
+  const h1 = rendered.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i);
+  assert.ok(h1);
+  assert.equal(rendered.replace(h1[0], '').trim(), '');
+  assert.equal(
+    decodeNumericHtmlEntities(h1[1]),
+    String(title || '').replace(/\s+/g, ' ').trim()
+  );
 }
 
 async function withFixedClock(timestamp, callback) {
@@ -609,7 +637,7 @@ test('contentToMarkdown safely serializes multiline and Markdown-significant tit
 
   assert.equal(lines[1], `title: ${JSON.stringify(title)}`);
   assert.equal((markdown.match(/^# /gm) || []).length, 1);
-  assert.equal(lines[4], '# 引号 "双引号": 路径\\\\值 \\# 注入 \\!\\[图\\](image\\.png) \\> 引用 \\- 列表 \\| 表格');
+  assert.equal(lines[4], '# 引号 &#34;双引号&#34;&#58; 路径&#92;值 &#35; 注入 &#33;&#91;图&#93;&#40;image&#46;png&#41; &#62; 引用 &#45; 列表 &#124; 表格');
   assert.match(markdown, /正文/);
 });
 
@@ -620,7 +648,19 @@ test('contentToMarkdown keeps an injected title in exactly one generated H1', ()
   assert.equal((markdown.match(/^# /gm) || []).length, 1);
   assert.equal(
     markdown.split('\n')[4],
-    '# 标题 \\# 注入 \\[x\\](https://example\\.com)'
+    '# 标题 &#35; 注入 &#91;x&#93;&#40;https&#58;&#47;&#47;example&#46;com&#41;'
+  );
+});
+
+test('contentToMarkdown rendered title H1 prevents GFM URL and email autolinks', () => {
+  assertRenderedTitleHeadingIsSafe(
+    '标题\n# 注入 https://example.com/path?x=1&y=2 联系 test@example.com'
+  );
+});
+
+test('contentToMarkdown rendered title H1 neutralizes Markdown links and images', () => {
+  assertRenderedTitleHeadingIsSafe(
+    '标题 [链接](https://example.com) ![图片](https://example.com/image.png)'
   );
 });
 

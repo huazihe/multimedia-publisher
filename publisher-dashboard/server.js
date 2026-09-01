@@ -2401,13 +2401,19 @@ function saveLocalDraft(contentId, platforms = [], expectedUpdatedAt) {
 function contentToMarkdown(content) {
   const title = String(content.title || '');
   const body = removeMatchingLeadingH1(contentBodyToMarkdown(content.body), title);
-  const headingTitle = normalizedMarkdownHeading(title)
-    .replace(/([\\`*_{}\[\]<>#+.!|-])/g, '\\$1');
+  const headingTitle = encodeMarkdownHeadingDisplay(title);
   return `---\ntitle: ${JSON.stringify(title)}\n---\n\n# ${headingTitle}\n\n${body}\n`;
 }
 
 function normalizedMarkdownHeading(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function encodeMarkdownHeadingDisplay(value) {
+  return normalizedMarkdownHeading(value).replace(
+    /[^\p{L}\p{N} ]/gu,
+    character => `&#${character.codePointAt(0)};`
+  );
 }
 
 function removeMatchingLeadingH1(markdown, title) {
