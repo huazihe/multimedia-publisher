@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
+const { createHash } = require('node:crypto');
 const { after, test } = require('node:test');
 const nativeFetch = globalThis.fetch;
 
@@ -1044,6 +1045,7 @@ test('operation journal atomically persists running and reloads it as uncertain'
     platforms: ['juejin', 'zhihu'],
     publishMode: 'direct',
     contentHash: 'a'.repeat(64),
+    expectedUpdatedAt: '2026-09-02T00:00:00.000Z',
   };
   let currentTime = 10_000;
   const firstJournal = createOperationJournal({
@@ -1178,6 +1180,124 @@ test('uncertain journal records survive short TTL pruning and block new IDs for 
   );
   assert.equal(journal.get('uncertain-retention-operation-0001').state, 'uncertain');
 });
+
+for (const legacyState of ['completed', 'running', 'uncertain', 'failed']) {
+  test(`disk-loaded v1 legacy ${legacyState} publish record preserves conservative API idempotency`, async () => {
+    let fixture;
+    let testServer;
+    let publisherCalls = 0;
+    const operationsFile = path.join(testDataDir, `legacy-v1-${legacyState}-operations.json`);
+    const legacyOperationId = `legacy-${legacyState}-operation-0001`;
+    const incomingOperationId = `legacy-${legacyState}-operation-0002`;
+    try {
+      fixture = createPublishStateFixture({
+        key: `legacy-v1-${legacyState}`,
+        planDate: {
+          completed: '2099-07-01',
+          running: '2099-07-02',
+          uncertain: '2099-07-03',
+          failed: '2099-07-04',
+        }[legacyState],
+        selectedPlatforms: ['zhihu'],
+        contentStatus: '已排版',
+        planStatus: '已排版',
+      });
+      const content = getDashboardData().contents.find(item => item.id === fixture.id);
+      const legacySignature = {
+        contentId: fixture.id,
+        platforms: ['zhihu'],
+        publishMode: 'direct',
+        contentHash: createHash('sha256').update(contentToMarkdown(content), 'utf8').digest('hex'),
+      };
+      const timestamp = new Date().toISOString();
+      const legacyResult = legacyState === 'completed'
+        ? {
+          jobId: `legacy-${legacyState}-job`,
+          jobStatus: 'published',
+          platformResults: [{ platform: 'zhihu', status: 'success' }],
+        }
+        : null;
+      fs.writeFileSync(operationsFile, `${JSON.stringify({
+        version: 1,
+        records: [{
+          operationId: legacyOperationId,
+          signature: legacySignature,
+          state: legacyState,
+          result: legacyResult,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          ...(legacyState === 'completed' ? { completedAt: timestamp } : {}),
+          ...(legacyState === 'uncertain' ? { uncertainAt: timestamp } : {}),
+          ...(legacyState === 'failed' ? { failedAt: timestamp } : {}),
+        }],
+      }, null, 2)}\n`, 'utf8');
+      testServer = createDashboardServer({
+        operationsFile,
+        preflight: async () => null,
+        platformPublisher: async () => {
+          publisherCalls += 1;
+          return {
+            output: 'new publisher call',
+            info: { status: 'success', message: 'new publication' },
+          };
+        },
+      });
+      const port = await listenOnRandomPort(testServer);
+      const endpoint = `http://127.0.0.1:${port}/api/content/${fixture.id}/publish-platform`;
+      const publish = operationId => workbenchFetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          platform: 'zhihu',
+          publishMode: 'direct',
+          operationId,
+          expectedUpdatedAt: content.updated_at,
+        }),
+      });
+
+      if (legacyState === 'completed') {
+        const response = await publish(incomingOperationId);
+        const result = await response.json();
+        assert.equal(response.status, 200);
+        assert.equal(result.cached, true);
+        assert.equal(result.canonicalConflict, true);
+        assert.equal(result.needsReload, true);
+        assert.equal(result.content, null);
+        assert.deepEqual(result.job.results.map(item => [item.platform, item.status]), [['zhihu', 'success']]);
+        assert.equal(publisherCalls, 0);
+
+        const document = JSON.parse(fs.readFileSync(operationsFile, 'utf8'));
+        const alias = document.records.find(record => record.operationId === incomingOperationId);
+        assert.equal(alias.aliasOf, legacyOperationId);
+        assert.equal(Object.prototype.hasOwnProperty.call(alias.signature, 'expectedUpdatedAt'), false);
+        assert.equal(alias.result.canonicalConflict, true);
+        assert.equal(alias.result.needsReload, true);
+      } else if (legacyState === 'failed') {
+        let response = await publish(legacyOperationId);
+        assert.equal(response.status, 409);
+        assert.match((await response.json()).error, /失败|禁止/);
+        assert.equal(publisherCalls, 0);
+
+        response = await publish(incomingOperationId);
+        const result = await response.json();
+        assert.equal(response.status, 200);
+        assert.equal(result.cached, false);
+        assert.equal(publisherCalls, 1);
+      } else {
+        const response = await publish(incomingOperationId);
+        assert.equal(response.status, 409);
+        assert.match(
+          (await response.json()).error,
+          legacyState === 'running' ? /正在进行|重复/ : /不确定|人工核对/
+        );
+        assert.equal(publisherCalls, 0);
+      }
+    } finally {
+      await closeServer(testServer);
+      cleanupPublishStateFixture(fixture);
+    }
+  });
+}
 
 test('instance lock rejects a live PID and safely replaces a stale PID lock', () => {
   const liveLockFile = path.join(testDataDir, 'publisher-live.instance.lock');

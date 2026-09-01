@@ -277,6 +277,17 @@ function operationSignatureKey(signature) {
   return JSON.stringify(normalizeOperationSignature(signature));
 }
 
+function operationSignaturesMatch(existingSignature, candidateSignature) {
+  const existing = normalizeOperationSignature(existingSignature);
+  const candidate = normalizeOperationSignature(candidateSignature);
+  if (existing.contentId !== candidate.contentId
+    || existing.publishMode !== candidate.publishMode
+    || existing.contentHash !== candidate.contentHash
+    || JSON.stringify(existing.platforms) !== JSON.stringify(candidate.platforms)) return false;
+  if (!existing.expectedUpdatedAt) return true;
+  return candidate.expectedUpdatedAt === existing.expectedUpdatedAt;
+}
+
 function normalizeJournalResult(result) {
   if (!result || typeof result !== 'object' || Array.isArray(result)) return null;
   const jobId = typeof result.jobId === 'string' ? result.jobId : '';
@@ -400,12 +411,11 @@ function createOperationJournal(options = {}) {
     },
     begin(operationId, signature) {
       const canonicalSignature = normalizeOperationSignature(signature);
-      const signatureKey = operationSignatureKey(canonicalSignature);
       reloadAndPrune();
 
       const existing = records.find(record => record.operationId === operationId);
       if (existing) {
-        if (operationSignatureKey(existing.signature) !== signatureKey) {
+        if (!operationSignaturesMatch(existing.signature, canonicalSignature)) {
           throw statusError('operationId 已用于其他发布参数或内容版本', 409);
         }
         if (existing.state === 'completed') return { kind: 'replay', record: existing };
@@ -417,7 +427,7 @@ function createOperationJournal(options = {}) {
         }
         throw statusError('相同 operationId 的发布正在进行，请勿重复提交', 409);
       }
-      const matchingSignature = records.filter(record => operationSignatureKey(record.signature) === signatureKey);
+      const matchingSignature = records.filter(record => operationSignaturesMatch(record.signature, canonicalSignature));
       const uncertain = matchingSignature.find(record => record.state === 'uncertain');
       if (uncertain) {
         throw statusError('相同内容与平台的发布结果不确定，禁止自动重试；请人工核对平台结果', 409);
@@ -429,11 +439,16 @@ function createOperationJournal(options = {}) {
       const completed = matchingSignature.find(record => record.state === 'completed');
       if (completed) {
         const timestamp = operationTimestamp(nowMs);
+        const completedSignature = normalizeOperationSignature(completed.signature);
+        const legacyCompleted = !completedSignature.expectedUpdatedAt;
+        const completedResult = normalizeJournalResult(completed.result);
         const alias = {
           operationId,
-          signature: canonicalSignature,
+          signature: legacyCompleted ? completedSignature : canonicalSignature,
           state: 'completed',
-          result: normalizeJournalResult(completed.result),
+          result: legacyCompleted
+            ? { ...(completedResult || {}), canonicalConflict: true, needsReload: true }
+            : completedResult,
           aliasOf: completed.aliasOf || completed.operationId,
           createdAt: timestamp,
           updatedAt: timestamp,
@@ -490,6 +505,8 @@ function createOperationJournal(options = {}) {
       let changed = false;
       for (const record of records) {
         if (record.state !== 'running') continue;
+        const signature = normalizeOperationSignature(record.signature);
+        if (!signature.expectedUpdatedAt) continue;
         record.state = 'uncertain';
         record.updatedAt = timestamp;
         record.uncertainAt = timestamp;
