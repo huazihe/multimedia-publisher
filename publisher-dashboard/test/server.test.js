@@ -4,9 +4,20 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
+const { createRequire } = require('node:module');
 const { after, test } = require('node:test');
 const { marked } = require('marked');
 const nativeFetch = globalThis.fetch;
+
+const requireFromCore = createRequire(path.resolve(__dirname, '..', '..', 'packages', 'core', 'package.json'));
+const { parseHTML } = (() => {
+  try {
+    return require('linkedom');
+  } catch (error) {
+    if (error?.code !== 'MODULE_NOT_FOUND') throw error;
+    return requireFromCore('linkedom');
+  }
+})();
 
 async function workbenchFetch(input, options = {}) {
   const target = new URL(input);
@@ -109,31 +120,37 @@ function currentContentUpdatedAt(contentId) {
   return current.updated_at;
 }
 
-function decodeNumericHtmlEntities(value) {
-  return String(value || '').replace(
-    /&#(?:x([0-9a-f]+)|(\d+));/gi,
-    (_entity, hex, decimal) => String.fromCodePoint(Number.parseInt(hex || decimal, hex ? 16 : 10))
-  );
+function serializedMarkdownBody(markdown) {
+  const frontMatter = String(markdown || '').match(/^---\r?\n[\s\S]*?\r?\n---\r?\n\r?\n/);
+  assert.ok(frontMatter);
+  return markdown.slice(frontMatter[0].length);
+}
+
+function expectedVisibleTitle(value) {
+  return String(value || '')
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .normalize('NFC');
 }
 
 function assertRenderedTitleHeadingIsSafe(title) {
   const markdown = contentToMarkdown({ title, body: '' });
-  const frontMatter = markdown.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n\r?\n/);
-  assert.ok(frontMatter);
-  const rendered = marked.parse(markdown.slice(frontMatter[0].length), {
+  const rendered = marked.parse(serializedMarkdownBody(markdown), {
     async: false,
     gfm: true,
   });
   assert.equal(typeof rendered, 'string');
-  assert.doesNotMatch(rendered, /<(?:a|img)\b/i);
-  assert.equal((rendered.match(/<h[1-6]\b/gi) || []).length, 1);
-  const h1 = rendered.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i);
+  const { document } = parseHTML('<!doctype html><html><body></body></html>');
+  document.body.innerHTML = rendered;
+  const headings = document.body.querySelectorAll('h1, h2, h3, h4, h5, h6');
+  assert.equal(headings.length, 1);
+  const h1 = document.body.querySelector('h1');
   assert.ok(h1);
-  assert.equal(rendered.replace(h1[0], '').trim(), '');
-  assert.equal(
-    decodeNumericHtmlEntities(h1[1]),
-    String(title || '').replace(/\s+/g, ' ').trim()
-  );
+  assert.equal(document.body.children.length, 1);
+  assert.equal(h1.children.length, 0);
+  assert.equal(h1.querySelectorAll('a, img').length, 0);
+  assert.equal(h1.textContent, expectedVisibleTitle(title));
 }
 
 async function withFixedClock(timestamp, callback) {
@@ -598,6 +615,83 @@ test('contentToMarkdown removes a normalized duplicate leading H1', () => {
   assert.match(markdown, /Body text/);
 });
 
+test('contentToMarkdown compares a leading H1 by rendered visible text', () => {
+  const cases = [
+    {
+      name: 'escaped backslashes and brackets',
+      title: 'C[x]',
+      body: '# C\\[x\\]\n\nBody text',
+      expectedHeadingCount: 1,
+    },
+    {
+      name: 'escaped emphasis remains literal',
+      title: '*Café*',
+      body: '# \\*Café\\*\n\nBody text',
+      expectedHeadingCount: 1,
+    },
+    {
+      name: 'HTML entities decode before comparison',
+      title: 'A & B',
+      body: '# A &amp; B\n\nBody text',
+      expectedHeadingCount: 1,
+    },
+    {
+      name: 'NFD heading matches NFC title',
+      title: 'Café',
+      body: '# Cafe\u0301\n\nBody text',
+      expectedHeadingCount: 1,
+    },
+    {
+      name: 'link visible text matches a plain title',
+      title: 'x',
+      body: '# [x](https://example.com)\n\nBody text',
+      expectedHeadingCount: 1,
+    },
+    {
+      name: 'reference link uses the lexer-resolved visible text',
+      title: 'x',
+      body: '# [x][ref]\n\n[ref]: https://example.com\n\nBody text',
+      expectedHeadingCount: 1,
+    },
+    {
+      name: 'literal link syntax is not the same visible title',
+      title: '[x](https://example.com)',
+      body: '# [x](https://example.com)\n\nBody text',
+      expectedHeadingCount: 2,
+    },
+    {
+      name: 'closing ATX hashes are not visible text',
+      title: 'Title',
+      body: '# Title ###\n\nBody text',
+      expectedHeadingCount: 1,
+    },
+  ];
+
+  for (const scenario of cases) {
+    const body = serializedMarkdownBody(contentToMarkdown({
+      title: scenario.title,
+      body: scenario.body,
+    }));
+    const headings = marked.lexer(body, { gfm: true })
+      .filter(token => token.type === 'heading' && token.depth === 1);
+    assert.equal(headings.length, scenario.expectedHeadingCount, scenario.name);
+    assert.match(body, /Body text/, scenario.name);
+    if (scenario.expectedHeadingCount === 2) {
+      const originalHeading = marked.lexer(scenario.body, { gfm: true })[0];
+      assert.equal(headings[1].raw, originalHeading.raw, scenario.name);
+    }
+  }
+});
+
+test('contentToMarkdown removes only the matching H1 raw token', () => {
+  const body = serializedMarkdownBody(contentToMarkdown({
+    title: 'Title',
+    body: '\n\n# Title\n\nBody text',
+  }));
+
+  assert.equal(body, '# Title\n\n\n\nBody text\n');
+});
+
 test('contentToMarkdown preserves an indented H1-looking code line', () => {
   const markdown = contentToMarkdown({
     title: 'Canonical Title',
@@ -636,8 +730,9 @@ test('contentToMarkdown safely serializes multiline and Markdown-significant tit
   const lines = markdown.split('\n');
 
   assert.equal(lines[1], `title: ${JSON.stringify(title)}`);
+  assert.equal(lines[2], `publisher-title-json-v1: ${JSON.stringify(title)}`);
   assert.equal((markdown.match(/^# /gm) || []).length, 1);
-  assert.equal(lines[4], '# 引号 &#34;双引号&#34;&#58; 路径&#92;值 &#35; 注入 &#33;&#91;图&#93;&#40;image&#46;png&#41; &#62; 引用 &#45; 列表 &#124; 表格');
+  assert.equal(lines[5], '# 引号 &#34;双引号&#34;&#58; 路径&#92;值 &#35; 注入 &#33;&#91;图&#93;&#40;image&#46;png&#41; &#62; 引用 &#45; 列表 &#124; 表格');
   assert.match(markdown, /正文/);
 });
 
@@ -647,9 +742,19 @@ test('contentToMarkdown keeps an injected title in exactly one generated H1', ()
 
   assert.equal((markdown.match(/^# /gm) || []).length, 1);
   assert.equal(
-    markdown.split('\n')[4],
+    markdown.split('\n')[5],
     '# 标题 &#35; 注入 &#91;x&#93;&#40;https&#58;&#47;&#47;example&#46;com&#41;'
   );
+});
+
+test('contentToMarkdown writes a versioned exact title marker with escaped U+2028 and U+2029', () => {
+  const title = 'Before\u2028Middle\u2029After';
+  const lines = contentToMarkdown({ title, body: '' }).split('\n');
+
+  assert.equal(lines[1], 'title: "Before\\u2028Middle\\u2029After"');
+  assert.equal(lines[2], 'publisher-title-json-v1: "Before\\u2028Middle\\u2029After"');
+  assert.doesNotMatch(lines[2], /[\u2028\u2029]/u);
+  assert.equal(lines[5], '# Before Middle After');
 });
 
 test('contentToMarkdown rendered title H1 prevents GFM URL and email autolinks', () => {
@@ -661,6 +766,17 @@ test('contentToMarkdown rendered title H1 prevents GFM URL and email autolinks',
 test('contentToMarkdown rendered title H1 neutralizes Markdown links and images', () => {
   assertRenderedTitleHeadingIsSafe(
     '标题 [链接](https://example.com) ![图片](https://example.com/image.png)'
+  );
+});
+
+test('contentToMarkdown rendered title H1 normalizes controls and preserves emoji ZWJ text', () => {
+  const title = 'A\u0000B\u001f\u0085C\n👩‍💻';
+  const markdown = contentToMarkdown({ title, body: '' });
+
+  assertRenderedTitleHeadingIsSafe(title);
+  assert.equal(
+    serializedMarkdownBody(markdown).split('\n')[0],
+    '# A B C &#128105;&#8205;&#128187;'
   );
 });
 
@@ -724,6 +840,7 @@ test('platform preview serializes canonical content and runs only the injected C
         previewFile = args[1];
         const source = fs.readFileSync(previewFile, 'utf8');
         assert.match(source, /title: "平台预览母稿"/);
+        assert.match(source, /publisher-title-json-v1: "平台预览母稿"/);
         assert.match(source, /# 平台预览母稿/);
         assert.match(source, /当前正文/);
         assert.doesNotMatch(source, /<h1>|<p>/);
@@ -781,6 +898,36 @@ test('built CLI preview process reads the temp source and cleans it without runt
     assert.deepEqual(databaseSnapshot(), before);
     assert.deepEqual(fs.readdirSync(tempRoot), []);
     assert.equal(fs.readFileSync(invalidPreviewCookieFile, 'utf8'), 'not valid cookie JSON');
+  } finally {
+    cleanupImportedContent(content);
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('built CLI preview recovers exact U+2028 and U+2029 dashboard titles', {
+  skip: !fs.existsSync(CLI_PATH) ? 'built CLI unavailable; npm run dashboard:test builds it first' : false,
+}, async () => {
+  let content;
+  const tempRoot = createPreviewTempRoot('preview-unicode-separators');
+  const title = 'Before\u2028Middle\u2029After';
+  try {
+    content = importContent({
+      title,
+      filename: 'unicode-separators.html',
+      body: '<p>Unicode separator body</p>',
+    });
+    const marker = contentToMarkdown(content).split('\n')[2];
+    assert.equal(marker, 'publisher-title-json-v1: "Before\\u2028Middle\\u2029After"');
+    assert.doesNotMatch(marker, /[\u2028\u2029]/u);
+
+    const preview = await previewContentForPlatform(content.id, 'xiaohongshu', {
+      tempRoot,
+      timeout: 30000,
+    });
+
+    assert.equal(preview.title, title);
+    assert.equal(preview.article.title, title);
+    assert.deepEqual(fs.readdirSync(tempRoot), []);
   } finally {
     cleanupImportedContent(content);
     fs.rmSync(tempRoot, { recursive: true, force: true });
@@ -3972,6 +4119,7 @@ test('mature GFM conversion preserves structure exactly through import edit and 
     const expectedMarkdown = [
       '---',
       'title: "Format parity"',
+      'publisher-title-json-v1: "Format parity"',
       '---',
       '',
       '# Format parity',

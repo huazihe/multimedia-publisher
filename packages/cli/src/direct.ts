@@ -293,8 +293,7 @@ function parseMarkdown(content: string): ParsedContent {
 
   const yamlMatch = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n/)
   if (yamlMatch) {
-    const titleMatch = yamlMatch[1].match(/^title:[ \t]*(.*?)[ \t]*\r?$/m)
-    if (titleMatch) title = parseFrontMatterTitle(titleMatch[1])
+    title = parseFrontMatterTitle(yamlMatch[1])
     body = content.slice(yamlMatch[0].length)
   }
 
@@ -314,16 +313,27 @@ function parseMarkdown(content: string): ParsedContent {
   }
 }
 
-function parseFrontMatterTitle(rawValue: string): string | null {
-  const value = rawValue.trim()
-  if (!value) return null
-
-  try {
-    const decoded = JSON.parse(value)
-    if (typeof decoded === 'string') return decoded
-  } catch {
-    // Fall through to the legacy unquoted and loosely quoted title formats.
+function frontMatterFieldValue(frontMatter: string, fieldName: string): string | null {
+  const prefix = `${fieldName}:`
+  for (const line of frontMatter.split(/\r?\n/)) {
+    if (line.startsWith(prefix)) return line.slice(prefix.length).trim()
   }
+  return null
+}
+
+function parseFrontMatterTitle(frontMatter: string): string | null {
+  const exactValue = frontMatterFieldValue(frontMatter, 'publisher-title-json-v1')
+  if (exactValue !== null) {
+    try {
+      const decoded = JSON.parse(exactValue)
+      if (typeof decoded === 'string') return decoded
+    } catch {
+      // Fall back to the backward-compatible title field when the marker is malformed.
+    }
+  }
+
+  const value = frontMatterFieldValue(frontMatter, 'title')?.trim() || ''
+  if (!value) return null
 
   const quote = value[0]
   if ((quote === '"' || quote === "'") && value[value.length - 1] === quote) {

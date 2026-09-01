@@ -5,10 +5,11 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { createHash, randomBytes, timingSafeEqual } = require('node:crypto');
+const { createRequire } = require('node:module');
 const { execFile, spawn } = require('child_process');
 const net = require('net');
 const { DatabaseSync } = require('node:sqlite');
-const { marked, Renderer } = require('marked');
+const { marked, Parser, Renderer } = require('marked');
 const TurndownService = require('turndown');
 const { gfm: turndownGfm } = require('turndown-plugin-gfm');
 const { listLayoutTemplates, renderLayoutTemplate } = require('./layout-templates');
@@ -26,6 +27,15 @@ const COOKIE_FILE = process.env.WEIBOT_COOKIE_FILE || path.join(REPO_ROOT, 'cook
 const LOGIN_DIR = path.join(REPO_ROOT, '.weibot-login');
 const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT || 18810);
+const requireFromCore = createRequire(path.join(REPO_ROOT, 'packages', 'core', 'package.json'));
+const { parseHTML } = (() => {
+  try {
+    return require('linkedom');
+  } catch (error) {
+    if (error?.code !== 'MODULE_NOT_FOUND') throw error;
+    return requireFromCore('linkedom');
+  }
+})();
 const loginSessions = new Map();
 const DEFAULT_SELECTED_PLATFORMS = [];
 const DASHBOARD_DISTRIBUTION_PLATFORMS = [
@@ -2402,27 +2412,57 @@ function contentToMarkdown(content) {
   const title = String(content.title || '');
   const body = removeMatchingLeadingH1(contentBodyToMarkdown(content.body), title);
   const headingTitle = encodeMarkdownHeadingDisplay(title);
-  return `---\ntitle: ${JSON.stringify(title)}\n---\n\n# ${headingTitle}\n\n${body}\n`;
+  const encodedTitle = encodeExactJsonTitle(title);
+  return `---\ntitle: ${encodedTitle}\npublisher-title-json-v1: ${encodedTitle}\n---\n\n# ${headingTitle}\n\n${body}\n`;
 }
 
-function normalizedMarkdownHeading(value) {
-  return String(value || '').replace(/\s+/g, ' ').trim();
+function encodeExactJsonTitle(value) {
+  return JSON.stringify(String(value || ''))
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+}
+
+function normalizeVisibleTitle(value) {
+  return String(value || '')
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .normalize('NFC');
 }
 
 function encodeMarkdownHeadingDisplay(value) {
-  return normalizedMarkdownHeading(value).replace(
+  return normalizeVisibleTitle(value).replace(
     /[^\p{L}\p{N} ]/gu,
     character => `&#${character.codePointAt(0)};`
   );
 }
 
+function renderedMarkdownVisibleText(tokens) {
+  const rendered = Parser.parseInline(tokens || [], {
+    async: false,
+    gfm: true,
+    renderer: canonicalMarkdownRenderer,
+  });
+  const { document } = parseHTML('<!doctype html><html><body></body></html>');
+  document.body.innerHTML = rendered;
+  return document.body.textContent;
+}
+
 function removeMatchingLeadingH1(markdown, title) {
   const source = String(markdown || '');
-  const leadingH1 = source.match(/^(?:[ \t]*\r?\n)* {0,3}#[ \t]+([^\r\n]+?)[ \t]*(?:(?:\r?\n)+|$)/);
-  return leadingH1
-    && normalizedMarkdownHeading(leadingH1[1]) === normalizedMarkdownHeading(title)
-    ? source.slice(leadingH1[0].length)
-    : source;
+  const tokens = marked.lexer(source, { gfm: true });
+  let offset = 0;
+  for (const token of tokens) {
+    if (token.type === 'space') {
+      offset += token.raw.length;
+      continue;
+    }
+    if (token.type !== 'heading' || token.depth !== 1) return source;
+    const visibleHeading = normalizeVisibleTitle(renderedMarkdownVisibleText(token.tokens));
+    if (visibleHeading !== normalizeVisibleTitle(title)) return source;
+    return source.slice(0, offset) + source.slice(offset + token.raw.length);
+  }
+  return source;
 }
 
 function previewApiError(message, statusCode, apiCode) {

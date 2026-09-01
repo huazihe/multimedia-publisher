@@ -147,10 +147,11 @@ describe('buildPlatformPreview', () => {
     const title = '标题\n# 注入 [x](https://example.com)'
     const markdown = [
       '---',
-      `title: ${JSON.stringify(title)}`,
+      'title: "兼容显示标题"',
+      `publisher-title-json-v1: ${JSON.stringify(title)}`,
       '---',
       '',
-      '# 标题 \\# 注入 \\[x\\](https://example\\.com)',
+      '# 标题 &#35; 注入 &#91;x&#93;&#40;https&#58;&#47;&#47;example&#46;com&#41;',
       '',
       '正文',
     ].join('\n')
@@ -165,7 +166,8 @@ describe('buildPlatformPreview', () => {
 
   it('reversibly decodes quotes, colons, newlines, hashes, and backslashes in JSON titles', () => {
     const title = '引号 "双引号": 路径\\值\n# 哈希'
-    const markdown = `---\ntitle: ${JSON.stringify(title)}\n---\n\n正文\n`
+    const encodedTitle = JSON.stringify(title)
+    const markdown = `---\ntitle: ${encodedTitle}\npublisher-title-json-v1: ${encodedTitle}\n---\n\n正文\n`
 
     withMarkdownFixture(markdown, filePath => {
       expect(buildPlatformPreview(filePath, 'zip-download', {}).title).toBe(title)
@@ -176,11 +178,38 @@ describe('buildPlatformPreview', () => {
     ['title: 旧式未加引号标题', '旧式未加引号标题'],
     ["title: '旧式单引号标题'", '旧式单引号标题'],
     ['title: "旧式双引号标题"', '旧式双引号标题'],
+    [String.raw`title: C:\temp`, String.raw`C:\temp`],
+    [String.raw`title: "literal\nsequence"`, String.raw`literal\nsequence`],
+    [String.raw`title: "escaped\\path and \"quote\""`, String.raw`escaped\\path and \"quote\"`],
+    ['title: "unterminated', '"unterminated'],
+    ["title: \"mismatched'", "\"mismatched'"],
   ])('keeps backward compatibility with %s', (titleLine, expectedTitle) => {
     const markdown = `---\n${titleLine}\n---\n\n正文\n`
 
     withMarkdownFixture(markdown, filePath => {
       expect(buildPlatformPreview(filePath, 'zip-download', {}).title).toBe(expectedTitle)
+    })
+  })
+
+  it.each([
+    ['U+2028', '\u2028', '\\u2028'],
+    ['U+2029', '\u2029', '\\u2029'],
+  ])('decodes %s from the versioned title marker', (_name, separator, escaped) => {
+    const title = `Before${separator}After`
+    const encodedTitle = JSON.stringify(title).replace(separator, escaped)
+    const markdown = [
+      '---',
+      'title: "Compatibility display"',
+      `publisher-title-json-v1: ${encodedTitle}`,
+      '---',
+      '',
+      '# Compatibility display',
+      '',
+      '正文',
+    ].join('\n')
+
+    withMarkdownFixture(markdown, filePath => {
+      expect(buildPlatformPreview(filePath, 'zip-download', {}).title).toBe(title)
     })
   })
 })
