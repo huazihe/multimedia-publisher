@@ -335,11 +335,8 @@ function parseFrontMatterTitle(frontMatter: string): string | null {
   const value = frontMatterFieldValue(frontMatter, 'title')?.trim() || ''
   if (!value) return null
 
-  const quote = value[0]
-  if ((quote === '"' || quote === "'") && value[value.length - 1] === quote) {
-    return value.slice(1, -1).trim()
-  }
-  return value
+  const legacyTitle = value.match(/^["']?([\s\S]+?)["']?$/)
+  return legacyTitle ? legacyTitle[1].trim() : value
 }
 
 function parseHtml(content: string, filePath: string): ParsedContent {

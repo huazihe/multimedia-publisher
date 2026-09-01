@@ -128,6 +128,7 @@ function serializedMarkdownBody(markdown) {
 
 function expectedVisibleTitle(value) {
   return String(value || '')
+    .toWellFormed()
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
     .replace(/\s+/gu, ' ')
     .trim()
@@ -778,6 +779,36 @@ test('contentToMarkdown rendered title H1 normalizes controls and preserves emoj
     serializedMarkdownBody(markdown).split('\n')[0],
     '# A B C &#128105;&#8205;&#128187;'
   );
+});
+
+test('contentToMarkdown rendered title H1 replaces lone surrogates and preserves valid pairs', () => {
+  const cases = [
+    {
+      name: 'lone high surrogate',
+      title: 'High \ud800 End',
+      expectedHeading: '# High &#65533; End',
+    },
+    {
+      name: 'lone low surrogate',
+      title: 'Low \udc00 End',
+      expectedHeading: '# Low &#65533; End',
+    },
+    {
+      name: 'valid emoji pairs and ZWJ',
+      title: 'Emoji 😀 👩‍💻',
+      expectedHeading: '# Emoji &#128512; &#128105;&#8205;&#128187;',
+    },
+  ];
+
+  for (const scenario of cases) {
+    const markdown = contentToMarkdown({ title: scenario.title, body: '' });
+    assertRenderedTitleHeadingIsSafe(scenario.title);
+    assert.equal(
+      serializedMarkdownBody(markdown).split('\n')[0],
+      scenario.expectedHeading,
+      scenario.name
+    );
+  }
 });
 
 test('publish snapshot preserves an explicit-title article leading body H1', async () => {

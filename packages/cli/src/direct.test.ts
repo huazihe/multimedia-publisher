@@ -181,8 +181,9 @@ describe('buildPlatformPreview', () => {
     [String.raw`title: C:\temp`, String.raw`C:\temp`],
     [String.raw`title: "literal\nsequence"`, String.raw`literal\nsequence`],
     [String.raw`title: "escaped\\path and \"quote\""`, String.raw`escaped\\path and \"quote\"`],
-    ['title: "unterminated', '"unterminated'],
-    ["title: \"mismatched'", "\"mismatched'"],
+    ['title: "unterminated', 'unterminated'],
+    ['title: trailing"', 'trailing'],
+    ["title: \"mismatched'", 'mismatched'],
   ])('keeps backward compatibility with %s', (titleLine, expectedTitle) => {
     const markdown = `---\n${titleLine}\n---\n\n正文\n`
 
