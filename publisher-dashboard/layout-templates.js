@@ -7,6 +7,19 @@ const { createRequire } = require('node:module');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const TEMPLATE_DIR = path.join(REPO_ROOT, 'skills', 'weixin-layout', 'templates');
+const ARTICLE_ALLOWED_ELEMENTS = new Set([
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'p', 'div', 'section', 'article', 'main', 'aside', 'header', 'footer', 'span',
+  'strong', 'em', 'b', 'i', 'u', 's', 'del', 'mark', 'small', 'sub', 'sup',
+  'ul', 'ol', 'li', 'dl', 'dt', 'dd', 'blockquote', 'pre', 'code', 'kbd', 'samp', 'var',
+  'table', 'caption', 'colgroup', 'col', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td',
+  'figure', 'figcaption', 'img', 'a', 'br', 'hr',
+]);
+const ARTICLE_DROP_ELEMENTS = [
+  'title', 'textarea', 'xmp', 'noembed', 'noframes', 'plaintext',
+  'script', 'style', 'iframe', 'object', 'embed', 'template', 'noscript',
+  'base', 'link', 'meta', 'svg', 'math', 'video', 'audio', 'source', 'track', 'canvas',
+];
 const DROP_ELEMENTS = [
   'script',
   'iframe',
@@ -286,7 +299,7 @@ function markdownToHtml(markdown) {
 }
 
 function looksLikeHtml(value) {
-  return /<(?:!doctype|html|body|article|main|section|div|p|h[1-6]|ul|ol|li|blockquote|figure|img|pre|table|a)\b/i.test(String(value || ''));
+  return /<(?:!doctype|html|body|article|main|section|div|p|h[1-6]|ul|ol|li|blockquote|figure|img|pre|table|a|title|textarea|xmp|noembed|noframes|plaintext|script|style|iframe|object|embed|template|noscript|base|link|meta|svg|math|video|audio|source|track|canvas)\b/i.test(String(value || ''));
 }
 
 function htmlBodyFragment(value) {
@@ -308,6 +321,25 @@ function unwrapElement(element) {
   if (!parent) return;
   for (const child of [...element.childNodes]) parent.insertBefore(child, element);
   element.remove();
+}
+
+function sanitizeArticleHtmlSource(value) {
+  let source = String(value || '').replace(/<!--[\s\S]*?-->/g, '');
+  source = source.replace(/<\s*plaintext\b[^>]*>[\s\S]*$/gi, '');
+  for (const tagName of ARTICLE_DROP_ELEMENTS.filter(tagName => tagName !== 'plaintext')) {
+    const paired = new RegExp(`<\\s*${tagName}\\b[^>]*>[\\s\\S]*?<\\s*\\/\\s*${tagName}\\s*>`, 'gi');
+    let previous;
+    do {
+      previous = source;
+      source = source.replace(paired, '');
+    } while (source !== previous);
+    source = source.replace(new RegExp(`<\\s*${tagName}\\b[^>]*>[\\s\\S]*$`, 'gi'), '');
+    source = source.replace(new RegExp(`<\\s*\\/?\\s*${tagName}\\b[^>]*>`, 'gi'), '');
+  }
+  return source.replace(/<\s*(\/?)\s*([a-z][\w:-]*)\b[^>]*>/gi, (tag, closing, rawName) => {
+    const tagName = rawName.toLowerCase();
+    return ARTICLE_ALLOWED_ELEMENTS.has(tagName) ? tag : '';
+  });
 }
 
 function normalizedUrl(value) {
@@ -365,13 +397,13 @@ function sanitizeTree(root, options = {}) {
   for (const meta of [...(root.querySelectorAll?.('meta') || [])]) {
     if (String(meta.getAttribute('http-equiv') || '').trim().toLowerCase() === 'refresh') meta.remove();
   }
-  for (const selector of UNWRAP_ELEMENTS) {
-    for (const element of [...(root.querySelectorAll?.(selector) || [])]) unwrapElement(element);
-  }
   if (options.article) {
-    for (const element of [...(root.querySelectorAll?.('style,svg,math,video,audio,source,track') || [])]) element.remove();
-    for (const element of [...(root.querySelectorAll?.('*') || [])]) {
-      if (element.localName?.includes('-')) unwrapElement(element);
+    for (const element of [...(root.querySelectorAll?.('*') || [])].reverse()) {
+      if (!ARTICLE_ALLOWED_ELEMENTS.has(String(element.localName || '').toLowerCase())) element.remove();
+    }
+  } else {
+    for (const selector of UNWRAP_ELEMENTS) {
+      for (const element of [...(root.querySelectorAll?.(selector) || [])]) unwrapElement(element);
     }
   }
   sanitizeAttributes(root, options);
@@ -654,7 +686,7 @@ function normalizedText(value) {
 }
 
 function createArticleNodes(document, body, profile, title) {
-  const html = looksLikeHtml(body) ? htmlBodyFragment(body) : markdownToHtml(body);
+  const html = looksLikeHtml(body) ? sanitizeArticleHtmlSource(body) : markdownToHtml(body);
   const holder = document.createElement('template');
   holder.innerHTML = html;
   sanitizeTree(holder.content, { article: true });
@@ -914,6 +946,7 @@ function inspectLayoutMetadata(html) {
   } catch {
     return null;
   }
+  if (!layoutDocumentIsSafe(document)) return null;
   const body = document.body;
   const roots = [...document.querySelectorAll('[data-wechat-template-root]')];
   if (!body || roots.length !== 1 || roots[0].getAttribute('data-wechat-template-root') !== 'true') {
@@ -944,6 +977,31 @@ function inspectLayoutMetadata(html) {
   if (!Number.isFinite(generatedTime)
     || new Date(generatedTime).toISOString() !== bodyMetadata.generatedAt) return null;
   return bodyMetadata;
+}
+
+function layoutDocumentIsSafe(document) {
+  if (!document?.head || !document?.body) return false;
+  if (document.head.querySelectorAll('title').length !== 1) return false;
+  if (document.querySelector('script,iframe,object,embed,template,noscript,base,link,math,video,audio,source,track,canvas')) {
+    return false;
+  }
+  if (document.body.querySelector('title,textarea,xmp,noembed,noframes,plaintext,style,meta,form,input,button,select,option,dialog')) {
+    return false;
+  }
+  if (document.querySelector('meta[http-equiv="refresh"],svg animate,svg animateMotion,svg animateTransform,svg set,svg foreignObject,svg use')) {
+    return false;
+  }
+  for (const element of document.querySelectorAll('*')) {
+    for (const attribute of [...element.attributes]) {
+      const name = attribute.name.toLowerCase();
+      if (name.startsWith('on') || COMMAND_ATTRIBUTES.has(name)) return false;
+      if (RESOURCE_ATTRIBUTES.has(name)
+        && !isAllowedResourceAttribute(element, name, attribute.value)) return false;
+      if (name === 'style'
+        && /(?:javascript\s*:|vbscript\s*:|expression\s*\(|@import)/i.test(attribute.value)) return false;
+    }
+  }
+  return true;
 }
 
 function renderLayoutTemplate(filename, input = {}) {
@@ -978,10 +1036,15 @@ function renderLayoutTemplate(filename, input = {}) {
     canonicalHash: canonicalContentHash({ title, summary, body }),
     generatedAt,
   });
-  return serializeTemplateDocument(document, title);
+  const serialized = serializeTemplateDocument(document, title);
+  if (!inspectLayoutMetadata(serialized)) {
+    throw new Error('模板最终产物安全校验失败');
+  }
+  return serialized;
 }
 
 module.exports = {
+  ARTICLE_ALLOWED_ELEMENTS,
   TEMPLATE_DIR,
   canonicalContentHash,
   inspectLayoutMetadata,

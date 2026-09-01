@@ -2921,11 +2921,13 @@ function stagePublishSources(content, selected, jobId, contentId, options = {}) 
       );
       const basename = snapshotName.slice(0, -(payload.extension.length + 1));
       const expectedPath = path.join(DRAFTS_DIR, snapshotName);
-      stagedPaths.push(expectedPath);
       const written = snapshotWriter(DRAFTS_DIR, basename, payload);
       if (!written
-        || path.resolve(written.filePath || '') !== path.resolve(expectedPath)
-        || written.contentHash !== payload.contentHash
+        || path.resolve(written.filePath || '') !== path.resolve(expectedPath)) {
+        throw new Error(`平台 ${platform} 的发布快照写入校验失败`);
+      }
+      stagedPaths.push(expectedPath);
+      if (written.contentHash !== payload.contentHash
         || hashFile(expectedPath) !== payload.contentHash) {
         throw new Error(`平台 ${platform} 的发布快照写入校验失败`);
       }
@@ -2951,12 +2953,12 @@ function stagePublishSources(content, selected, jobId, contentId, options = {}) 
     };
     const manifestFilename = publishManifestName(jobId, contentId);
     const expectedManifestPath = path.join(DRAFTS_DIR, manifestFilename);
-    stagedPaths.push(expectedManifestPath);
     const writtenManifest = manifestWriter(DRAFTS_DIR, manifestFilename, manifest);
     if (!writtenManifest
       || path.resolve(writtenManifest.filePath || '') !== path.resolve(expectedManifestPath)) {
       throw new Error('发布快照清单写入校验失败');
     }
+    stagedPaths.push(expectedManifestPath);
     return {
       platformSources,
       manifest,
@@ -3473,9 +3475,9 @@ function sendLayoutPreview(res, contentId) {
       "default-src 'none'",
       "script-src 'none'",
       "object-src 'none'",
-      "base-uri 'none'",
+      "base-uri 'self'",
       "form-action 'none'",
-      "frame-ancestors 'none'",
+      "frame-ancestors 'self'",
       "style-src 'unsafe-inline'",
       'img-src http: https: data:',
     ].join('; '),

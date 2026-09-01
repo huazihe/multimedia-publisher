@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const { createHash } = require('node:crypto');
 const { createRequire } = require('node:module');
 const { after, test } = require('node:test');
@@ -323,6 +324,85 @@ test('serializes hostile and special document titles as inert RCDATA', () => {
     special,
     /<title>A &lt; B &amp; C > D "double quoted" 'single quoted'<\/title>/
   );
+});
+
+test('article allowlist neutralizes encoded raw-text parser mutation payloads', () => {
+  const encodedTitlePayload = '<title>&lt;/title>&lt;script data-body-probe=1>1&lt;/script>&lt;title></title>';
+  const bodies = [
+    encodedTitlePayload,
+    `<p>安全前缀</p>${encodedTitlePayload}`,
+    '<p>安全前缀</p><textarea>&lt;/textarea>&lt;script data-body-probe=2>2&lt;/script>&lt;textarea></textarea>',
+    '<p>安全前缀</p><xmp>&lt;/xmp>&lt;script data-body-probe=3>3&lt;/script>&lt;xmp></xmp>',
+    '<p>安全前缀</p><noembed>&lt;/noembed>&lt;script data-body-probe=5>5&lt;/script>&lt;noembed></noembed>',
+  ];
+
+  for (const [index, body] of bodies.entries()) {
+    const html = renderLayoutTemplate('style_10.html', {
+      title: `正文解析安全 ${index}`,
+      summary: '正文解析安全摘要',
+      body,
+      accountName: '',
+      accountDescription: '',
+      generatedAt: '2026-09-02T07:00:00.000Z',
+    });
+    const { document } = parseHTML(html);
+
+    assert.equal(
+      document.querySelector('script,iframe,object,embed,textarea,xmp,noembed,noframes,plaintext') === null,
+      true,
+      `payload ${index}`
+    );
+    assert.equal(document.body.querySelector('title') === null, true, `payload ${index}`);
+    assert.equal(document.querySelector('[data-body-probe]') === null, true, `payload ${index}`);
+    assert.ok(inspectLayoutMetadata(html), `payload ${index}`);
+  }
+});
+
+test('plaintext article payload is rejected before parser-state mutation can hang serialization', () => {
+  const modulePath = path.resolve(__dirname, '../layout-templates.js');
+  const script = `
+    const { renderLayoutTemplate } = require(${JSON.stringify(modulePath)});
+    const html = renderLayoutTemplate('style_10.html', {
+      title: 'plaintext parser safety',
+      summary: '',
+      body: '<p>safe prefix</p><plaintext>&lt;script data-body-probe=4>4&lt;/script>',
+      generatedAt: '2026-09-02T07:00:00.000Z'
+    });
+    process.stdout.write(html);
+  `;
+  const result = spawnSync(process.execPath, ['-e', script], {
+    encoding: 'utf8',
+    timeout: 2_000,
+  });
+
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.equal(result.status, 0, result.stderr);
+  const { document } = parseHTML(result.stdout);
+  assert.equal(document.querySelector('script,plaintext,[data-body-probe]') === null, true);
+  assert.ok(inspectLayoutMetadata(result.stdout));
+});
+
+test('layout metadata inspection fails closed on executable attributes and unsafe resources', () => {
+  const html = renderLayoutTemplate('style_10.html', {
+    title: '最终产物复验',
+    summary: '最终产物复验摘要',
+    body: '<p>最终产物复验正文</p>',
+    accountName: '',
+    accountDescription: '',
+    generatedAt: '2026-09-02T07:10:00.000Z',
+  });
+  const mutations = [
+    html.replace('</body>', '<script data-final-probe="script">1</script></body>'),
+    html.replace('</body>', '<title>body title</title></body>'),
+    html.replace('data-wechat-template-root="true"', 'data-wechat-template-root="true" onclick="alert(1)"'),
+    html.replace('data-wechat-template-root="true"', 'data-wechat-template-root="true" data-command="publish"'),
+    html.replace('</body>', '<img src="javascript:alert(1)" onerror="alert(2)"></body>'),
+    html.replace('</body>', '<textarea>raw text</textarea></body>'),
+  ];
+
+  for (const [index, mutation] of mutations.entries()) {
+    assert.equal(inspectLayoutMetadata(mutation), null, `mutation ${index}`);
+  }
 });
 
 test('renders all 40 templates with only the requested article and account copy', () => {
@@ -812,9 +892,11 @@ test('layout preview endpoint reparses hostile titles without executable nodes a
     assert.match(csp, /default-src 'none'/);
     assert.match(csp, /script-src 'none'/);
     assert.match(csp, /object-src 'none'/);
-    assert.match(csp, /base-uri 'none'/);
+    assert.match(csp, /base-uri 'self'/);
     assert.match(csp, /style-src 'unsafe-inline'/);
     assert.match(csp, /img-src http: https: data:/);
+    assert.match(csp, /frame-ancestors 'self'/);
+    assert.doesNotMatch(csp, /(?:base-uri|frame-ancestors) 'none'/);
   } finally {
     cleanupContent(content);
   }

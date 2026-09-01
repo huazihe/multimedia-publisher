@@ -81,6 +81,7 @@ const {
   createPlatformSource,
   hashSource,
   hashFile,
+  atomicWriteExclusiveFile,
   publishSnapshotName,
   publishManifestName,
   publishContent,
@@ -2667,6 +2668,105 @@ test('second snapshot staging failure leaves no running job or orphan and fails 
     assert.equal(journal.records[0].state, 'failed');
   } finally {
     await closeServer(testServer);
+    cleanupPublishStateFixture(fixture);
+  }
+});
+
+test('snapshot collision preserves the pre-existing file and creates no job or publisher call', async () => {
+  let fixture;
+  let collisionFile = '';
+  let publisherCalls = 0;
+  const sentinel = Buffer.from('pre-existing snapshot sentinel', 'utf8');
+  try {
+    fixture = createPublishStateFixture({
+      key: 'snapshot-collision-preserved',
+      planDate: '2099-08-03',
+      selectedPlatforms: ['zhihu'],
+      contentStatus: '已排版',
+      planStatus: '已排版',
+    });
+
+    await assert.rejects(
+      () => publishContent(fixture.id, ['zhihu'], {
+        preflight: async () => null,
+        snapshotWriter: (rootDir, basename, payload) => {
+          collisionFile = path.join(rootDir, `${basename}.${payload.extension}`);
+          fs.writeFileSync(collisionFile, sentinel, { flag: 'wx', mode: 0o640 });
+          fs.chmodSync(collisionFile, 0o640);
+          return writePlatformSourceFile(rootDir, basename, payload);
+        },
+        platformPublisher: async () => {
+          publisherCalls += 1;
+          return { output: 'must not publish', info: { status: 'success' } };
+        },
+      }),
+      error => error?.code === 'EEXIST'
+    );
+
+    assert.equal(fs.existsSync(collisionFile), true);
+    assert.deepEqual(fs.readFileSync(collisionFile), sentinel);
+    assert.equal(fs.statSync(collisionFile).mode & 0o777, 0o640);
+    assert.equal(publisherCalls, 0);
+    assert.equal(
+      db.prepare('SELECT COUNT(*) AS count FROM publish_jobs WHERE content_id = ?').get(fixture.id).count,
+      0
+    );
+    assert.deepEqual(
+      fs.readdirSync(DRAFTS_DIR).filter(name => name.includes(fixture.id)),
+      [path.basename(collisionFile)]
+    );
+  } finally {
+    if (collisionFile) fs.rmSync(collisionFile, { force: true });
+    cleanupPublishStateFixture(fixture);
+  }
+});
+
+test('manifest collision preserves the pre-existing file and cleans current-attempt snapshots', async () => {
+  let fixture;
+  let collisionFile = '';
+  let publisherCalls = 0;
+  const sentinel = Buffer.from('{"preExisting":true}\n', 'utf8');
+  try {
+    fixture = createPublishStateFixture({
+      key: 'manifest-collision-preserved',
+      planDate: '2099-08-04',
+      selectedPlatforms: ['zhihu'],
+      contentStatus: '已排版',
+      planStatus: '已排版',
+    });
+
+    await assert.rejects(
+      () => publishContent(fixture.id, ['zhihu'], {
+        preflight: async () => null,
+        manifestWriter: (rootDir, filename, manifest) => {
+          collisionFile = path.join(rootDir, filename);
+          fs.writeFileSync(collisionFile, sentinel, { flag: 'wx', mode: 0o640 });
+          fs.chmodSync(collisionFile, 0o640);
+          atomicWriteExclusiveFile(collisionFile, `${JSON.stringify(manifest)}\n`);
+          return { filePath: collisionFile };
+        },
+        platformPublisher: async () => {
+          publisherCalls += 1;
+          return { output: 'must not publish', info: { status: 'success' } };
+        },
+      }),
+      error => error?.code === 'EEXIST'
+    );
+
+    assert.equal(fs.existsSync(collisionFile), true);
+    assert.deepEqual(fs.readFileSync(collisionFile), sentinel);
+    assert.equal(fs.statSync(collisionFile).mode & 0o777, 0o640);
+    assert.equal(publisherCalls, 0);
+    assert.equal(
+      db.prepare('SELECT COUNT(*) AS count FROM publish_jobs WHERE content_id = ?').get(fixture.id).count,
+      0
+    );
+    assert.deepEqual(
+      fs.readdirSync(DRAFTS_DIR).filter(name => name.includes(fixture.id)),
+      [path.basename(collisionFile)]
+    );
+  } finally {
+    if (collisionFile) fs.rmSync(collisionFile, { force: true });
     cleanupPublishStateFixture(fixture);
   }
 });
