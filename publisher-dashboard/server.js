@@ -12,7 +12,11 @@ const { DatabaseSync } = require('node:sqlite');
 const { marked, Parser, Renderer } = require('marked');
 const TurndownService = require('turndown');
 const { gfm: turndownGfm } = require('turndown-plugin-gfm');
-const { listLayoutTemplates, renderLayoutTemplate } = require('./layout-templates');
+const {
+  canonicalContentHash,
+  listLayoutTemplates,
+  renderLayoutTemplate,
+} = require('./layout-templates');
 
 const ROOT = __dirname;
 const REPO_ROOT = path.resolve(ROOT, '..');
@@ -268,10 +272,15 @@ function normalizeOperationSignature(signature) {
     : [];
   const publishMode = signature.publishMode === 'draft' ? 'draft' : signature.publishMode === 'direct' ? 'direct' : '';
   const contentHash = String(signature.contentHash || '').toLowerCase();
+  const sourceHash = String(signature.sourceHash || '').toLowerCase();
   const expectedUpdatedAt = typeof signature.expectedUpdatedAt === 'string'
     ? signature.expectedUpdatedAt
     : '';
-  if (!contentId || !platforms.length || !publishMode || !/^[a-f0-9]{64}$/.test(contentHash)) {
+  if (!contentId
+    || !platforms.length
+    || !publishMode
+    || !/^[a-f0-9]{64}$/.test(contentHash)
+    || (sourceHash && !/^[a-f0-9]{64}$/.test(sourceHash))) {
     throw new Error('发布操作签名无效');
   }
   return {
@@ -279,6 +288,7 @@ function normalizeOperationSignature(signature) {
     platforms,
     publishMode,
     contentHash,
+    ...(sourceHash ? { sourceHash } : {}),
     ...(expectedUpdatedAt ? { expectedUpdatedAt } : {}),
   };
 }
@@ -294,6 +304,9 @@ function operationSignaturesMatch(existingSignature, candidateSignature) {
     || existing.publishMode !== candidate.publishMode
     || existing.contentHash !== candidate.contentHash
     || JSON.stringify(existing.platforms) !== JSON.stringify(candidate.platforms)) return false;
+  if (existing.sourceHash && candidate.sourceHash && existing.sourceHash !== candidate.sourceHash) {
+    return false;
+  }
   if (!existing.expectedUpdatedAt) return true;
   return candidate.expectedUpdatedAt === existing.expectedUpdatedAt;
 }
@@ -450,13 +463,14 @@ function createOperationJournal(options = {}) {
       if (completed) {
         const timestamp = operationTimestamp(nowMs);
         const completedSignature = normalizeOperationSignature(completed.signature);
-        const legacyCompleted = !completedSignature.expectedUpdatedAt;
+        const missingExpectedRevision = !completedSignature.expectedUpdatedAt;
+        const preserveLegacySignature = missingExpectedRevision || !completedSignature.sourceHash;
         const completedResult = normalizeJournalResult(completed.result);
         const alias = {
           operationId,
-          signature: legacyCompleted ? completedSignature : canonicalSignature,
+          signature: preserveLegacySignature ? completedSignature : canonicalSignature,
           state: 'completed',
-          result: legacyCompleted
+          result: missingExpectedRevision
             ? { ...(completedResult || {}), canonicalConflict: true, needsReload: true }
             : completedResult,
           aliasOf: completed.aliasOf || completed.operationId,
@@ -2416,6 +2430,60 @@ function contentToMarkdown(content) {
   return `---\ntitle: ${encodedTitle}\npublisher-title-json-v1: ${encodedTitle}\n---\n\n# ${headingTitle}\n\n${body}\n`;
 }
 
+function hashSource(source) {
+  return createHash('sha256').update(source).digest('hex');
+}
+
+function hashFile(filePath) {
+  return hashSource(fs.readFileSync(filePath));
+}
+
+function layoutHash(html) {
+  return String(html || '').match(
+    /\bdata-canonical-sha256\s*=\s*(["'])([a-f0-9]{64})\1/i
+  )?.[2].toLowerCase() || '';
+}
+
+function selectPlatformSourcePayload(content, platform) {
+  const platformId = String(platform || '').trim().toLowerCase();
+  if (!platformId) throw new Error('平台源缺少平台 ID');
+  const canonicalMarkdown = contentToMarkdown(content);
+  const useLayout = platformId === 'weixin'
+    && layoutHash(content?.layout_html) === canonicalContentHash(content);
+  const sourceContent = useLayout ? String(content.layout_html) : canonicalMarkdown;
+  const format = useLayout ? 'html' : 'markdown';
+  return {
+    platform: platformId,
+    format,
+    extension: format === 'html' ? 'html' : 'md',
+    content: sourceContent,
+    contentHash: hashSource(sourceContent),
+    templated: useLayout,
+    warnings: platformId === 'weixin' && !useLayout ? ['尚未使用公众号模板'] : [],
+  };
+}
+
+function writePlatformSourceFile(rootDir, basename, payload) {
+  const safeBasename = String(basename || '');
+  if (!/^[A-Za-z0-9_-]+$/.test(safeBasename)) throw new Error('平台源文件名无效');
+  if (!payload || typeof payload !== 'object' || !['html', 'md'].includes(payload.extension)) {
+    throw new Error('平台源载荷无效');
+  }
+  const filePath = path.join(path.resolve(rootDir), `${safeBasename}.${payload.extension}`);
+  fs.writeFileSync(filePath, String(payload.content || ''), 'utf8');
+  return {
+    ...payload,
+    filePath,
+    contentHash: hashFile(filePath),
+  };
+}
+
+function createPlatformSource(content, platform, rootDir, options = {}) {
+  const payload = selectPlatformSourcePayload(content, platform);
+  const basename = options.basename === undefined ? payload.platform : options.basename;
+  return writePlatformSourceFile(rootDir, basename, payload);
+}
+
 function encodeExactJsonTitle(value) {
   return JSON.stringify(String(value || ''))
     .replace(/\u2028/g, '\\u2028')
@@ -2552,14 +2620,13 @@ async function previewContentForPlatform(contentId, platform, options = {}) {
 
   const tempRoot = path.resolve(options.tempRoot || os.tmpdir());
   const previewDir = fs.mkdtempSync(path.join(tempRoot, 'publisher-dashboard-preview-'));
-  const markdownFile = path.join(previewDir, 'content.md');
   try {
-    fs.writeFileSync(markdownFile, contentToMarkdown(content), 'utf8');
+    const source = createPlatformSource(content, platformId, previewDir, { basename: 'content' });
 
     const runner = options.runner || runWeibotCli;
     let result;
     try {
-      result = await runner(['preview', markdownFile, '-p', platformId], options.timeout || 30000);
+      result = await runner(['preview', source.filePath, '-p', platformId], options.timeout || 30000);
     } catch (error) {
       throw mapPreviewExecutionError(error);
     }
@@ -2594,7 +2661,11 @@ async function previewContentForPlatform(contentId, platform, options = {}) {
         'PREVIEW_INVALID_RESPONSE'
       );
     }
-    return validatePlatformPreviewResult(preview, platformId);
+    const validated = validatePlatformPreviewResult(preview, platformId);
+    return {
+      ...validated,
+      warnings: [...new Set([...validated.warnings, ...source.warnings])],
+    };
   } finally {
     fs.rmSync(previewDir, { recursive: true, force: true });
   }
@@ -2739,14 +2810,19 @@ function normalizeStoredPublishResult(platform, info) {
   return info;
 }
 
-function publishSnapshotName(jobId, contentId) {
+function publishSnapshotName(jobId, contentId, platform = '', extension = 'md') {
   const safeIdPattern = /^[A-Za-z0-9_-]+$/;
   const job = String(jobId || '');
   const content = String(contentId || '');
-  if (!safeIdPattern.test(job) || !safeIdPattern.test(content)) {
+  const platformId = String(platform || '');
+  const sourceExtension = String(extension || '');
+  if (!safeIdPattern.test(job)
+    || !safeIdPattern.test(content)
+    || (platformId && !safeIdPattern.test(platformId))
+    || !/^(?:md|html|txt)$/.test(sourceExtension)) {
     throw new Error('发布快照 ID 无效');
   }
-  return `${job}-${content}.md`;
+  return `${job}-${content}${platformId ? `-${platformId}` : ''}.${sourceExtension}`;
 }
 
 function normalizePublishPlatforms(content, platforms) {
@@ -2774,11 +2850,19 @@ function immutableSnapshot(value) {
 }
 
 function buildPublishOperationSignature(content, platforms, publishMode, expectedUpdatedAt = '') {
+  const normalizedPlatforms = [...new Set((Array.isArray(platforms) ? platforms : [])
+    .map(platform => String(platform || '').trim().toLowerCase())
+    .filter(Boolean))].sort();
+  const platformSourceHashes = normalizedPlatforms.map(platform => {
+    const source = selectPlatformSourcePayload(content, platform);
+    return [platform, source.format, source.contentHash];
+  });
   return normalizeOperationSignature({
     contentId: content.id,
-    platforms: [...platforms].sort(),
+    platforms: normalizedPlatforms,
     publishMode,
-    contentHash: createHash('sha256').update(contentToMarkdown(content), 'utf8').digest('hex'),
+    contentHash: hashSource(contentToMarkdown(content)),
+    sourceHash: hashSource(JSON.stringify(platformSourceHashes)),
     expectedUpdatedAt,
   });
 }
@@ -2846,8 +2930,21 @@ async function publishContent(contentId, platforms = [], options = {}) {
     VALUES (?, ?, ?, 'running', ?, ?, ?)
   `).run(jobId, contentId, content.title, encodeJson(selected), now(), now());
 
-  const markdownFile = path.join(DRAFTS_DIR, publishSnapshotName(jobId, contentId));
-  fs.writeFileSync(markdownFile, contentToMarkdown(content), 'utf8');
+  const platformSources = new Map();
+  for (const platform of selected) {
+    const payload = selectPlatformSourcePayload(content, platform);
+    const snapshotName = publishSnapshotName(
+      jobId,
+      contentId,
+      selected.length > 1 ? platform : '',
+      payload.extension
+    );
+    const basename = snapshotName.slice(0, -(payload.extension.length + 1));
+    platformSources.set(
+      platform,
+      writePlatformSourceFile(DRAFTS_DIR, basename, payload)
+    );
+  }
 
   const finalResults = {};
   const rawOutputs = [];
@@ -2866,7 +2963,12 @@ async function publishContent(contentId, platforms = [], options = {}) {
     if (typeof options.onPublisherStart === 'function') options.onPublisherStart(platform);
     let single;
     try {
-      single = await platformPublisher(markdownFile, platform, content.title, publishMode);
+      single = await platformPublisher(
+        platformSources.get(platform).filePath,
+        platform,
+        content.title,
+        publishMode
+      );
     } catch (error) {
       Object.defineProperty(error, PUBLISH_EXECUTION_META, {
         value: { publisherCallsStarted },
@@ -3720,8 +3822,16 @@ module.exports = {
   layoutContent,
   saveLocalDraft,
   contentToMarkdown,
+  canonicalContentHash,
+  layoutHash,
+  selectPlatformSourcePayload,
+  writePlatformSourceFile,
+  createPlatformSource,
+  hashSource,
+  hashFile,
   previewContentForPlatform,
   publishSnapshotName,
+  buildPublishOperationSignature,
   publishContent,
   createOperationJournal,
   createInstanceLock,

@@ -2,12 +2,11 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { createHash } = require('node:crypto');
 const { createRequire } = require('node:module');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const TEMPLATE_DIR = path.join(REPO_ROOT, 'skills', 'weixin-layout', 'templates');
-const DEFAULT_ACCOUNT_NAME = '维视智造';
-const DEFAULT_ACCOUNT_DESCRIPTION = '专注机器视觉、工业检测与智能制造解决方案';
 const DROP_ELEMENTS = [
   'script',
   'iframe',
@@ -154,6 +153,15 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function canonicalContentHash(content) {
+  const title = String(content?.title ?? '');
+  const summary = String(content?.summary ?? '');
+  const body = String(content?.body ?? '');
+  return createHash('sha256')
+    .update(JSON.stringify([title, summary || '', body]), 'utf8')
+    .digest('hex');
 }
 
 function renderMarkdownInline(value) {
@@ -659,6 +667,7 @@ function createArticleNodes(document, body, profile, title) {
 }
 
 function createFooter(document, profile, accountName, accountDescription) {
+  if (!accountName && !accountDescription) return null;
   const source = profile.footer;
   const tagName = ['footer', 'section', 'div'].includes(source?.localName) ? source.localName : 'footer';
   const footer = document.createElement(tagName);
@@ -666,29 +675,34 @@ function createFooter(document, profile, accountName, accountDescription) {
   withDefaultStyle(footer, DEFAULT_STYLES.footer);
   footer.setAttribute('data-wechat-account', 'true');
 
-  const nameTag = ['h2', 'h3', 'h4', 'p'].includes(profile.footerName?.localName)
-    ? profile.footerName.localName
-    : 'p';
-  const name = document.createElement(nameTag);
-  copyPresentation(profile.footerName, name);
-  withDefaultStyle(name, DEFAULT_STYLES.accountName);
-  name.setAttribute('data-wechat-slot', 'account-name');
-  name.textContent = accountName;
+  if (accountName) {
+    const nameTag = ['h2', 'h3', 'h4', 'p'].includes(profile.footerName?.localName)
+      ? profile.footerName.localName
+      : 'p';
+    const name = document.createElement(nameTag);
+    copyPresentation(profile.footerName, name);
+    withDefaultStyle(name, DEFAULT_STYLES.accountName);
+    name.setAttribute('data-wechat-slot', 'account-name');
+    name.textContent = accountName;
+    footer.append(name);
+  }
 
-  const descriptionTag = ['p', 'div'].includes(profile.footerDescription?.localName)
-    ? profile.footerDescription.localName
-    : 'p';
-  const description = document.createElement(descriptionTag);
-  copyPresentation(profile.footerDescription, description);
-  withDefaultStyle(description, DEFAULT_STYLES.accountDescription);
-  description.setAttribute('data-wechat-slot', 'account-description');
-  description.textContent = accountDescription;
-
-  footer.append(name, description);
+  if (accountDescription) {
+    const descriptionTag = ['p', 'div'].includes(profile.footerDescription?.localName)
+      ? profile.footerDescription.localName
+      : 'p';
+    const description = document.createElement(descriptionTag);
+    copyPresentation(profile.footerDescription, description);
+    withDefaultStyle(description, DEFAULT_STYLES.accountDescription);
+    description.setAttribute('data-wechat-slot', 'account-description');
+    description.textContent = accountDescription;
+    footer.append(description);
+  }
   return footer;
 }
 
 function updateFooterInPlace(document, profile, accountName, accountDescription) {
+  if (!accountName && !accountDescription) return null;
   const footer = profile.footer;
   if (!footer) return createFooter(document, profile, accountName, accountDescription);
 
@@ -697,7 +711,7 @@ function updateFooterInPlace(document, profile, accountName, accountDescription)
     ? profile.footerDescription
     : null;
   if (name === description) description = null;
-  clearTextExcept(footer, [name, description]);
+  clearTextExcept(footer, [accountName ? name : null, accountDescription ? description : null]);
   for (const action of [...footer.querySelectorAll('a,button')]) {
     if (action !== name && action !== description) action.remove();
   }
@@ -707,21 +721,29 @@ function updateFooterInPlace(document, profile, accountName, accountDescription)
     footer.setAttribute('style', DEFAULT_STYLES.footer);
   }
 
-  if (!name) {
-    name = document.createElement('p');
-    withDefaultStyle(name, DEFAULT_STYLES.accountName);
-    footer.append(name);
+  if (accountName) {
+    if (!name) {
+      name = document.createElement('p');
+      withDefaultStyle(name, DEFAULT_STYLES.accountName);
+      footer.append(name);
+    }
+    name.setAttribute('data-wechat-slot', 'account-name');
+    name.textContent = accountName;
+  } else {
+    name?.remove();
   }
-  name.setAttribute('data-wechat-slot', 'account-name');
-  name.textContent = accountName;
 
-  if (!description) {
-    description = document.createElement('p');
-    withDefaultStyle(description, DEFAULT_STYLES.accountDescription);
-    footer.append(description);
+  if (accountDescription) {
+    if (!description) {
+      description = document.createElement('p');
+      withDefaultStyle(description, DEFAULT_STYLES.accountDescription);
+      footer.append(description);
+    }
+    description.setAttribute('data-wechat-slot', 'account-description');
+    description.textContent = accountDescription;
+  } else {
+    description?.remove();
   }
-  description.setAttribute('data-wechat-slot', 'account-description');
-  description.textContent = accountDescription;
   return footer;
 }
 
@@ -789,8 +811,8 @@ function normalizeTemplateDocument(document, values) {
       if (!outsideTitle) structure.content.append(createTitle(document, profile, values.title));
     }
     structure.content.append(summary, ...articleNodes);
-    if (footerCarrier) structure.content.append(footerCarrier);
-    else if (!profile.footer) structure.content.append(footer);
+    if (footer && footerCarrier) structure.content.append(footerCarrier);
+    else if (footer && !profile.footer) structure.content.append(footer);
   } else if (structure.content !== structure.root) {
     const titleOutsideContent = profile.title && !structure.content.contains(profile.title)
       ? profile.title
@@ -802,6 +824,7 @@ function normalizeTemplateDocument(document, values) {
     const outsideFooterBranch = profile.footer && !footerInsideContent
       ? directChildContaining(structure.root, profile.footer)
       : null;
+    if (!footer) outsideFooterBranch?.remove();
 
     if (titleOutsideContent) {
       clearTextExcept(titleBranch || titleOutsideContent, [titleOutsideContent]);
@@ -812,11 +835,11 @@ function normalizeTemplateDocument(document, values) {
       structure.root.insertBefore(titleHost, contentBranch || structure.root.firstChild);
       titleBranch = titleHost;
     }
-    removeUnrelatedRootChildren(structure.root, [titleBranch, contentBranch, outsideFooterBranch]);
+    removeUnrelatedRootChildren(structure.root, [titleBranch, contentBranch, footer ? outsideFooterBranch : null]);
     clearElement(structure.content);
     structure.content.append(summary, ...articleNodes);
-    if (footerCarrier) structure.content.append(footerCarrier);
-    else if (!profile.footer) structure.content.append(footer);
+    if (footer && footerCarrier) structure.content.append(footerCarrier);
+    else if (footer && !profile.footer) structure.content.append(footer);
   } else {
     const title = profile.title;
     const titleBranch = title ? directChildContaining(structure.root, title) : null;
@@ -833,12 +856,16 @@ function normalizeTemplateDocument(document, values) {
       structure.root.append(createTitle(document, profile, values.title));
     }
     structure.root.append(summary, ...articleNodes);
-    if (footerCarrier) structure.root.append(footerCarrier);
-    else if (!profile.footer) structure.root.append(footer);
+    if (footer && footerCarrier) structure.root.append(footerCarrier);
+    else if (footer && !profile.footer) structure.root.append(footer);
   }
 
-  document.body.setAttribute('data-wechat-template', values.filename);
   structure.root.setAttribute('data-wechat-template-root', 'true');
+  for (const element of new Set([document.body, structure.root])) {
+    element.setAttribute('data-wechat-template', values.filename);
+    element.setAttribute('data-canonical-sha256', values.canonicalHash);
+    element.setAttribute('data-layout-generated-at', values.generatedAt);
+  }
   let documentTitle = document.head.querySelector('title');
   if (!documentTitle) {
     documentTitle = document.createElement('title');
@@ -865,10 +892,16 @@ function renderLayoutTemplate(filename, input = {}) {
   if (!title) throw new Error('title 不能为空');
   if (!body) throw new Error('body 不能为空');
 
-  const accountName = input.accountName === undefined ? DEFAULT_ACCOUNT_NAME : String(input.accountName).trim();
+  const accountName = input.accountName === undefined
+    ? String(process.env.PUBLISHER_ACCOUNT_NAME || '').trim()
+    : String(input.accountName).trim();
   const accountDescription = input.accountDescription === undefined
-    ? DEFAULT_ACCOUNT_DESCRIPTION
+    ? String(process.env.PUBLISHER_ACCOUNT_DESCRIPTION || '').trim()
     : String(input.accountDescription).trim();
+  const generatedAt = input.generatedAt === undefined
+    ? new Date().toISOString()
+    : String(input.generatedAt).trim();
+  if (!generatedAt) throw new Error('generatedAt 不能为空');
   const source = fs.readFileSync(target, 'utf8');
   const document = parseTemplateDocument(source);
   normalizeTemplateDocument(document, {
@@ -876,14 +909,17 @@ function renderLayoutTemplate(filename, input = {}) {
     title,
     summary,
     body,
-    accountName: accountName || DEFAULT_ACCOUNT_NAME,
-    accountDescription: accountDescription || DEFAULT_ACCOUNT_DESCRIPTION,
+    accountName,
+    accountDescription,
+    canonicalHash: canonicalContentHash({ title, summary, body }),
+    generatedAt,
   });
   return document.toString();
 }
 
 module.exports = {
   TEMPLATE_DIR,
+  canonicalContentHash,
   listLayoutTemplates,
   renderLayoutTemplate,
 };

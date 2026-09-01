@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { createHash } = require('node:crypto');
 const { createRequire } = require('node:module');
 const { after, test } = require('node:test');
 const nativeFetch = globalThis.fetch;
@@ -163,6 +164,98 @@ test('rejects traversal, missing files, and non-template names', () => {
   });
 });
 
+test('empty account configuration removes the account branch and records canonical metadata', () => {
+  const title = '无品牌标题';
+  const summary = '';
+  const body = '<p>无品牌正文</p>';
+  const generatedAt = '2026-09-02T03:04:05.000Z';
+  const canonicalHash = createHash('sha256')
+    .update(JSON.stringify([title, summary, body]), 'utf8')
+    .digest('hex');
+  const html = renderLayoutTemplate('style_10.html', {
+    title,
+    summary,
+    body,
+    accountName: '',
+    accountDescription: '',
+    generatedAt,
+  });
+  const { document } = parseHTML(html);
+  const root = document.querySelector('[data-wechat-template-root="true"]');
+
+  assert.ok(root);
+  assert.equal(root.getAttribute('data-wechat-template'), 'style_10.html');
+  assert.equal(root.getAttribute('data-canonical-sha256'), canonicalHash);
+  assert.equal(root.getAttribute('data-layout-generated-at'), generatedAt);
+  assert.equal(document.querySelector('[data-wechat-account="true"]'), null);
+  assert.equal(document.querySelector('[data-wechat-slot="account-name"]'), null);
+  assert.equal(document.querySelector('[data-wechat-slot="account-description"]'), null);
+  assert.doesNotMatch(html, /维视智造|机器视觉/);
+});
+
+test('explicit account configuration overrides environment values while both sources render escaped text', () => {
+  const previousName = process.env.PUBLISHER_ACCOUNT_NAME;
+  const previousDescription = process.env.PUBLISHER_ACCOUNT_DESCRIPTION;
+  process.env.PUBLISHER_ACCOUNT_NAME = '<环境公众号 & 合伙人>';
+  process.env.PUBLISHER_ACCOUNT_DESCRIPTION = '环境说明 <不可执行>';
+
+  try {
+    const fromEnvironment = renderLayoutTemplate('style_10.html', {
+      title: '环境账号标题',
+      summary: '环境账号摘要',
+      body: '<p>环境账号正文</p>',
+      generatedAt: '2026-09-02T03:04:05.000Z',
+    });
+    const environmentDocument = parseHTML(fromEnvironment).document;
+    assert.equal(
+      environmentDocument.querySelector('[data-wechat-slot="account-name"]')?.textContent,
+      '<环境公众号 & 合伙人>'
+    );
+    assert.equal(
+      environmentDocument.querySelector('[data-wechat-slot="account-description"]')?.textContent,
+      '环境说明 <不可执行>'
+    );
+    assert.match(fromEnvironment, /&lt;环境公众号 &amp; 合伙人&gt;/);
+    assert.match(fromEnvironment, /环境说明 &lt;不可执行&gt;/);
+
+    const explicit = renderLayoutTemplate('style_10.html', {
+      title: '显式账号标题',
+      summary: '显式账号摘要',
+      body: '<p>显式账号正文</p>',
+      accountName: '<显式公众号 & 编辑部>',
+      accountDescription: '显式说明 <安全文本>',
+      generatedAt: '2026-09-02T03:04:05.000Z',
+    });
+    const explicitDocument = parseHTML(explicit).document;
+    assert.equal(
+      explicitDocument.querySelector('[data-wechat-slot="account-name"]')?.textContent,
+      '<显式公众号 & 编辑部>'
+    );
+    assert.equal(
+      explicitDocument.querySelector('[data-wechat-slot="account-description"]')?.textContent,
+      '显式说明 <安全文本>'
+    );
+    assert.doesNotMatch(explicit, /环境公众号|环境说明/);
+    assert.match(explicit, /&lt;显式公众号 &amp; 编辑部&gt;/);
+    assert.match(explicit, /显式说明 &lt;安全文本&gt;/);
+
+    const explicitlyEmpty = renderLayoutTemplate('style_10.html', {
+      title: '显式空账号标题',
+      summary: '',
+      body: '<p>显式空账号正文</p>',
+      accountName: '',
+      accountDescription: '',
+      generatedAt: '2026-09-02T03:04:05.000Z',
+    });
+    assert.doesNotMatch(explicitlyEmpty, /环境公众号|环境说明|data-wechat-account/);
+  } finally {
+    if (previousName === undefined) delete process.env.PUBLISHER_ACCOUNT_NAME;
+    else process.env.PUBLISHER_ACCOUNT_NAME = previousName;
+    if (previousDescription === undefined) delete process.env.PUBLISHER_ACCOUNT_DESCRIPTION;
+    else process.env.PUBLISHER_ACCOUNT_DESCRIPTION = previousDescription;
+  }
+});
+
 test('renders all 40 templates with only the requested article and account copy', () => {
   const rendered = [];
   for (const template of listLayoutTemplates()) {
@@ -298,6 +391,8 @@ test('places all 40 account footers outside progress and article widgets', () =>
       title: '全量 Footer 标题',
       summary: '全量 Footer 导语',
       body: '<p>全量 Footer 正文</p>',
+      accountName: '全量 Footer 账号',
+      accountDescription: '全量 Footer 说明',
     });
     const { document } = parseHTML(html);
     const root = document.querySelector('[data-wechat-template-root="true"]');

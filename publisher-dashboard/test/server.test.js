@@ -71,8 +71,16 @@ const {
   layoutContent,
   saveLocalDraft,
   previewContentForPlatform,
+  canonicalContentHash,
+  layoutHash,
+  selectPlatformSourcePayload,
+  writePlatformSourceFile,
+  createPlatformSource,
+  hashSource,
+  hashFile,
   publishSnapshotName,
   publishContent,
+  buildPublishOperationSignature,
   createOperationJournal,
   createInstanceLock,
   createDashboardServer,
@@ -276,12 +284,24 @@ function readPublishState(fixture) {
 
 function cleanupPublishStateFixture(fixture) {
   if (!fixture?.id) return;
-  const jobs = db.prepare('SELECT id FROM publish_jobs WHERE content_id = ?').all(fixture.id);
+  const jobs = db.prepare('SELECT id, platforms FROM publish_jobs WHERE content_id = ?').all(fixture.id);
   for (const job of jobs) {
     db.prepare("DELETE FROM activity WHERE target_type = 'publish_job' AND target_id = ?").run(job.id);
     db.prepare('DELETE FROM publish_results WHERE job_id = ?').run(job.id);
     db.prepare('DELETE FROM publish_jobs WHERE id = ?').run(job.id);
-    fs.rmSync(path.join(DRAFTS_DIR, publishSnapshotName(job.id, fixture.id)), { force: true });
+    const snapshotPlatforms = JSON.parse(job.platforms || '[]');
+    for (const extension of ['md', 'html', 'txt']) {
+      fs.rmSync(
+        path.join(DRAFTS_DIR, publishSnapshotName(job.id, fixture.id, '', extension)),
+        { force: true }
+      );
+      for (const platform of snapshotPlatforms) {
+        fs.rmSync(
+          path.join(DRAFTS_DIR, publishSnapshotName(job.id, fixture.id, platform, extension)),
+          { force: true }
+        );
+      }
+    }
   }
   db.prepare("DELETE FROM activity WHERE target_type = 'content' AND target_id = ?").run(fixture.id);
   db.prepare('DELETE FROM contents WHERE id = ?').run(fixture.id);
@@ -811,6 +831,69 @@ test('contentToMarkdown rendered title H1 replaces lone surrogates and preserves
   }
 });
 
+test('platform source helpers select current WeChat HTML and reject stale layouts', () => {
+  const content = {
+    id: 'content_source_helpers',
+    title: '平台源标题',
+    summary: '平台源摘要',
+    body: '<p>平台源正文</p>',
+  };
+  const expectedCanonicalHash = createHash('sha256')
+    .update(JSON.stringify([content.title, content.summary, content.body]), 'utf8')
+    .digest('hex');
+  const currentLayout = [
+    '<!doctype html>',
+    `<html><body><article data-wechat-template="style_10.html" data-canonical-sha256="${expectedCanonicalHash}">`,
+    '已排版正文',
+    '</article></body></html>',
+  ].join('');
+  const current = { ...content, layout_html: currentLayout };
+
+  assert.equal(canonicalContentHash(current), expectedCanonicalHash);
+  assert.equal(layoutHash(currentLayout), expectedCanonicalHash);
+  assert.equal(layoutHash('<article data-canonical-sha256="invalid"></article>'), '');
+
+  const selected = selectPlatformSourcePayload(current, 'weixin');
+  assert.equal(selected.format, 'html');
+  assert.equal(selected.extension, 'html');
+  assert.equal(selected.content, currentLayout);
+  assert.equal(selected.templated, true);
+  assert.deepEqual(selected.warnings, []);
+  assert.equal(selected.contentHash, hashSource(currentLayout));
+
+  const tempRoot = fs.mkdtempSync(path.join(testDataDir, 'platform-source-helper-'));
+  try {
+    const written = writePlatformSourceFile(tempRoot, 'wechat-source', selected);
+    assert.equal(path.basename(written.filePath), 'wechat-source.html');
+    assert.equal(fs.readFileSync(written.filePath, 'utf8'), currentLayout);
+    assert.equal(written.contentHash, hashFile(written.filePath));
+
+    const created = createPlatformSource(current, 'weixin', tempRoot);
+    assert.equal(path.basename(created.filePath), 'weixin.html');
+    assert.equal(created.contentHash, written.contentHash);
+
+    const stale = createPlatformSource({
+      ...content,
+      layout_html: currentLayout.replace(expectedCanonicalHash, 'b'.repeat(64)),
+    }, 'weixin', tempRoot, { basename: 'stale-wechat' });
+    assert.equal(path.basename(stale.filePath), 'stale-wechat.md');
+    assert.equal(stale.format, 'markdown');
+    assert.equal(stale.templated, false);
+    assert.match(stale.content, /publisher-title-json-v1/);
+    assert.deepEqual(stale.warnings, ['尚未使用公众号模板']);
+    assert.doesNotMatch(stale.content, /已排版正文/);
+
+    const otherPlatform = createPlatformSource(current, 'zhihu', tempRoot, { basename: 'zhihu-source' });
+    assert.equal(path.basename(otherPlatform.filePath), 'zhihu-source.md');
+    assert.equal(otherPlatform.format, 'markdown');
+    assert.equal(otherPlatform.templated, false);
+    assert.deepEqual(otherPlatform.warnings, []);
+    assert.equal(otherPlatform.content, contentToMarkdown(current));
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test('publish snapshot preserves an explicit-title article leading body H1', async () => {
   let content;
   let snapshotFile;
@@ -898,6 +981,156 @@ test('platform preview serializes canonical content and runs only the injected C
     if (previewFile && fs.existsSync(previewFile)) {
       fs.rmSync(path.dirname(previewFile), { recursive: true, force: true });
     }
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('WeChat preview runner receives the current templated HTML source', async () => {
+  let content;
+  let previewFile;
+  const tempRoot = createPreviewTempRoot('wechat-template-preview');
+  try {
+    content = importContent({
+      title: '公众号模板预览',
+      summary: '公众号模板摘要',
+      filename: 'wechat-template-preview.md',
+      body: '# 公众号模板预览\n\n公众号模板正文',
+    });
+    content = layoutContent(content.id, 'style_10.html', content.updated_at);
+    const expected = validPlatformPreview({
+      platform: 'weixin',
+      title: content.title,
+      format: 'html',
+      warnings: [],
+    });
+
+    const preview = await previewContentForPlatform(content.id, 'weixin', {
+      tempRoot,
+      runner: async args => {
+        previewFile = args[1];
+        const source = fs.readFileSync(previewFile, 'utf8');
+        assert.equal(path.extname(previewFile), '.html');
+        assert.match(source, /data-wechat-template="style_10\.html"/);
+        assert.match(source, /data-canonical-sha256="[a-f0-9]{64}"/);
+        return { code: 0, stdout: `${JSON.stringify(expected)}\n` };
+      },
+    });
+
+    assert.deepEqual(preview, expected);
+    assert.equal(fs.existsSync(previewFile), false);
+    assert.deepEqual(fs.readdirSync(tempRoot), []);
+  } finally {
+    cleanupImportedContent(content);
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('WeChat preview falls back to canonical Markdown with a visible template warning', async () => {
+  let content;
+  const tempRoot = createPreviewTempRoot('wechat-markdown-preview');
+  try {
+    content = importContent({
+      filename: 'wechat-markdown-preview.md',
+      body: '# 未排版公众号预览\n\n规范母稿正文',
+    });
+    const cliPreview = validPlatformPreview({
+      platform: 'weixin',
+      title: content.title,
+      format: 'html',
+      warnings: ['CLI 原有提示'],
+    });
+
+    const preview = await previewContentForPlatform(content.id, 'weixin', {
+      tempRoot,
+      runner: async args => {
+        const source = fs.readFileSync(args[1], 'utf8');
+        assert.equal(path.extname(args[1]), '.md');
+        assert.equal(source, contentToMarkdown(content));
+        return { code: 0, stdout: `${JSON.stringify(cliPreview)}\n` };
+      },
+    });
+
+    assert.deepEqual(preview.warnings, ['CLI 原有提示', '尚未使用公众号模板']);
+    assert.deepEqual(fs.readdirSync(tempRoot), []);
+  } finally {
+    cleanupImportedContent(content);
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('preview and actual batch publish share templated WeChat HTML while other platforms keep Markdown', async () => {
+  let content;
+  let publishResult;
+  const publishedSources = new Map();
+  const tempRoot = createPreviewTempRoot('preview-publish-source-parity');
+  try {
+    content = importContent({
+      title: '预览发布同源标题',
+      summary: '预览发布同源摘要',
+      filename: 'preview-publish-source-parity.md',
+      body: '# 预览发布同源标题\n\n同一份公众号模板正文',
+    });
+    content = layoutContent(content.id, 'style_11.html', content.updated_at);
+    let previewSource = '';
+    let previewSourceHash = '';
+    const cliPreview = validPlatformPreview({
+      platform: 'weixin',
+      title: content.title,
+      format: 'html',
+      warnings: [],
+    });
+    await previewContentForPlatform(content.id, 'weixin', {
+      tempRoot,
+      runner: async args => {
+        previewSource = fs.readFileSync(args[1], 'utf8');
+        previewSourceHash = hashFile(args[1]);
+        return { code: 0, stdout: `${JSON.stringify(cliPreview)}\n` };
+      },
+    });
+
+    publishResult = await publishContent(content.id, ['weixin', 'zhihu'], {
+      publishMode: 'draft',
+      preflight: async () => null,
+      platformPublisher: async (sourceFile, platform) => {
+        publishedSources.set(platform, {
+          filePath: sourceFile,
+          content: fs.readFileSync(sourceFile, 'utf8'),
+          contentHash: hashFile(sourceFile),
+        });
+        return {
+          output: `stub output ${platform}`,
+          info: { status: 'success', message: `stubbed ${platform}` },
+        };
+      },
+    });
+
+    const weixinSource = publishedSources.get('weixin');
+    const zhihuSource = publishedSources.get('zhihu');
+    assert.ok(weixinSource);
+    assert.ok(zhihuSource);
+    assert.notEqual(weixinSource.filePath, zhihuSource.filePath);
+    assert.equal(path.extname(weixinSource.filePath), '.html');
+    assert.equal(path.extname(zhihuSource.filePath), '.md');
+    assert.match(weixinSource.content, /data-wechat-template="style_11\.html"/);
+    assert.equal(weixinSource.content, previewSource);
+    assert.equal(weixinSource.contentHash, previewSourceHash);
+    assert.equal(zhihuSource.content, contentToMarkdown(content));
+    assert.equal(
+      path.basename(weixinSource.filePath),
+      `${publishResult.job.id}-${content.id}-weixin.html`
+    );
+    assert.equal(
+      path.basename(zhihuSource.filePath),
+      `${publishResult.job.id}-${content.id}-zhihu.md`
+    );
+  } finally {
+    for (const source of publishedSources.values()) fs.rmSync(source.filePath, { force: true });
+    if (publishResult?.job?.id) {
+      db.prepare("DELETE FROM activity WHERE target_type = 'publish_job' AND target_id = ?").run(publishResult.job.id);
+      db.prepare('DELETE FROM publish_results WHERE job_id = ?').run(publishResult.job.id);
+      db.prepare('DELETE FROM publish_jobs WHERE id = ?').run(publishResult.job.id);
+    }
+    cleanupImportedContent(content);
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
 });
@@ -1503,6 +1736,131 @@ test('uncertain journal records survive short TTL pruning and block new IDs for 
   );
   assert.equal(journal.get('uncertain-retention-operation-0001').state, 'uncertain');
 });
+
+test('source-aware signatures change with the selected WeChat layout but not unused layouts', () => {
+  const baseContent = {
+    id: 'content-source-aware-signature',
+    title: '签名母稿标题',
+    summary: '签名母稿摘要',
+    body: '<p>签名母稿正文</p>',
+  };
+  const canonicalHash = canonicalContentHash(baseContent);
+  const firstContent = {
+    ...baseContent,
+    layout_html: `<article data-wechat-template="style_10.html" data-canonical-sha256="${canonicalHash}">模板甲</article>`,
+  };
+  const secondContent = {
+    ...baseContent,
+    layout_html: `<article data-wechat-template="style_11.html" data-canonical-sha256="${canonicalHash}">模板乙</article>`,
+  };
+  const expectedUpdatedAt = '2026-09-02T06:00:00.000Z';
+
+  const firstWeChat = buildPublishOperationSignature(
+    firstContent,
+    ['weixin'],
+    'direct',
+    expectedUpdatedAt
+  );
+  const secondWeChat = buildPublishOperationSignature(
+    secondContent,
+    ['weixin'],
+    'direct',
+    expectedUpdatedAt
+  );
+  const firstMarkdown = buildPublishOperationSignature(
+    firstContent,
+    ['zhihu'],
+    'direct',
+    expectedUpdatedAt
+  );
+  const secondMarkdown = buildPublishOperationSignature(
+    secondContent,
+    ['zhihu'],
+    'direct',
+    expectedUpdatedAt
+  );
+
+  assert.equal(firstWeChat.contentHash, secondWeChat.contentHash);
+  assert.notEqual(firstWeChat.sourceHash, secondWeChat.sourceHash);
+  assert.equal(firstMarkdown.sourceHash, secondMarkdown.sourceHash);
+});
+
+test('source-aware journal replays the same source and distinguishes a changed source', () => {
+  const operationsFile = path.join(testDataDir, 'source-aware-exact-match-operations.json');
+  const firstSignature = {
+    contentId: 'content-source-aware-exact-match',
+    platforms: ['weixin'],
+    publishMode: 'direct',
+    contentHash: '5'.repeat(64),
+    sourceHash: '6'.repeat(64),
+    expectedUpdatedAt: '2026-09-02T06:15:00.000Z',
+  };
+  const changedSignature = {
+    ...firstSignature,
+    sourceHash: '9'.repeat(64),
+  };
+  const journal = createOperationJournal({ filePath: operationsFile, limit: 8 });
+  journal.begin('source-aware-exact-operation-0001', firstSignature);
+  journal.complete('source-aware-exact-operation-0001', {
+    jobId: 'source-aware-exact-job',
+    jobStatus: 'published',
+    platformResults: [{ platform: 'weixin', status: 'success' }],
+  });
+
+  const replay = journal.begin('source-aware-exact-operation-0002', firstSignature);
+  assert.equal(replay.kind, 'replay');
+  assert.equal(replay.record.aliasOf, 'source-aware-exact-operation-0001');
+  assert.throws(
+    () => journal.begin('source-aware-exact-operation-0001', changedSignature),
+    error => error?.statusCode === 409 && /operationId|发布参数|内容版本/.test(error.message)
+  );
+  const changed = journal.begin('source-aware-exact-operation-0003', changedSignature);
+  assert.equal(changed.kind, 'started');
+  assert.equal(changed.record.signature.sourceHash, changedSignature.sourceHash);
+});
+
+for (const legacyState of ['completed', 'running', 'uncertain']) {
+  test(`source-hash legacy ${legacyState} journal remains conservative`, () => {
+    const operationsFile = path.join(testDataDir, `source-hash-legacy-${legacyState}.json`);
+    const legacySignature = {
+      contentId: `content-source-hash-legacy-${legacyState}`,
+      platforms: ['weixin'],
+      publishMode: 'direct',
+      contentHash: '7'.repeat(64),
+      expectedUpdatedAt: '2026-09-02T06:30:00.000Z',
+    };
+    const sourceAwareSignature = {
+      ...legacySignature,
+      sourceHash: '8'.repeat(64),
+    };
+    const journal = createOperationJournal({ filePath: operationsFile, limit: 8 });
+    journal.begin(`source-hash-${legacyState}-operation-0001`, legacySignature);
+    if (legacyState === 'completed') {
+      journal.complete(`source-hash-${legacyState}-operation-0001`, {
+        jobId: `source-hash-${legacyState}-job`,
+        jobStatus: 'published',
+        platformResults: [{ platform: 'weixin', status: 'success' }],
+      });
+      const replay = journal.begin(
+        `source-hash-${legacyState}-operation-0002`,
+        sourceAwareSignature
+      );
+      assert.equal(replay.kind, 'replay');
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(replay.record.signature, 'sourceHash'),
+        false
+      );
+    } else {
+      if (legacyState === 'uncertain') {
+        journal.markUncertain(`source-hash-${legacyState}-operation-0001`);
+      }
+      assert.throws(
+        () => journal.begin(`source-hash-${legacyState}-operation-0002`, sourceAwareSignature),
+        error => error?.statusCode === 409
+      );
+    }
+  });
+}
 
 for (const legacyState of ['completed', 'running', 'uncertain', 'failed']) {
   test(`disk-loaded v1 legacy ${legacyState} publish record preserves conservative API idempotency`, async () => {
