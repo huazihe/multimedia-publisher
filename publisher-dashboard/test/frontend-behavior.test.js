@@ -594,6 +594,96 @@ test('deferred save preserves a newer editor revision and merges only server met
   assert.equal(reloads, 0);
 });
 
+test('skipReload save advances the revision token before the next save without replacing newer editor DOM', async () => {
+  const saveSource = extractFunctionSource('saveContent', 'markContentDirty');
+  assert.ok(saveSource);
+  const contentId = 'skip-reload-revision';
+  const editor = { isContentEditable: true, innerHTML: '<p>First local body</p>' };
+  const titleEditor = { value: 'First local title' };
+  const summaryEditor = { value: 'First local summary' };
+  const content = {
+    id: contentId,
+    title: 'Stored title',
+    summary: 'Stored summary',
+    body: '<p>Stored body</p>',
+    type: '行业分析',
+    plan_date: '2026-08-31',
+    status: '已排版',
+    layout_html: '<article>Stored layout</article>',
+    images: [],
+    selected_platforms: [],
+    created_at: '2026-08-31T00:00:00.000Z',
+    updated_at: '2026-08-31T01:00:00.000Z',
+  };
+  const state = {
+    selectedContentId: contentId,
+    data: { contents: [content] },
+    dirtyContentIds: new Set([contentId]),
+    contentEditRevisions: new Map([[contentId, 1]]),
+    contentOperationLocks: new Map(),
+  };
+  const nodes = new Map([
+    [`[data-content-body="${contentId}"]`, editor],
+    [`[data-content-title="${contentId}"]`, titleEditor],
+    [`[data-content-summary="${contentId}"]`, summaryEditor],
+  ]);
+  const submitted = [];
+  const responseTokens = [
+    '2026-08-31T02:00:00.000Z',
+    '2026-08-31T03:00:00.000Z',
+  ];
+  const saveContent = vm.runInNewContext(`(${saveSource})`, {
+    state,
+    $: selector => nodes.get(selector) || null,
+    request: async (url, options) => {
+      const payload = JSON.parse(options.body);
+      submitted.push(payload);
+      return {
+        content: {
+          ...content,
+          title: payload.title,
+          summary: payload.summary,
+          body: payload.body,
+          type: payload.type,
+          status: '正文已生成',
+          layout_html: '',
+          updated_at: responseTokens[submitted.length - 1],
+        },
+      };
+    },
+    clearPlatformPreviews: () => {},
+    toast: () => {},
+    loadData: async () => { throw new Error('skipReload save must not reload'); },
+    encodeURIComponent,
+    beginContentOperation: target => ({ contentId: String(target), token: `save-${submitted.length + 1}` }),
+    contentOperationIsStable: () => true,
+    preserveContentOperationChanges: () => { throw new Error('stable save must not preserve an unstable revision'); },
+    endContentOperation: () => true,
+  });
+
+  const first = await saveContent(contentId, { silent: true, skipReload: true });
+  assert.equal(first.stable, true);
+
+  editor.innerHTML = '<p>Second local body</p>';
+  titleEditor.value = 'Second local title';
+  summaryEditor.value = 'Second local summary';
+  state.contentEditRevisions.set(contentId, 2);
+  state.dirtyContentIds.add(contentId);
+
+  const second = await saveContent(contentId, { silent: true, skipReload: true });
+
+  assert.equal(second.stable, true);
+  assert.deepEqual(submitted.map(payload => payload.expectedUpdatedAt), [
+    '2026-08-31T01:00:00.000Z',
+    '2026-08-31T02:00:00.000Z',
+  ]);
+  assert.equal(state.data.contents[0].updated_at, '2026-08-31T03:00:00.000Z');
+  assert.equal(editor.innerHTML, '<p>Second local body</p>');
+  assert.equal(titleEditor.value, 'Second local title');
+  assert.equal(summaryEditor.value, 'Second local summary');
+  assert.equal(state.contentEditRevisions.get(contentId), 2);
+});
+
 test('a 409 save conflict preserves the editor DOM and displays an explicit reload-latest message', async () => {
   const saveSource = extractFunctionSource('saveContent', 'markContentDirty');
   assert.ok(saveSource);

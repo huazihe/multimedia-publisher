@@ -2147,23 +2147,27 @@ function validateContentUpdatePayload(payload) {
   if (!Object.prototype.hasOwnProperty.call(payload, 'expectedUpdatedAt') || !payload.expectedUpdatedAt) {
     throw statusError('expectedUpdatedAt 必须是非空字符串', 400);
   }
-  if (Object.prototype.hasOwnProperty.call(payload, 'title')
-    && Array.from(payload.title).length > MAX_CONTENT_TITLE_CHARACTERS) {
+  validateContentFieldLimits(payload);
+  return payload;
+}
+
+function validateContentFieldLimits(fields) {
+  if (typeof fields.title === 'string'
+    && Array.from(fields.title).length > MAX_CONTENT_TITLE_CHARACTERS) {
     throw statusError(`标题不能超过 ${MAX_CONTENT_TITLE_CHARACTERS} 个 Unicode 字符`, 400);
   }
-  if (Object.prototype.hasOwnProperty.call(payload, 'summary')
-    && Array.from(payload.summary).length > MAX_CONTENT_SUMMARY_CHARACTERS) {
+  if (typeof fields.summary === 'string'
+    && Array.from(fields.summary).length > MAX_CONTENT_SUMMARY_CHARACTERS) {
     throw statusError(`摘要不能超过 ${MAX_CONTENT_SUMMARY_CHARACTERS} 个 Unicode 字符`, 400);
   }
-  if (Object.prototype.hasOwnProperty.call(payload, 'type')
-    && Array.from(payload.type).length > MAX_CONTENT_TYPE_CHARACTERS) {
+  if (typeof fields.type === 'string'
+    && Array.from(fields.type).length > MAX_CONTENT_TYPE_CHARACTERS) {
     throw statusError(`类型不能超过 ${MAX_CONTENT_TYPE_CHARACTERS} 个 Unicode 字符`, 400);
   }
-  if (Object.prototype.hasOwnProperty.call(payload, 'body')
-    && Buffer.byteLength(payload.body, 'utf8') > MAX_CONTENT_BODY_BYTES) {
+  if (typeof fields.body === 'string'
+    && Buffer.byteLength(fields.body, 'utf8') > MAX_CONTENT_BODY_BYTES) {
     throw statusError('正文不能超过 5 MiB', 400);
   }
-  return payload;
 }
 
 function updateContent(contentId, payload = {}) {
@@ -2175,6 +2179,7 @@ function updateContent(contentId, payload = {}) {
   const title = (input.title || '').trim() || titleFromMarkdown(body, content.title);
   const summary = (input.summary ?? content.summary ?? '').trim();
   const type = (input.type ?? content.type ?? '').trim();
+  validateContentFieldLimits({ title, summary, body, type });
   const canonicalChanged = title !== storedContent.title
     || summary !== (storedContent.summary ?? '')
     || body !== storedContent.body

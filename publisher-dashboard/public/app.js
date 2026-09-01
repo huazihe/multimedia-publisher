@@ -2378,6 +2378,18 @@ async function saveContent(id, options = {}) {
       preserveContentOperationChanges(operationContext, res.content);
       return { content: res.content, stable: false };
     }
+    if (options.skipReload) {
+      const contentIndex = state.data.contents.findIndex(content => String(content.id) === targetKey);
+      if (contentIndex >= 0) {
+        const existing = state.data.contents[contentIndex];
+        state.data.contents[contentIndex] = {
+          ...existing,
+          updated_at: res.content.updated_at,
+          status: res.content.status,
+          layout_html: res.content.layout_html,
+        };
+      }
+    }
     state.dirtyContentIds.delete(targetKey);
     if (!options.skipReload) {
       const loaded = await loadData({ operationContext });

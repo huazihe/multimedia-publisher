@@ -2309,8 +2309,91 @@ test('updateContent enforces Unicode field limits and a 5 MiB UTF-8 body limit',
     content = updateContent(content.id, canonicalRevisionPayload(content, { title: '😀'.repeat(200) }));
     content = updateContent(content.id, canonicalRevisionPayload(content, { summary: '摘'.repeat(1000) }));
     content = updateContent(content.id, canonicalRevisionPayload(content, { type: '类'.repeat(100) }));
-    content = updateContent(content.id, canonicalRevisionPayload(content, { body: 'a'.repeat(5 * 1024 * 1024) }));
-    assert.ok(content.body.includes('a'.repeat(100)));
+    const exactLimitBody = `<p>${'a'.repeat(5 * 1024 * 1024 - 7)}</p>`;
+    content = updateContent(content.id, canonicalRevisionPayload(content, { body: exactLimitBody }));
+    assert.equal(Buffer.byteLength(content.body, 'utf8'), 5 * 1024 * 1024);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('updateContent rejects an oversized title derived from the final body', () => {
+  let content;
+  try {
+    const oversizedHeading = '😀'.repeat(201);
+    for (const titleMode of ['empty', 'omitted']) {
+      content = importContent({ filename: `derived-title-${titleMode}.md`, body: '# Original title\n\nOriginal body.' });
+      const payload = canonicalRevisionPayload(content, {
+        body: `# ${oversizedHeading}\n\nUpdated body.`,
+      });
+      if (titleMode === 'empty') payload.title = '';
+      else delete payload.title;
+
+      assert.throws(
+        () => updateContent(content.id, payload),
+        error => {
+          assert.equal(error.statusCode, 400);
+          assert.match(error.message, /标题.*200/);
+          return true;
+        }
+      );
+      const stored = db.prepare('SELECT title, updated_at FROM contents WHERE id = ?').get(content.id);
+      assert.equal(stored.title, content.title);
+      assert.equal(stored.updated_at, content.updated_at);
+      cleanupImportedContent(content);
+      content = null;
+    }
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('updateContent validates every final resolved field after fallback and normalization', () => {
+  let content;
+  const cases = [
+    {
+      field: 'summary',
+      storedValue: '摘'.repeat(1001),
+      message: /摘要.*1000/,
+    },
+    {
+      field: 'type',
+      storedValue: '类'.repeat(101),
+      message: /类型.*100/,
+    },
+    {
+      field: 'body',
+      submittedValue: 'a'.repeat(5 * 1024 * 1024 - 1),
+      message: /正文.*5 MiB/,
+    },
+  ];
+
+  try {
+    for (const [index, testCase] of cases.entries()) {
+      content = importContent({ filename: `resolved-${testCase.field}.md`, body: '# Final fields\n\nOriginal body.' });
+      let token = content.updated_at;
+      if (testCase.storedValue !== undefined) {
+        token = new Date(Date.UTC(2099, 4, 1, 0, 0, 0, index)).toISOString();
+        db.prepare(`UPDATE contents SET ${testCase.field} = ?, updated_at = ? WHERE id = ?`)
+          .run(testCase.storedValue, token, content.id);
+        content = { ...content, [testCase.field]: testCase.storedValue, updated_at: token };
+      }
+      const payload = canonicalRevisionPayload(content);
+      if (testCase.submittedValue !== undefined) payload[testCase.field] = testCase.submittedValue;
+      else delete payload[testCase.field];
+
+      assert.throws(
+        () => updateContent(content.id, payload),
+        error => {
+          assert.equal(error.statusCode, 400);
+          assert.match(error.message, testCase.message);
+          return true;
+        }
+      );
+      assert.equal(db.prepare('SELECT updated_at FROM contents WHERE id = ?').get(content.id).updated_at, token);
+      cleanupImportedContent(content);
+      content = null;
+    }
   } finally {
     cleanupImportedContent(content);
   }
