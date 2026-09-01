@@ -41,6 +41,11 @@ function extractUntil(name, marker) {
   return appSource.slice(start, end).trim();
 }
 
+function evaluateContentRevisionMerger(state) {
+  const source = extractFunctionSource('mergeContentRevisionMetadata', 'saveContent');
+  return source ? vm.runInNewContext(`(${source})`, { state }) : () => false;
+}
+
 test('client format inference treats .txt as authoritative', () => {
   const source = extractFunctionSource('inferImportFormat', 'importedBodyByteLength');
   assert.ok(source);
@@ -183,6 +188,7 @@ test('batch double-click keeps one immutable operationId and sends one publish r
   const finishBatchPublishOperation = vm.runInNewContext(`(${finishSource})`);
   const state = {
     selectedContentId: 'content-batch-double-click',
+    data: { contents: [{ id: 'content-batch-double-click', status: '已排版', layout_html: '', updated_at: '2026-09-02T08:00:00.000Z' }] },
     selectedPlatforms: new Set(['zhihu']),
     batchPublishSubmitting: false,
     batchPublishOperation: null,
@@ -212,6 +218,7 @@ test('batch double-click keeps one immutable operationId and sends one publish r
     toast: () => {},
     loadData: async () => ({ applied: true }),
     switchView: () => {},
+    mergeContentRevisionMetadata: evaluateContentRevisionMerger(state),
   });
 
   const first = publishContent();
@@ -222,7 +229,10 @@ test('batch double-click keeps one immutable operationId and sends one publish r
   assert.deepEqual(busyStates, [true]);
   assert.equal(await second, false);
 
-  releaseRequest({ ok: true });
+  releaseRequest({
+    ok: true,
+    content: { id: 'content-batch-double-click', status: '已发布', layout_html: '', updated_at: '2026-09-02T08:00:00.001Z' },
+  });
   assert.equal(await first, true);
   assert.deepEqual(busyStates, [true, false]);
   assert.equal(state.batchPublishSubmitting, false);
@@ -246,6 +256,7 @@ test('full publish confirmation stays successful when post-success refresh fails
     singlePublishSubmitting: false,
     singlePublishOperationToken: '',
     singlePublishOperationSequence: 0,
+    data: { contents: [{ id: 'c1', status: '已排版', layout_html: '', updated_at: '2026-09-02T08:00:00.000Z' }] },
   };
   const events = [];
   let requestBody;
@@ -265,7 +276,10 @@ test('full publish confirmation stays successful when post-success refresh fails
     request: async (url, options) => {
       events.push('post-success');
       requestBody = JSON.parse(options.body);
-      return { job: { results: [{ platform: 'zhihu', status: 'success', message: 'published' }] } };
+      return {
+        job: { results: [{ platform: 'zhihu', status: 'success', message: 'published' }] },
+        content: { id: 'c1', status: '已排版', layout_html: '', updated_at: '2026-09-02T08:00:00.000Z' },
+      };
     },
     loadData: async () => {
       events.push('refresh-failed');
@@ -273,6 +287,7 @@ test('full publish confirmation stays successful when post-success refresh fails
     },
     toast: (message, type) => events.push(`toast:${type || 'ok'}:${message}`),
     encodeURIComponent,
+    mergeContentRevisionMetadata: evaluateContentRevisionMerger(state),
   });
 
   assert.equal(await confirmSinglePlatformPublish(), true);
@@ -328,6 +343,7 @@ test('single draft confirmation treats platform_draft as a successful result', a
     singlePublishSubmitting: false,
     singlePublishOperationToken: '',
     singlePublishOperationSequence: 0,
+    data: { contents: [{ id: 'draft-content', status: '已排版', layout_html: '', updated_at: '2026-09-02T08:00:00.000Z' }] },
   };
   const toasts = [];
   const confirmSinglePlatformPublish = vm.runInNewContext(`(${source})`, {
@@ -344,10 +360,12 @@ test('single draft confirmation treats platform_draft as a successful result', a
     $: selector => selector.startsWith('[data-content-body') ? null : { close() {} },
     request: async () => ({
       job: { results: [{ platform: 'zhihu', status: 'platform_draft', message: '草稿写入完成' }] },
+      content: { id: 'draft-content', status: '已排版', layout_html: '', updated_at: '2026-09-02T08:00:00.000Z' },
     }),
     loadData: async () => ({ applied: true }),
     toast: (message, type) => toasts.push({ message, type: type || '' }),
     encodeURIComponent,
+    mergeContentRevisionMetadata: evaluateContentRevisionMerger(state),
   });
 
   assert.equal(await confirmSinglePlatformPublish(), true);
@@ -555,6 +573,7 @@ test('deferred save preserves a newer editor revision and merges only server met
     contentOperationIsStable,
     preserveContentOperationChanges,
     endContentOperation,
+    mergeContentRevisionMetadata: evaluateContentRevisionMerger(state),
   });
 
   const pendingSave = saveContent(contentId, { silent: true });
@@ -659,6 +678,7 @@ test('skipReload save advances the revision token before the next save without r
     contentOperationIsStable: () => true,
     preserveContentOperationChanges: () => { throw new Error('stable save must not preserve an unstable revision'); },
     endContentOperation: () => true,
+    mergeContentRevisionMetadata: evaluateContentRevisionMerger(state),
   });
 
   const first = await saveContent(contentId, { silent: true, skipReload: true });
@@ -682,6 +702,225 @@ test('skipReload save advances the revision token before the next save without r
   assert.equal(titleEditor.value, 'Second local title');
   assert.equal(summaryEditor.value, 'Second local summary');
   assert.equal(state.contentEditRevisions.get(contentId), 2);
+});
+
+function createRefreshFailureRevisionHarness(contentId) {
+  const editor = { isContentEditable: true, innerHTML: '<p>First local body</p>' };
+  const titleEditor = { value: 'First local title' };
+  const summaryEditor = { value: 'First local summary' };
+  const content = {
+    id: contentId,
+    title: 'Stored title',
+    summary: 'Stored summary',
+    body: '<p>Stored body</p>',
+    type: '行业分析',
+    plan_date: '2026-09-02',
+    status: '已排版',
+    layout_html: '<article>Stored layout</article>',
+    images: [],
+    selected_platforms: [],
+    created_at: '2026-09-02T07:00:00.000Z',
+    updated_at: '2026-09-02T08:00:00.000Z',
+  };
+  const state = {
+    selectedContentId: contentId,
+    data: { contents: [content] },
+    dirtyContentIds: new Set([contentId]),
+    contentEditRevisions: new Map([[contentId, 1]]),
+    contentOperationLocks: new Map(),
+    contentOperationSequence: 0,
+  };
+  const nodes = new Map([
+    [`[data-content-body="${contentId}"]`, editor],
+    [`[data-content-title="${contentId}"]`, titleEditor],
+    [`[data-content-summary="${contentId}"]`, summaryEditor],
+    [`[data-save-content-button="${contentId}"]`, { classList: { add() {}, remove() {} } }],
+    [`[data-content-save-state="${contentId}"]`, { textContent: '', classList: { add() {}, remove() {} } }],
+  ]);
+  const $ = selector => nodes.get(selector) || null;
+  const submitted = [];
+  let canonicalSaveCount = 0;
+  const currentResponseContent = (updatedAt, overrides = {}) => ({
+    ...content,
+    title: titleEditor.value,
+    summary: summaryEditor.value,
+    body: editor.innerHTML,
+    status: '正文已生成',
+    layout_html: '',
+    updated_at: updatedAt,
+    ...overrides,
+  });
+  const request = async (url, options = {}) => {
+    if (url === `/api/content/${encodeURIComponent(contentId)}`) {
+      const payload = JSON.parse(options.body);
+      submitted.push(payload);
+      canonicalSaveCount += 1;
+      return {
+        content: currentResponseContent(
+          canonicalSaveCount === 1 ? '2026-09-02T08:00:00.001Z' : '2026-09-02T08:00:00.003Z'
+        ),
+      };
+    }
+    if (url.endsWith('/layout')) {
+      return {
+        content: currentResponseContent('2026-09-02T08:00:00.002Z', {
+          status: '已排版',
+          layout_html: '<article>New layout</article>',
+        }),
+      };
+    }
+    if (url.endsWith('/save-draft')) {
+      return {
+        job: {
+          id: 'job-refresh-failure',
+          content_id: contentId,
+          title: titleEditor.value,
+          status: 'local_draft',
+          platforms: ['zhihu'],
+          results: [],
+          created_at: '2026-09-02T08:00:00.002Z',
+          updated_at: '2026-09-02T08:00:00.002Z',
+        },
+        content: currentResponseContent('2026-09-02T08:00:00.002Z', {
+          status: '草稿已保存',
+          selected_platforms: ['zhihu'],
+        }),
+      };
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  let operationSequence = 0;
+  const beginContentOperation = target => ({ contentId: String(target), token: `refresh-operation-${++operationSequence}` });
+  const contentOperationIsStable = () => true;
+  const preserveContentOperationChanges = () => { throw new Error('stable refresh-failure flow must not preserve an unstable edit'); };
+  const endContentOperation = () => true;
+  const toasts = [];
+  const toast = (message, type) => toasts.push({ message, type: type || '' });
+  const loadData = async () => { throw new Error('bootstrap unavailable'); };
+  const mergeContentRevisionMetadata = evaluateContentRevisionMerger(state);
+  const saveSource = extractFunctionSource('saveContent', 'markContentDirty');
+  const saveContent = vm.runInNewContext(`(${saveSource})`, {
+    state,
+    $,
+    request,
+    clearPlatformPreviews: () => {},
+    toast,
+    loadData,
+    encodeURIComponent,
+    beginContentOperation,
+    contentOperationIsStable,
+    preserveContentOperationChanges,
+    endContentOperation,
+    mergeContentRevisionMetadata,
+  });
+
+  return {
+    contentId,
+    state,
+    $,
+    request,
+    loadData,
+    saveContent,
+    submitted,
+    toasts,
+    toast,
+    beginContentOperation,
+    contentOperationIsStable,
+    preserveContentOperationChanges,
+    endContentOperation,
+    mergeContentRevisionMetadata,
+    editSecondRevision() {
+      editor.innerHTML = '<p>Second local body</p>';
+      titleEditor.value = 'Second local title';
+      summaryEditor.value = 'Second local summary';
+      state.contentEditRevisions.set(contentId, 2);
+      state.dirtyContentIds.add(contentId);
+    },
+  };
+}
+
+test('canonical save keeps the new revision when bootstrap refresh fails and the next save reuses it', async () => {
+  const harness = createRefreshFailureRevisionHarness('canonical-refresh-failure');
+
+  const first = await harness.saveContent(harness.contentId, { userInitiated: true });
+  assert.equal(first.refreshFailed, true);
+  assert.equal(first.saveError, undefined);
+  assert.equal(harness.state.data.contents[0].updated_at, '2026-09-02T08:00:00.001Z');
+  assert.equal(harness.state.dirtyContentIds.has(harness.contentId), false);
+  assert.match(harness.toasts.at(-1).message, /已保存.*刷新失败/);
+
+  harness.editSecondRevision();
+  const second = await harness.saveContent(harness.contentId, { silent: true, skipReload: true });
+
+  assert.equal(second.stable, true);
+  assert.deepEqual(harness.submitted.map(payload => payload.expectedUpdatedAt), [
+    '2026-09-02T08:00:00.000Z',
+    '2026-09-02T08:00:00.001Z',
+  ]);
+  assert.equal(harness.$(`[data-content-body="${harness.contentId}"]`).innerHTML, '<p>Second local body</p>');
+  assert.equal(harness.state.contentEditRevisions.get(harness.contentId), 2);
+});
+
+for (const operation of ['layout', 'draft']) {
+  test(`${operation} keeps returned revision through bootstrap failure and the next save reuses it`, async () => {
+    const harness = createRefreshFailureRevisionHarness(`${operation}-refresh-failure`);
+    const source = operation === 'layout'
+      ? extractFunctionSource('layoutContent', 'saveDraft')
+      : extractFunctionSource('saveDraft', 'publishContent');
+    const dependencies = {
+      state: harness.state,
+      $: harness.$,
+      request: harness.request,
+      saveContent: harness.saveContent,
+      loadData: harness.loadData,
+      toast: harness.toast,
+      encodeURIComponent,
+      beginContentOperation: harness.beginContentOperation,
+      contentOperationIsStable: harness.contentOperationIsStable,
+      preserveContentOperationChanges: harness.preserveContentOperationChanges,
+      endContentOperation: harness.endContentOperation,
+      mergeContentRevisionMetadata: harness.mergeContentRevisionMetadata,
+      CONTENT_CHANGED_DURING_SAVE_MESSAGE: '正文在保存期间又有修改，请先保存后重试',
+      readSelectedPlatforms: () => ['zhihu'],
+      openLayoutDialog: () => {},
+      getSelectedContent: () => harness.state.data.contents[0],
+    };
+    const runOperation = vm.runInNewContext(`(${source})`, dependencies);
+
+    const first = await runOperation(harness.contentId);
+    assert.equal(first, true);
+    assert.equal(harness.state.data.contents[0].updated_at, '2026-09-02T08:00:00.002Z');
+    assert.match(harness.toasts.at(-1).message, /已生成.*刷新失败|已保存.*刷新失败/);
+
+    harness.editSecondRevision();
+    const second = await harness.saveContent(harness.contentId, { silent: true, skipReload: true });
+
+    assert.equal(second.stable, true);
+    assert.deepEqual(harness.submitted.map(payload => payload.expectedUpdatedAt), [
+      '2026-09-02T08:00:00.000Z',
+      '2026-09-02T08:00:00.002Z',
+    ]);
+    assert.equal(harness.$(`[data-content-body="${harness.contentId}"]`).innerHTML, '<p>Second local body</p>');
+    assert.equal(harness.state.contentEditRevisions.get(harness.contentId), 2);
+  });
+}
+
+test('all successful content mutation flows share metadata merge before refresh', () => {
+  const mergeSource = extractFunctionSource('mergeContentRevisionMetadata', 'saveContent');
+  assert.ok(mergeSource, '缺少共享 content revision metadata helper');
+  for (const [name, nextName] of [
+    ['saveContent', 'markContentDirty'],
+    ['layoutContent', 'saveDraft'],
+    ['saveDraft', 'publishContent'],
+    ['confirmSinglePlatformPublish', 'hasDirtyCanonicalContent'],
+    ['publishContent', 'checkAuth'],
+  ]) {
+    const source = extractFunctionSource(name, nextName);
+    const mergeIndex = source.indexOf('mergeContentRevisionMetadata(');
+    const refreshIndex = source.indexOf('loadData(');
+    assert.ok(mergeIndex >= 0, `${name} must merge returned content metadata`);
+    assert.ok(refreshIndex < 0 || mergeIndex < refreshIndex, `${name} must merge metadata before refresh`);
+  }
 });
 
 test('a 409 save conflict preserves the editor DOM and displays an explicit reload-latest message', async () => {
@@ -1010,11 +1249,17 @@ function createFullContentOperationHarness(contentId = 'full-operation-content')
     }
     if (key === 'draft') {
       downstreamCompleted = true;
-      return { job: { status: 'local_draft', results: [] } };
+      return {
+        job: { status: 'local_draft', results: [] },
+        content: { ...content, status: '草稿已保存', updated_at: '2026-08-31T02:30:00.000Z' },
+      };
     }
     if (key === 'publish') {
       downstreamCompleted = true;
-      return { job: { status: 'published', results: [] } };
+      return {
+        job: { status: 'published', results: [] },
+        content: { ...content, status: '已发布', updated_at: '2026-08-31T02:30:00.000Z' },
+      };
     }
     if (key === 'bootstrap') return { data: bootstrapData() };
     return { ok: true };
@@ -1051,6 +1296,7 @@ function createFullContentOperationHarness(contentId = 'full-operation-content')
     contentOperationIsStable,
     preserveContentOperationChanges,
     endContentOperation,
+    mergeContentRevisionMetadata: evaluateContentRevisionMerger(state),
   });
 
   return {
@@ -1104,6 +1350,7 @@ test('layout operation blocks input and aborts final refresh after a programmati
     preserveContentOperationChanges: harness.preserveContentOperationChanges,
     endContentOperation: harness.endContentOperation,
     CONTENT_CHANGED_DURING_SAVE_MESSAGE: '正文在保存期间又有修改，请先保存后重试',
+    mergeContentRevisionMetadata: evaluateContentRevisionMerger(harness.state),
   });
 
   const pending = layoutContent(harness.contentId, 'style_10.html');
@@ -1148,6 +1395,7 @@ test('draft operation aborts refresh after a programmatic edit during draft requ
     preserveContentOperationChanges: harness.preserveContentOperationChanges,
     endContentOperation: harness.endContentOperation,
     CONTENT_CHANGED_DURING_SAVE_MESSAGE: '正文在保存期间又有修改，请先保存后重试',
+    mergeContentRevisionMetadata: evaluateContentRevisionMerger(harness.state),
   });
 
   const pending = saveDraft(harness.contentId);
@@ -1208,6 +1456,7 @@ test('layout operation releases editor and controls when downstream request thro
     preserveContentOperationChanges: harness.preserveContentOperationChanges,
     endContentOperation: harness.endContentOperation,
     CONTENT_CHANGED_DURING_SAVE_MESSAGE: '正文在保存期间又有修改，请先保存后重试',
+    mergeContentRevisionMetadata: evaluateContentRevisionMerger(harness.state),
   });
 
   const pending = layoutContent(harness.contentId, 'style_10.html');
@@ -1299,6 +1548,7 @@ function createDeferredCanonicalSaveHarness(contentId = 'content-downstream-race
     contentOperationIsStable,
     preserveContentOperationChanges,
     endContentOperation,
+    mergeContentRevisionMetadata: evaluateContentRevisionMerger(state),
   });
   markContentDirty(contentId);
 
@@ -1353,6 +1603,7 @@ test('layout aborts when the canonical body changes during its deferred save', a
     getSelectedContent: () => harness.state.data.contents[0],
     encodeURIComponent,
     CONTENT_CHANGED_DURING_SAVE_MESSAGE: '正文在保存期间又有修改，请先保存后重试',
+    mergeContentRevisionMetadata: evaluateContentRevisionMerger(harness.state),
   });
 
   const pending = layoutContent(harness.contentId, 'style_10.html');
@@ -1380,6 +1631,7 @@ test('saveDraft aborts when the canonical body changes during its deferred save'
     toast: (message, type) => harness.toasts.push({ message, type: type || '' }),
     loadData: async () => { throw new Error('unstable draft must not reload'); },
     CONTENT_CHANGED_DURING_SAVE_MESSAGE: '正文在保存期间又有修改，请先保存后重试',
+    mergeContentRevisionMetadata: evaluateContentRevisionMerger(harness.state),
   });
 
   const pending = saveDraft(harness.contentId);
@@ -1421,6 +1673,7 @@ test('batch publish aborts when the canonical body changes during its deferred s
     loadData: async () => { throw new Error('unstable publish must not reload'); },
     switchView: () => { throw new Error('unstable publish must not navigate'); },
     CONTENT_CHANGED_DURING_SAVE_MESSAGE: '正文在保存期间又有修改，请先保存后重试',
+    mergeContentRevisionMetadata: evaluateContentRevisionMerger(harness.state),
   });
 
   const pending = publishContent(harness.contentId);
@@ -1468,6 +1721,7 @@ test('single publish aborts when the canonical body changes during its deferred 
     toast: (message, type) => harness.toasts.push({ message, type: type || '' }),
     encodeURIComponent,
     CONTENT_CHANGED_DURING_SAVE_MESSAGE: '正文在保存期间又有修改，请先保存后重试',
+    mergeContentRevisionMetadata: evaluateContentRevisionMerger(harness.state),
   });
 
   const pending = confirmSinglePlatformPublish();

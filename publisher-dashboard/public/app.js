@@ -2240,10 +2240,11 @@ async function confirmSinglePlatformPublish() {
         operationId: operation.operationId,
       }),
     });
+    mergeContentRevisionMetadata(result.content, operation.contentId);
     const platformResult = result.job?.results?.find(item => item.platform === operation.platform);
     if (state.singlePublishOperationToken !== operation.token) return false;
     if (!contentOperationIsStable(operationContext)) {
-      preserveContentOperationChanges(operationContext);
+      preserveContentOperationChanges(operationContext, result.content);
       setSinglePublishFeedback(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
       toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
       return false;
@@ -2261,7 +2262,7 @@ async function confirmSinglePlatformPublish() {
     try {
       const loaded = await loadData({ operationContext });
       if (!loaded.applied) {
-        preserveContentOperationChanges(operationContext);
+        preserveContentOperationChanges(operationContext, result.content);
         toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
         return false;
       }
@@ -2346,6 +2347,21 @@ async function generateContent(date) {
   await loadData();
 }
 
+function mergeContentRevisionMetadata(serverContent, contentId = serverContent?.id) {
+  if (!serverContent || !contentId) return false;
+  const target = String(contentId);
+  const contentIndex = state.data?.contents?.findIndex(content => String(content.id) === target) ?? -1;
+  if (contentIndex < 0) return false;
+  const existing = state.data.contents[contentIndex];
+  state.data.contents[contentIndex] = {
+    ...existing,
+    ...(typeof serverContent.updated_at === 'string' ? { updated_at: serverContent.updated_at } : {}),
+    ...(Object.prototype.hasOwnProperty.call(serverContent, 'status') ? { status: serverContent.status } : {}),
+    ...(Object.prototype.hasOwnProperty.call(serverContent, 'layout_html') ? { layout_html: serverContent.layout_html } : {}),
+  };
+  return true;
+}
+
 async function saveContent(id, options = {}) {
   const target = id || state.selectedContentId;
   if (!target) return { content: null, stable: true };
@@ -2373,26 +2389,33 @@ async function saveContent(id, options = {}) {
       }),
     });
     state.selectedContentId = res.content.id;
+    mergeContentRevisionMetadata(res.content, targetKey);
     clearPlatformPreviews(target);
     if (!contentOperationIsStable(operationContext)) {
       preserveContentOperationChanges(operationContext, res.content);
       return { content: res.content, stable: false };
     }
-    if (options.skipReload) {
-      const contentIndex = state.data.contents.findIndex(content => String(content.id) === targetKey);
-      if (contentIndex >= 0) {
-        const existing = state.data.contents[contentIndex];
-        state.data.contents[contentIndex] = {
-          ...existing,
-          updated_at: res.content.updated_at,
-          status: res.content.status,
-          layout_html: res.content.layout_html,
-        };
-      }
-    }
     state.dirtyContentIds.delete(targetKey);
     if (!options.skipReload) {
-      const loaded = await loadData({ operationContext });
+      let loaded;
+      try {
+        loaded = await loadData({ operationContext });
+      } catch {
+        if (!contentOperationIsStable(operationContext)) {
+          preserveContentOperationChanges(operationContext, res.content);
+          toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
+          return { content: res.content, stable: false };
+        }
+        const message = '正文已保存，但列表刷新失败；可继续编辑或稍后刷新';
+        $(`[data-save-content-button="${target}"]`)?.classList.add('is-hidden');
+        const saveState = $(`[data-content-save-state="${target}"]`);
+        if (saveState) {
+          saveState.textContent = message;
+          saveState.classList.remove('is-dirty');
+        }
+        toast(message, 'error');
+        return { content: res.content, stable: true, refreshFailed: true };
+      }
       if (!loaded.applied) {
         preserveContentOperationChanges(operationContext, res.content);
         return { content: res.content, stable: false };
@@ -2470,13 +2493,26 @@ async function layoutContent(id, template) {
       ? { method: 'POST', body: JSON.stringify({ template }) }
       : { method: 'POST' };
     const res = await request(`/api/content/${encodeURIComponent(target)}/layout`, requestOptions);
+    mergeContentRevisionMetadata(res.content, target);
     if (!contentOperationIsStable(operationContext)) {
       preserveContentOperationChanges(operationContext, res.content);
       toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
       return false;
     }
     state.selectedContentId = res.content.id;
-    const loaded = await loadData({ operationContext });
+    let loaded;
+    try {
+      loaded = await loadData({ operationContext });
+    } catch {
+      if (!contentOperationIsStable(operationContext)) {
+        preserveContentOperationChanges(operationContext, res.content);
+        toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
+        return false;
+      }
+      openLayoutDialog(getSelectedContent());
+      toast('排版预览已生成，但列表刷新失败', 'error');
+      return true;
+    }
     if (!loaded.applied) {
       preserveContentOperationChanges(operationContext, res.content);
       toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
@@ -2504,18 +2540,30 @@ async function saveDraft(id) {
         return false;
       }
     }
-    await request(`/api/content/${target}/save-draft`, {
+    const res = await request(`/api/content/${target}/save-draft`, {
       method: 'POST',
       body: JSON.stringify({ platforms: selectedPlatforms }),
     });
+    mergeContentRevisionMetadata(res.content, target);
     if (!contentOperationIsStable(operationContext)) {
-      preserveContentOperationChanges(operationContext);
+      preserveContentOperationChanges(operationContext, res.content);
       toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
       return false;
     }
-    const loaded = await loadData({ operationContext });
+    let loaded;
+    try {
+      loaded = await loadData({ operationContext });
+    } catch {
+      if (!contentOperationIsStable(operationContext)) {
+        preserveContentOperationChanges(operationContext, res.content);
+        toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
+        return false;
+      }
+      toast('草稿已保存，但列表刷新失败', 'error');
+      return true;
+    }
     if (!loaded.applied) {
-      preserveContentOperationChanges(operationContext);
+      preserveContentOperationChanges(operationContext, res.content);
       toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
       return false;
     }
@@ -2555,18 +2603,30 @@ async function publishContent(id) {
     state.selectedPlatforms = new Set(operation.platforms);
     state.lastProgress = [`正在直接发布到 ${operation.platforms.length} 个平台`, '进入多平台直发流程'];
     renderProgress(state.lastProgress);
-    await request('/api/publish', {
+    const result = await request('/api/publish', {
       method: 'POST',
       body: JSON.stringify(operation),
     });
+    mergeContentRevisionMetadata(result.content, target);
     if (!contentOperationIsStable(operationContext)) {
-      preserveContentOperationChanges(operationContext);
+      preserveContentOperationChanges(operationContext, result.content);
       toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
       return false;
     }
-    const loaded = await loadData({ operationContext });
+    let loaded;
+    try {
+      loaded = await loadData({ operationContext });
+    } catch {
+      if (!contentOperationIsStable(operationContext)) {
+        preserveContentOperationChanges(operationContext, result.content);
+        toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
+        return false;
+      }
+      toast('发布成功，但列表刷新失败', 'error');
+      return true;
+    }
     if (!loaded.applied) {
-      preserveContentOperationChanges(operationContext);
+      preserveContentOperationChanges(operationContext, result.content);
       toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
       return false;
     }

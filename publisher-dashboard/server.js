@@ -2265,65 +2265,74 @@ function generateContent(planDate, explicitTopic) {
 }
 
 function layoutContent(contentId, template) {
-  const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
-  if (!content) throw new Error('内容不存在');
   const templateProvided = arguments.length >= 2;
   if (templateProvided && (typeof template !== 'string' || !template.trim())) {
     throw statusError('template 必须是非空字符串', 400);
   }
-  const html = templateProvided
-    ? renderLayoutTemplate(template, {
-      title: content.title,
-      summary: content.summary || '',
-      body: content.body,
-    })
-    : buildLayoutHtml(content.title, content.body);
-  const mutation = updateContentRowWithMonotonicTimestamp(
-    contentId,
-    "layout_html = ?, status = '已排版'",
-    [html],
-    { expectedUpdatedAt: content.updated_at }
-  );
-  if (mutation.changes === 0) throw statusError('文章已被更新，请重新生成排版', 409);
-  if (content.plan_date) {
-    db.prepare("UPDATE weekly_plans SET status = '已排版', updated_at = ? WHERE date = ?")
-      .run(mutation.updatedAt, content.plan_date);
-  }
-  addActivity(`完成排版预览《${content.title}》`, 'content', contentId);
-  return normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
+  return runTransaction(() => {
+    const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
+    if (!content) throw new Error('内容不存在');
+    const html = templateProvided
+      ? renderLayoutTemplate(template, {
+        title: content.title,
+        summary: content.summary || '',
+        body: content.body,
+      })
+      : buildLayoutHtml(content.title, content.body);
+    const mutation = updateContentRowWithMonotonicTimestamp(
+      contentId,
+      "layout_html = ?, status = '已排版'",
+      [html],
+      { expectedUpdatedAt: content.updated_at }
+    );
+    if (mutation.changes === 0) throw statusError('文章已被更新，请重新生成排版', 409);
+    if (content.plan_date) {
+      db.prepare("UPDATE weekly_plans SET status = '已排版', updated_at = ? WHERE date = ?")
+        .run(mutation.updatedAt, content.plan_date);
+    }
+    addActivity(`完成排版预览《${content.title}》`, 'content', contentId);
+    const updated = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
+    if (!updated) throw new Error('排版内容读取失败');
+    return updated;
+  });
 }
 
 function saveLocalDraft(contentId, platforms = []) {
-  const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
-  if (!content) throw new Error('内容不存在');
-  const selected = (Array.isArray(platforms) ? platforms : content.selected_platforms)
-    .map(platform => String(platform || '').trim().toLowerCase())
-    .filter(platform => platform && !RETIRED_PLATFORM_IDS.includes(platform));
-  const mutation = updateContentRowWithMonotonicTimestamp(
-    contentId,
-    "status = '草稿已保存', selected_platforms = ?",
-    [encodeJson(selected)],
-    { expectedUpdatedAt: content.updated_at }
-  );
-  if (mutation.changes === 0) throw statusError('文章已被更新，请重新保存草稿', 409);
-  if (content.plan_date) {
-    db.prepare("UPDATE weekly_plans SET status = '草稿已保存', updated_at = ? WHERE date = ?")
-      .run(mutation.updatedAt, content.plan_date);
-  }
+  return runTransaction(() => {
+    const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
+    if (!content) throw new Error('内容不存在');
+    const selected = (Array.isArray(platforms) ? platforms : content.selected_platforms)
+      .map(platform => String(platform || '').trim().toLowerCase())
+      .filter(platform => platform && !RETIRED_PLATFORM_IDS.includes(platform));
+    const mutation = updateContentRowWithMonotonicTimestamp(
+      contentId,
+      "status = '草稿已保存', selected_platforms = ?",
+      [encodeJson(selected)],
+      { expectedUpdatedAt: content.updated_at }
+    );
+    if (mutation.changes === 0) throw statusError('文章已被更新，请重新保存草稿', 409);
+    if (content.plan_date) {
+      db.prepare("UPDATE weekly_plans SET status = '草稿已保存', updated_at = ? WHERE date = ?")
+        .run(mutation.updatedAt, content.plan_date);
+    }
 
-  const jobId = makeId('job');
-  db.prepare(`
-    INSERT INTO publish_jobs (id, content_id, title, status, platforms, created_at, updated_at)
-    VALUES (?, ?, ?, 'local_draft', ?, ?, ?)
-  `).run(jobId, contentId, content.title, encodeJson(selected), now(), now());
-  for (const platform of selected) {
+    const jobId = makeId('job');
     db.prepare(`
-      INSERT INTO publish_results (id, job_id, platform, status, message, created_at)
-      VALUES (?, ?, ?, 'local_draft', '已保存到内容中心草稿，等待一键发布', ?)
-    `).run(makeId('res'), jobId, platform, now());
-  }
-  addActivity(`保存本地草稿《${content.title}》`, 'content', contentId, '运营');
-  return normalizeJob(one('SELECT * FROM publish_jobs WHERE id = ?', jobId));
+      INSERT INTO publish_jobs (id, content_id, title, status, platforms, created_at, updated_at)
+      VALUES (?, ?, ?, 'local_draft', ?, ?, ?)
+    `).run(jobId, contentId, content.title, encodeJson(selected), now(), now());
+    for (const platform of selected) {
+      db.prepare(`
+        INSERT INTO publish_results (id, job_id, platform, status, message, created_at)
+        VALUES (?, ?, ?, 'local_draft', '已保存到内容中心草稿，等待一键发布', ?)
+      `).run(makeId('res'), jobId, platform, now());
+    }
+    addActivity(`保存本地草稿《${content.title}》`, 'content', contentId, '运营');
+    const job = normalizeJob(one('SELECT * FROM publish_jobs WHERE id = ?', jobId));
+    const updatedContent = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
+    if (!job || !updatedContent) throw new Error('草稿结果读取失败');
+    return { job, content: updatedContent };
+  });
 }
 
 function contentToMarkdown(content) {
@@ -2651,7 +2660,8 @@ function journalResultForPublish(result) {
 function replayedPublishResult(record) {
   const jobId = record.result?.jobId;
   const storedJob = jobId ? normalizeJob(one('SELECT * FROM publish_jobs WHERE id = ?', jobId)) : null;
-  if (storedJob) return { job: storedJob, rawOutput: '' };
+  const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', record.signature.contentId));
+  if (storedJob) return { job: storedJob, rawOutput: '', content };
   return {
     job: {
       id: jobId || record.operationId,
@@ -2661,6 +2671,7 @@ function replayedPublishResult(record) {
       results: record.result?.platformResults || [],
     },
     rawOutput: '',
+    content,
   };
 }
 
@@ -2760,7 +2771,9 @@ async function publishContent(contentId, platforms = [], options = {}) {
   const result = {
     job: normalizeJob(one('SELECT * FROM publish_jobs WHERE id = ?', jobId)),
     rawOutput: rawOutputs.join('\n\n'),
+    content: normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId)),
   };
+  if (!result.job || !result.content) throw new Error('发布结果读取失败');
   Object.defineProperty(result, PUBLISH_EXECUTION_META, {
     value: { publisherCallsStarted, successCount, jobStatus },
     enumerable: false,
@@ -2806,7 +2819,7 @@ function runFakeAiCommand(payload) {
     progress.push('排版预览已生成');
   } else if (type === 'save_draft') {
     if (!payload.contentId) throw new Error('请选择要保存的内容');
-    result = { job: saveLocalDraft(payload.contentId, payload.platforms || []) };
+    result = saveLocalDraft(payload.contentId, payload.platforms || []);
     progress.push('已保存到内容中心草稿');
   } else {
     progress.push('当前为 V1.0 假数据流程，已记录指令');
@@ -3342,7 +3355,7 @@ function createDashboardServer(options = {}) {
     const draftMatch = url.pathname.match(/^\/api\/content\/([^/]+)\/save-draft$/);
     if (draftMatch && req.method === 'POST') {
       const body = await readBody(req);
-      sendJson(res, { ok: true, job: saveLocalDraft(draftMatch[1], body.platforms || []) });
+      sendJson(res, { ok: true, ...saveLocalDraft(draftMatch[1], body.platforms || []) });
       return;
     }
 

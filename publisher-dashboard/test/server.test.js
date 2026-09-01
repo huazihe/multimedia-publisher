@@ -1631,6 +1631,8 @@ test('POST publish-platform records sequential jobs without changing aggregate c
     assert.equal(result.job.status, 'draft_saved');
     assert.deepEqual(result.job.platforms, ['zhihu']);
     assert.deepEqual(result.job.results.map(item => [item.platform, item.status]), [['zhihu', 'platform_draft']]);
+    assert.equal(result.content.id, fixture.id);
+    assert.equal(result.content.updated_at, db.prepare('SELECT updated_at FROM contents WHERE id = ?').get(fixture.id).updated_at);
     const firstJobId = result.job.id;
     assert.deepEqual(readPublishState(fixture), {
       selectedPlatforms: ['weixin', 'douyin'],
@@ -2079,6 +2081,9 @@ test('POST /api/publish keeps the existing batch publisher contract', async () =
       ['juejin', 'platform_draft'],
     ]);
     assert.equal(result.rawOutput, 'stub output zhihu\n\nstub output juejin');
+    assert.equal(result.content.id, fixture.id);
+    assert.equal(result.content.status, '草稿已保存');
+    assert.equal(result.content.updated_at, db.prepare('SELECT updated_at FROM contents WHERE id = ?').get(fixture.id).updated_at);
     assert.deepEqual(readPublishState(fixture), {
       selectedPlatforms: ['zhihu', 'juejin'],
       contentStatus: '草稿已保存',
@@ -2329,6 +2334,119 @@ test('updateContent rolls back content, plan, and revision when activity inserti
     assert.equal(updatedPlan.topic, 'Atomic updated title');
     assert.equal(updatedPlan.type, 'Atomic updated type');
     assert.equal(updatedPlan.status, '正文已生成');
+  } finally {
+    db.exec(`DROP TRIGGER IF EXISTS ${triggerName}`);
+    cleanupPublishStateFixture(fixture);
+  }
+});
+
+test('layoutContent rolls back content, plan, activity, and revision when its activity insert fails', () => {
+  let fixture;
+  const triggerName = 'fail_layout_activity';
+  db.exec(`DROP TRIGGER IF EXISTS ${triggerName}`);
+  try {
+    fixture = createPublishStateFixture({
+      key: 'atomic-layout',
+      planDate: '2099-06-06',
+      selectedPlatforms: ['zhihu'],
+      contentStatus: '正文已生成',
+      planStatus: '正文已生成',
+    });
+    const originalContent = db.prepare(`
+      SELECT title, summary, body, type, status, layout_html, selected_platforms, updated_at
+      FROM contents WHERE id = ?
+    `).get(fixture.id);
+    const originalPlan = db.prepare('SELECT topic, type, status, updated_at FROM weekly_plans WHERE date = ?')
+      .get(fixture.planDate);
+    const activityCount = db.prepare("SELECT COUNT(*) AS count FROM activity WHERE target_type = 'content' AND target_id = ?")
+      .get(fixture.id).count;
+    db.exec(`
+      CREATE TRIGGER ${triggerName}
+      BEFORE INSERT ON activity
+      WHEN NEW.target_type = 'content' AND NEW.action LIKE '完成排版预览%'
+      BEGIN
+        SELECT RAISE(ABORT, 'forced layout activity failure');
+      END
+    `);
+
+    assert.throws(() => layoutContent(fixture.id), /forced layout activity failure/);
+    assert.deepEqual(db.prepare(`
+      SELECT title, summary, body, type, status, layout_html, selected_platforms, updated_at
+      FROM contents WHERE id = ?
+    `).get(fixture.id), originalContent);
+    assert.deepEqual(
+      db.prepare('SELECT topic, type, status, updated_at FROM weekly_plans WHERE date = ?').get(fixture.planDate),
+      originalPlan
+    );
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS count FROM activity WHERE target_type = 'content' AND target_id = ?").get(fixture.id).count,
+      activityCount
+    );
+
+    const retried = updateContent(fixture.id, canonicalRevisionPayload(originalContent, { summary: 'Retry after layout failure' }));
+    assert.equal(retried.summary, 'Retry after layout failure');
+    assert.notEqual(retried.updated_at, originalContent.updated_at);
+  } finally {
+    db.exec(`DROP TRIGGER IF EXISTS ${triggerName}`);
+    cleanupPublishStateFixture(fixture);
+  }
+});
+
+test('saveLocalDraft rolls back content, plan, jobs, results, activity, and revision on dependent-write failure', () => {
+  let fixture;
+  const triggerName = 'fail_local_draft_result';
+  db.exec(`DROP TRIGGER IF EXISTS ${triggerName}`);
+  try {
+    fixture = createPublishStateFixture({
+      key: 'atomic-local-draft',
+      planDate: '2099-06-07',
+      selectedPlatforms: ['weixin'],
+      contentStatus: '已排版',
+      planStatus: '已排版',
+    });
+    const originalContent = db.prepare(`
+      SELECT title, summary, body, type, status, layout_html, selected_platforms, updated_at
+      FROM contents WHERE id = ?
+    `).get(fixture.id);
+    const originalPlan = db.prepare('SELECT topic, type, status, updated_at FROM weekly_plans WHERE date = ?')
+      .get(fixture.planDate);
+    const originalJobs = db.prepare('SELECT * FROM publish_jobs WHERE content_id = ? ORDER BY id').all(fixture.id);
+    const activityCount = db.prepare("SELECT COUNT(*) AS count FROM activity WHERE target_type = 'content' AND target_id = ?")
+      .get(fixture.id).count;
+    db.exec(`
+      CREATE TRIGGER ${triggerName}
+      BEFORE INSERT ON publish_results
+      WHEN NEW.status = 'local_draft'
+      BEGIN
+        SELECT RAISE(ABORT, 'forced local draft result failure');
+      END
+    `);
+
+    assert.throws(
+      () => saveLocalDraft(fixture.id, ['zhihu']),
+      /forced local draft result failure/
+    );
+    assert.deepEqual(db.prepare(`
+      SELECT title, summary, body, type, status, layout_html, selected_platforms, updated_at
+      FROM contents WHERE id = ?
+    `).get(fixture.id), originalContent);
+    assert.deepEqual(
+      db.prepare('SELECT topic, type, status, updated_at FROM weekly_plans WHERE date = ?').get(fixture.planDate),
+      originalPlan
+    );
+    assert.deepEqual(db.prepare('SELECT * FROM publish_jobs WHERE content_id = ? ORDER BY id').all(fixture.id), originalJobs);
+    assert.equal(db.prepare(`
+      SELECT COUNT(*) AS count FROM publish_results
+      WHERE job_id IN (SELECT id FROM publish_jobs WHERE content_id = ?)
+    `).get(fixture.id).count, 0);
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS count FROM activity WHERE target_type = 'content' AND target_id = ?").get(fixture.id).count,
+      activityCount
+    );
+
+    const retried = updateContent(fixture.id, canonicalRevisionPayload(originalContent, { summary: 'Retry after draft failure' }));
+    assert.equal(retried.summary, 'Retry after draft failure');
+    assert.notEqual(retried.updated_at, originalContent.updated_at);
   } finally {
     db.exec(`DROP TRIGGER IF EXISTS ${triggerName}`);
     cleanupPublishStateFixture(fixture);
@@ -2710,6 +2828,44 @@ test('content update endpoint returns 400 for malformed JSON', async () => {
   } finally {
     await closeServer(testServer);
     cleanupImportedContent(content);
+  }
+});
+
+test('save-draft endpoint preserves job fields and adds normalized content metadata', async () => {
+  let fixture;
+  let testServer;
+  try {
+    fixture = createPublishStateFixture({
+      key: 'draft-content-metadata',
+      planDate: '2099-06-08',
+      selectedPlatforms: [],
+      contentStatus: '已排版',
+      planStatus: '已排版',
+    });
+    testServer = createDashboardServer();
+    const port = await listenOnRandomPort(testServer);
+    const response = await workbenchFetch(`http://127.0.0.1:${port}/api/content/${fixture.id}/save-draft`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platforms: ['zhihu'] }),
+    });
+    const result = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(result.ok, true);
+    assert.equal(result.job.content_id, fixture.id);
+    assert.equal(result.job.status, 'local_draft');
+    assert.deepEqual(result.job.platforms, ['zhihu']);
+    assert.equal(result.content.id, fixture.id);
+    assert.equal(result.content.status, '草稿已保存');
+    assert.deepEqual(result.content.selected_platforms, ['zhihu']);
+    assert.equal(
+      result.content.updated_at,
+      db.prepare('SELECT updated_at FROM contents WHERE id = ?').get(fixture.id).updated_at
+    );
+  } finally {
+    await closeServer(testServer);
+    cleanupPublishStateFixture(fixture);
   }
 });
 
