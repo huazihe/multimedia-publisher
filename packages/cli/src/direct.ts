@@ -293,8 +293,8 @@ function parseMarkdown(content: string): ParsedContent {
 
   const yamlMatch = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n/)
   if (yamlMatch) {
-    const titleMatch = yamlMatch[1].match(/^title:\s*["']?(.+?)["']?\s*$/m)
-    if (titleMatch) title = titleMatch[1].trim()
+    const titleMatch = yamlMatch[1].match(/^title:[ \t]*(.*?)[ \t]*\r?$/m)
+    if (titleMatch) title = parseFrontMatterTitle(titleMatch[1])
     body = content.slice(yamlMatch[0].length)
   }
 
@@ -312,6 +312,24 @@ function parseMarkdown(content: string): ParsedContent {
     content: body || content,
     format: 'markdown',
   }
+}
+
+function parseFrontMatterTitle(rawValue: string): string | null {
+  const value = rawValue.trim()
+  if (!value) return null
+
+  try {
+    const decoded = JSON.parse(value)
+    if (typeof decoded === 'string') return decoded
+  } catch {
+    // Fall through to the legacy unquoted and loosely quoted title formats.
+  }
+
+  const quote = value[0]
+  if ((quote === '"' || quote === "'") && value[value.length - 1] === quote) {
+    return value.slice(1, -1).trim()
+  }
+  return value
 }
 
 function parseHtml(content: string, filePath: string): ParsedContent {

@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
@@ -63,6 +64,8 @@ vi.mock('node:fs/promises', async () => {
   }
 })
 
+const realFs = await vi.importActual<typeof import('node:fs')>('node:fs')
+
 const fixtureFile = fileURLToPath(new URL('../test/fixtures/article.md', import.meta.url))
 const cliRoot = fileURLToPath(new URL('..', import.meta.url))
 const builtCliFile = path.join(cliRoot, 'dist/index.js')
@@ -105,6 +108,17 @@ function runBuiltCli(args: string[]) {
   })
 }
 
+function withMarkdownFixture<T>(markdown: string, callback: (filePath: string) => T): T {
+  const tempDir = realFs.mkdtempSync(path.join(os.tmpdir(), 'weibot-cli-front-matter-'))
+  const filePath = path.join(tempDir, 'article.md')
+  try {
+    realFs.writeFileSync(filePath, markdown, 'utf8')
+    return callback(filePath)
+  } finally {
+    realFs.rmSync(tempDir, { recursive: true, force: true })
+  }
+}
+
 describe('buildPlatformPreview', () => {
   it('returns Xiaohongshu text containing the article body', () => {
     const preview = buildPlatformPreview(fixtureFile, 'xiaohongshu', {})
@@ -127,6 +141,47 @@ describe('buildPlatformPreview', () => {
   it('rejects an unknown platform with a clear error', () => {
     expect(() => buildPlatformPreview(fixtureFile, 'unknown-platform', {}))
       .toThrow('平台不存在: unknown-platform')
+  })
+
+  it('decodes a JSON front matter title exactly in the CLI preview', () => {
+    const title = '标题\n# 注入 [x](https://example.com)'
+    const markdown = [
+      '---',
+      `title: ${JSON.stringify(title)}`,
+      '---',
+      '',
+      '# 标题 \\# 注入 \\[x\\](https://example\\.com)',
+      '',
+      '正文',
+    ].join('\n')
+
+    withMarkdownFixture(markdown, filePath => {
+      const preview = buildPlatformPreview(filePath, 'zip-download', {})
+
+      expect(preview.title).toBe(title)
+      expect(preview.article.title).toBe(title)
+    })
+  })
+
+  it('reversibly decodes quotes, colons, newlines, hashes, and backslashes in JSON titles', () => {
+    const title = '引号 "双引号": 路径\\值\n# 哈希'
+    const markdown = `---\ntitle: ${JSON.stringify(title)}\n---\n\n正文\n`
+
+    withMarkdownFixture(markdown, filePath => {
+      expect(buildPlatformPreview(filePath, 'zip-download', {}).title).toBe(title)
+    })
+  })
+
+  it.each([
+    ['title: 旧式未加引号标题', '旧式未加引号标题'],
+    ["title: '旧式单引号标题'", '旧式单引号标题'],
+    ['title: "旧式双引号标题"', '旧式双引号标题'],
+  ])('keeps backward compatibility with %s', (titleLine, expectedTitle) => {
+    const markdown = `---\n${titleLine}\n---\n\n正文\n`
+
+    withMarkdownFixture(markdown, filePath => {
+      expect(buildPlatformPreview(filePath, 'zip-download', {}).title).toBe(expectedTitle)
+    })
   })
 })
 

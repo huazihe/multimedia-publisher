@@ -552,11 +552,116 @@ test('generateCandidates creates five candidates', () => {
   assert.equal(candidates[0].priority, 'P0');
 });
 
-test('contentToMarkdown includes front matter and h1', () => {
+test('contentToMarkdown includes JSON front matter and one canonical h1', () => {
   const markdown = contentToMarkdown({ title: 'Test Title', body: '# Test Title\n\nBody text' });
-  assert.match(markdown, /title: Test Title/);
-  assert.match(markdown, /# Test Title/);
+  assert.match(markdown, /^title: "Test Title"$/m);
+  assert.equal((markdown.match(/^# Test Title$/gm) || []).length, 1);
   assert.match(markdown, /Body text/);
+});
+
+test('contentToMarkdown removes a normalized duplicate leading H1', () => {
+  const markdown = contentToMarkdown({
+    title: 'Canonical   Title',
+    body: '# Canonical Title\n\nBody text',
+  });
+
+  assert.equal((markdown.match(/^# /gm) || []).length, 1);
+  assert.match(markdown, /^# Canonical Title$/m);
+  assert.match(markdown, /Body text/);
+});
+
+test('contentToMarkdown preserves an indented H1-looking code line', () => {
+  const markdown = contentToMarkdown({
+    title: 'Canonical Title',
+    body: '    # Canonical Title\n\nBody text',
+  });
+
+  assert.match(markdown, /^ {4}# Canonical Title$/m);
+});
+
+test('contentToMarkdown removes a matching leading H1 at end of body', () => {
+  const markdown = contentToMarkdown({ title: 'Canonical Title', body: '# Canonical Title' });
+
+  assert.equal((markdown.match(/^# Canonical Title$/gm) || []).length, 1);
+});
+
+test('contentToMarkdown preserves a leading H1 that differs from the article title', () => {
+  let content;
+  try {
+    content = importContent({
+      title: '封面标题',
+      format: 'markdown',
+      filename: 'article.md',
+      body: '# 正文章节\n\n不能丢失。',
+    });
+
+    assert.match(content.body, /正文章节/);
+    assert.match(contentToMarkdown(content), /^# 正文章节$/m);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('contentToMarkdown safely serializes multiline and Markdown-significant titles', () => {
+  const title = '引号 "双引号": 路径\\值\n# 注入 ![图](image.png) > 引用 - 列表 | 表格';
+  const markdown = contentToMarkdown({ title, body: '<p>正文</p>' });
+  const lines = markdown.split('\n');
+
+  assert.equal(lines[1], `title: ${JSON.stringify(title)}`);
+  assert.equal((markdown.match(/^# /gm) || []).length, 1);
+  assert.equal(lines[4], '# 引号 "双引号": 路径\\\\值 \\# 注入 \\!\\[图\\](image\\.png) \\> 引用 \\- 列表 \\| 表格');
+  assert.match(markdown, /正文/);
+});
+
+test('contentToMarkdown keeps an injected title in exactly one generated H1', () => {
+  const title = '标题\n# 注入 [x](https://example.com)';
+  const markdown = contentToMarkdown({ title, body: '<p>正文</p>' });
+
+  assert.equal((markdown.match(/^# /gm) || []).length, 1);
+  assert.equal(
+    markdown.split('\n')[4],
+    '# 标题 \\# 注入 \\[x\\](https://example\\.com)'
+  );
+});
+
+test('publish snapshot preserves an explicit-title article leading body H1', async () => {
+  let content;
+  let snapshotFile;
+  try {
+    content = importContent({
+      title: '封面标题',
+      format: 'markdown',
+      filename: 'article.md',
+      body: '# 正文章节\n\n不能丢失。',
+    });
+    assert.match(content.body, /正文章节/);
+
+    await publishContent(content.id, ['zhihu'], {
+      preflight: async () => null,
+      platformPublisher: async markdownFile => {
+        snapshotFile = markdownFile;
+        return {
+          output: '',
+          info: { status: 'success', message: '本地 stub 发布成功' },
+        };
+      },
+    });
+
+    const snapshot = fs.readFileSync(snapshotFile, 'utf8');
+    assert.match(snapshot, /^# 正文章节$/m);
+    assert.match(snapshot, /不能丢失。/);
+  } finally {
+    if (content?.id) {
+      const jobs = db.prepare('SELECT id FROM publish_jobs WHERE content_id = ?').all(content.id);
+      for (const job of jobs) {
+        db.prepare("DELETE FROM activity WHERE target_type = 'publish_job' AND target_id = ?").run(job.id);
+        db.prepare('DELETE FROM publish_results WHERE job_id = ?').run(job.id);
+        db.prepare('DELETE FROM publish_jobs WHERE id = ?').run(job.id);
+        fs.rmSync(path.join(DRAFTS_DIR, publishSnapshotName(job.id, content.id)), { force: true });
+      }
+    }
+    cleanupImportedContent(content);
+  }
 });
 
 test('platform preview serializes canonical content and runs only the injected CLI preview command', async () => {
@@ -578,7 +683,7 @@ test('platform preview serializes canonical content and runs only the injected C
         calls.push({ args, timeout });
         previewFile = args[1];
         const source = fs.readFileSync(previewFile, 'utf8');
-        assert.match(source, /title: 平台预览母稿/);
+        assert.match(source, /title: "平台预览母稿"/);
         assert.match(source, /# 平台预览母稿/);
         assert.match(source, /当前正文/);
         assert.doesNotMatch(source, /<h1>|<p>/);
@@ -2015,7 +2120,7 @@ for (const mode of ['single', 'batch']) {
       assert.deepEqual(result.job.results.map(item => [item.platform, item.status]), [['zhihu', 'success']]);
       assert.equal(publisherCalls, 1);
       assert.equal(publishedTitle, admitted.title);
-      assert.match(publishedMarkdown, new RegExp(`# ${admitted.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+      assert.equal(publishedMarkdown, contentToMarkdown(admitted));
       assert.doesNotMatch(publishedMarkdown, new RegExp(newer.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
       assert.deepEqual(db.prepare(`
         SELECT title, summary, body, type, status, layout_html, selected_platforms, updated_at
@@ -3826,7 +3931,7 @@ test('mature GFM conversion preserves structure exactly through import edit and 
     ].join('\n');
     const expectedMarkdown = [
       '---',
-      'title: Format parity',
+      'title: "Format parity"',
       '---',
       '',
       '# Format parity',

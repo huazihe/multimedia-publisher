@@ -2399,8 +2399,24 @@ function saveLocalDraft(contentId, platforms = [], expectedUpdatedAt) {
 }
 
 function contentToMarkdown(content) {
-  const body = contentBodyToMarkdown(content.body).replace(/^\s*#\s+.+\r?\n+/, '');
-  return `---\ntitle: ${content.title}\n---\n\n# ${content.title}\n\n${body}\n`;
+  const title = String(content.title || '');
+  const body = removeMatchingLeadingH1(contentBodyToMarkdown(content.body), title);
+  const headingTitle = normalizedMarkdownHeading(title)
+    .replace(/([\\`*_{}\[\]<>#+.!|-])/g, '\\$1');
+  return `---\ntitle: ${JSON.stringify(title)}\n---\n\n# ${headingTitle}\n\n${body}\n`;
+}
+
+function normalizedMarkdownHeading(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function removeMatchingLeadingH1(markdown, title) {
+  const source = String(markdown || '');
+  const leadingH1 = source.match(/^(?:[ \t]*\r?\n)* {0,3}#[ \t]+([^\r\n]+?)[ \t]*(?:(?:\r?\n)+|$)/);
+  return leadingH1
+    && normalizedMarkdownHeading(leadingH1[1]) === normalizedMarkdownHeading(title)
+    ? source.slice(leadingH1[0].length)
+    : source;
 }
 
 function previewApiError(message, statusCode, apiCode) {
