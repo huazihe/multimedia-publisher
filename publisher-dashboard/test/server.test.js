@@ -2246,10 +2246,121 @@ test('dashboard server holds one instance lock and releases it on close', async 
   assert.equal(fs.existsSync(instanceLockFile), false);
 });
 
+test('publisher exception persists completed results and leaves an uncertain terminal job', async () => {
+  let fixture;
+  let testServer;
+  const publisherCalls = [];
+  let dashboardBefore;
+  const operationsFile = path.join(testDataDir, 'partial-then-uncertain-operations.json');
+  try {
+    fixture = createPublishStateFixture({
+      key: 'partial-then-uncertain',
+      planDate: '2099-07-01',
+      selectedPlatforms: ['zhihu', 'juejin'],
+      contentStatus: '已排版',
+      planStatus: '已排版',
+    });
+    dashboardBefore = getDashboardData();
+    testServer = createDashboardServer({
+      operationsFile,
+      instanceLockFile: path.join(testDataDir, 'partial-then-uncertain.instance.lock'),
+      preflight: async () => null,
+      platformPublisher: async (sourceFile, platform) => {
+        publisherCalls.push({ sourceFile, platform });
+        if (platform === 'zhihu') {
+          return {
+            output: 'zhihu published before later adapter failure',
+            info: {
+              status: 'success',
+              message: 'zhihu definite success',
+              url: 'https://example.invalid/zhihu/definite-success',
+            },
+          };
+        }
+        throw new Error('ambiguous external result <script>alert(1)</script>');
+      },
+    });
+    const port = await listenOnRandomPort(testServer);
+    const base = `http://127.0.0.1:${port}`;
+    const expectedUpdatedAt = currentContentUpdatedAt(fixture.id);
+    const publish = operationId => workbenchFetch(`${base}/api/publish`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contentId: fixture.id,
+        platforms: ['zhihu', 'juejin'],
+        publishMode: 'direct',
+        operationId,
+        expectedUpdatedAt,
+      }),
+    });
+
+    let response = await publish('partial-then-uncertain-operation-0001');
+    assert.equal(response.status, 500);
+    assert.match((await response.json()).error, /ambiguous external result/);
+    assert.deepEqual(publisherCalls.map(call => call.platform), ['zhihu', 'juejin']);
+
+    const historyResponse = await nativeFetch(`${base}/api/history`);
+    const history = await historyResponse.json();
+    const job = history.jobs.find(item => item.content_id === fixture.id);
+    assert.ok(job);
+    assert.equal(job.status, 'uncertain');
+    assert.notEqual(job.status, 'running');
+    assert.deepEqual(job.results.map(item => [item.platform, item.status]), [
+      ['zhihu', 'success'],
+      ['juejin', 'uncertain'],
+    ]);
+    assert.match(job.results.find(item => item.platform === 'juejin').message, /ambiguous external result/);
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS count FROM publish_jobs WHERE content_id = ? AND status = 'running'").get(fixture.id).count,
+      0
+    );
+    const dashboardAfter = getDashboardData();
+    const distribution = (dashboard, platform) => dashboard.platformDistribution.find(item => item.id === platform)
+      || { id: platform, name: '', count: 0, success: 0, failed: 0 };
+    assert.equal(dashboardAfter.stats.thisWeekPublished, dashboardBefore.stats.thisWeekPublished);
+    assert.equal(dashboardAfter.stats.monthPublished, dashboardBefore.stats.monthPublished);
+    assert.deepEqual(distribution(dashboardAfter, 'juejin'), distribution(dashboardBefore, 'juejin'));
+    assert.equal(
+      distribution(dashboardAfter, 'zhihu').success,
+      distribution(dashboardBefore, 'zhihu').success + 1
+    );
+
+    const journal = JSON.parse(fs.readFileSync(operationsFile, 'utf8'));
+    assert.equal(journal.records.length, 1);
+    assert.equal(journal.records[0].state, 'uncertain');
+    assert.equal(journal.records[0].result.jobId, job.id);
+    assert.equal(journal.records[0].result.jobStatus, 'uncertain');
+    assert.equal(journal.records[0].result.sourceUpdatedAt, expectedUpdatedAt);
+    assert.deepEqual(journal.records[0].result.platformResults, [
+      { platform: 'zhihu', status: 'success' },
+      { platform: 'juejin', status: 'uncertain' },
+    ]);
+
+    const manifestFile = path.join(DRAFTS_DIR, publishManifestName(job.id, fixture.id));
+    const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+    assert.deepEqual(manifest.sources.map(source => source.platform), ['zhihu', 'juejin']);
+    for (const source of manifest.sources) {
+      const sourceFile = path.join(DRAFTS_DIR, source.filename);
+      assert.equal(fs.existsSync(sourceFile), true);
+      assert.equal(hashFile(sourceFile), source.sourceHash);
+    }
+
+    response = await publish('partial-then-uncertain-operation-0002');
+    assert.equal(response.status, 409);
+    assert.match((await response.json()).error, /不确定|人工核对/);
+    assert.deepEqual(publisherCalls.map(call => call.platform), ['zhihu', 'juejin']);
+  } finally {
+    await closeServer(testServer);
+    cleanupPublishStateFixture(fixture);
+  }
+});
+
 test('publisher side-effect exception marks signature uncertain and blocks a new operationId', async () => {
   let fixture;
   let testServer;
   let publisherCalls = 0;
+  let dashboardBefore;
   const operationsFile = path.join(testDataDir, 'post-effect-uncertain-operations.json');
   try {
     fixture = createPublishStateFixture({
@@ -2259,6 +2370,7 @@ test('publisher side-effect exception marks signature uncertain and blocks a new
       contentStatus: '已排版',
       planStatus: '已排版',
     });
+    dashboardBefore = getDashboardData();
     testServer = createDashboardServer({
       operationsFile,
       instanceLockFile: path.join(testDataDir, 'post-effect-uncertain.instance.lock'),
@@ -2280,8 +2392,29 @@ test('publisher side-effect exception marks signature uncertain and blocks a new
     let response = await publish('post-effect-uncertain-operation-0001');
     assert.equal(response.status, 500);
     assert.equal(publisherCalls, 1);
+    const history = await (await nativeFetch(`http://127.0.0.1:${port}/api/history`)).json();
+    const job = history.jobs.find(item => item.content_id === fixture.id);
+    assert.ok(job);
+    assert.equal(job.status, 'uncertain');
+    assert.deepEqual(job.results.map(item => [item.platform, item.status]), [['zhihu', 'uncertain']]);
+    assert.match(job.results[0].message, /external side effect|人工核对/);
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS count FROM publish_jobs WHERE content_id = ? AND status = 'running'").get(fixture.id).count,
+      0
+    );
     const journalAfterFailure = JSON.parse(fs.readFileSync(operationsFile, 'utf8'));
     assert.equal(journalAfterFailure.records[0].state, 'uncertain');
+    assert.equal(journalAfterFailure.records[0].result.jobStatus, 'uncertain');
+    assert.deepEqual(journalAfterFailure.records[0].result.platformResults, [
+      { platform: 'zhihu', status: 'uncertain' },
+    ]);
+
+    const dashboardAfter = getDashboardData();
+    const distribution = dashboard => dashboard.platformDistribution.find(item => item.id === 'zhihu')
+      || { count: 0, success: 0, failed: 0 };
+    assert.equal(dashboardAfter.stats.thisWeekPublished, dashboardBefore.stats.thisWeekPublished);
+    assert.equal(dashboardAfter.stats.monthPublished, dashboardBefore.stats.monthPublished);
+    assert.deepEqual(distribution(dashboardAfter), distribution(dashboardBefore));
 
     response = await publish('post-effect-uncertain-operation-0002');
     assert.equal(response.status, 409);
@@ -2329,7 +2462,9 @@ test('all preflight failures record failed and allow a new operationId retry', a
 
     let response = await publish('preflight-failed-operation-0001');
     assert.equal(response.status, 200);
-    assert.equal((await response.json()).job.status, 'failed');
+    const firstResult = await response.json();
+    assert.equal(firstResult.job.status, 'failed');
+    assert.deepEqual(firstResult.job.results.map(item => [item.platform, item.status]), [['zhihu', 'failed']]);
     response = await publish('preflight-failed-operation-0002');
     assert.equal(response.status, 200);
     assert.equal((await response.json()).cached, false);
@@ -2337,6 +2472,13 @@ test('all preflight failures record failed and allow a new operationId retry', a
     assert.equal(publisherCalls, 0);
     const document = JSON.parse(fs.readFileSync(operationsFile, 'utf8'));
     assert.deepEqual(document.records.map(record => record.state), ['failed', 'failed']);
+    assert.equal(document.records[0].result.jobId, firstResult.job.id);
+    assert.equal(document.records[0].result.jobStatus, 'failed');
+    assert.equal(document.records[0].result.sourceUpdatedAt, expectedUpdatedAt);
+    assert.equal(document.records[0].result.contentUpdatedAt, expectedUpdatedAt);
+    assert.deepEqual(document.records[0].result.platformResults, [{ platform: 'zhihu', status: 'failed' }]);
+    assert.equal(document.records[1].result.jobStatus, 'failed');
+    assert.deepEqual(document.records[1].result.platformResults, [{ platform: 'zhihu', status: 'failed' }]);
   } finally {
     await closeServer(testServer);
     cleanupPublishStateFixture(fixture);
@@ -2361,7 +2503,7 @@ test('publisher-started all-failed result records uncertain and blocks a new ope
       preflight: async () => null,
       platformPublisher: async () => {
         publisherCalls += 1;
-        return { output: '', info: { status: 'failed', error: 'ambiguous adapter failure' } };
+        return { output: '', info: { status: 'failed', error: 'definite no-side-effect adapter failure' } };
       },
     });
     const port = await listenOnRandomPort(testServer);
@@ -2375,9 +2517,70 @@ test('publisher-started all-failed result records uncertain and blocks a new ope
 
     let response = await publish('publisher-all-failed-operation-0001');
     assert.equal(response.status, 200);
-    assert.equal((await response.json()).job.status, 'failed');
-    assert.equal(JSON.parse(fs.readFileSync(operationsFile, 'utf8')).records[0].state, 'uncertain');
+    const firstResult = await response.json();
+    assert.equal(firstResult.job.status, 'failed');
+    assert.deepEqual(firstResult.job.results.map(item => [item.platform, item.status]), [['zhihu', 'failed']]);
+    const firstJournal = JSON.parse(fs.readFileSync(operationsFile, 'utf8')).records[0];
+    assert.equal(firstJournal.state, 'uncertain');
+    assert.equal(firstJournal.result.jobStatus, 'failed');
+    assert.deepEqual(firstJournal.result.platformResults, [{ platform: 'zhihu', status: 'failed' }]);
     response = await publish('publisher-all-failed-operation-0002');
+    assert.equal(response.status, 409);
+    assert.match((await response.json()).error, /不确定|人工核对/);
+    assert.equal(publisherCalls, 1);
+  } finally {
+    await closeServer(testServer);
+    cleanupPublishStateFixture(fixture);
+  }
+});
+
+test('publisher response without a definite outcome is persisted as uncertain and cannot be retried', async () => {
+  let fixture;
+  let testServer;
+  let publisherCalls = 0;
+  const operationsFile = path.join(testDataDir, 'publisher-indeterminate-response-operations.json');
+  try {
+    fixture = createPublishStateFixture({
+      key: 'publisher-indeterminate-response',
+      planDate: '2099-07-02',
+      selectedPlatforms: ['zhihu'],
+      contentStatus: '已排版',
+      planStatus: '已排版',
+    });
+    testServer = createDashboardServer({
+      operationsFile,
+      preflight: async () => null,
+      platformPublisher: async () => {
+        publisherCalls += 1;
+        return {
+          output: 'adapter exited without a definitive status',
+          info: {
+            error: 'adapter response cannot prove whether an external write occurred',
+          },
+        };
+      },
+    });
+    const port = await listenOnRandomPort(testServer);
+    const endpoint = `http://127.0.0.1:${port}/api/content/${fixture.id}/publish-platform`;
+    const expectedUpdatedAt = currentContentUpdatedAt(fixture.id);
+    const publish = operationId => workbenchFetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId, expectedUpdatedAt }),
+    });
+
+    let response = await publish('indeterminate-response-operation-0001');
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    assert.equal(result.job.status, 'uncertain');
+    assert.deepEqual(result.job.results.map(item => [item.platform, item.status]), [['zhihu', 'uncertain']]);
+    assert.match(result.job.results[0].message, /cannot prove whether an external write occurred/);
+    const journal = JSON.parse(fs.readFileSync(operationsFile, 'utf8')).records[0];
+    assert.equal(journal.state, 'uncertain');
+    assert.equal(journal.result.jobStatus, 'uncertain');
+    assert.deepEqual(journal.result.platformResults, [{ platform: 'zhihu', status: 'uncertain' }]);
+
+    response = await publish('indeterminate-response-operation-0002');
     assert.equal(response.status, 409);
     assert.match((await response.json()).error, /不确定|人工核对/);
     assert.equal(publisherCalls, 1);
@@ -2431,7 +2634,13 @@ test('partial publisher success records completed and replays without another pu
     assert.equal(JSON.parse(fs.readFileSync(operationsFile, 'utf8')).records[0].state, 'completed');
     response = await publish('publisher-partial-operation-0002');
     assert.equal(response.status, 200);
-    assert.equal((await response.json()).cached, true);
+    const replay = await response.json();
+    assert.equal(replay.cached, true);
+    assert.equal(replay.job.status, 'partial_failed');
+    assert.deepEqual(replay.job.results.map(item => [item.platform, item.status]), [
+      ['zhihu', 'success'],
+      ['juejin', 'failed'],
+    ]);
     assert.equal(publisherCalls, 2);
   } finally {
     await closeServer(testServer);
@@ -2767,6 +2976,57 @@ test('manifest collision preserves the pre-existing file and cleans current-atte
     );
   } finally {
     if (collisionFile) fs.rmSync(collisionFile, { force: true });
+    cleanupPublishStateFixture(fixture);
+  }
+});
+
+test('preflight-only failures are persisted before the next platform and remain failed', async () => {
+  let fixture;
+  let publishResult;
+  let preflightCalls = 0;
+  let publisherCalls = 0;
+  try {
+    fixture = createPublishStateFixture({
+      key: 'incremental-preflight-failures',
+      planDate: '2099-07-03',
+      selectedPlatforms: ['zhihu', 'juejin'],
+      contentStatus: '已排版',
+      planStatus: '已排版',
+    });
+    publishResult = await publishContent(fixture.id, ['zhihu', 'juejin'], {
+      publishMode: 'direct',
+      preflight: async platform => {
+        preflightCalls += 1;
+        if (platform === 'juejin') {
+          const runningJob = db.prepare(`
+            SELECT id FROM publish_jobs
+            WHERE content_id = ? AND status = 'running'
+            ORDER BY created_at DESC LIMIT 1
+          `).get(fixture.id);
+          assert.ok(runningJob);
+          assert.deepEqual(
+            db.prepare('SELECT platform, status FROM publish_results WHERE job_id = ? ORDER BY created_at, rowid')
+              .all(runningJob.id)
+              .map(row => [row.platform, row.status]),
+            [['zhihu', 'failed']]
+          );
+        }
+        return `${platform} definite preflight failure`;
+      },
+      platformPublisher: async () => {
+        publisherCalls += 1;
+        return successfulPlatformPublisher()();
+      },
+    });
+
+    assert.equal(preflightCalls, 2);
+    assert.equal(publisherCalls, 0);
+    assert.equal(publishResult.job.status, 'failed');
+    assert.deepEqual(publishResult.job.results.map(item => [item.platform, item.status]), [
+      ['zhihu', 'failed'],
+      ['juejin', 'failed'],
+    ]);
+  } finally {
     cleanupPublishStateFixture(fixture);
   }
 });

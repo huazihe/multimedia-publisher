@@ -340,6 +340,65 @@ test('draft job and platform statuses render as saved drafts across results and 
   assert.match(historyResultChip({ platform: 'zhihu', status: 'platform_draft', message: '' }), /平台草稿已保存/);
 });
 
+test('uncertain publish results render manual verification guidance with escaped details', () => {
+  const classSource = extractFunctionSource('statusClass', 'statusLabel');
+  const labelSource = extractFunctionSource('statusLabel', 'toast');
+  const platformSource = extractFunctionSource('resultPlatformNode', 'resultDetailNode');
+  const detailSource = extractFunctionSource('resultDetailNode', 'jobResult');
+  const jobSource = extractFunctionSource('jobResult', 'historyResultChip');
+  const historySource = extractFunctionSource('historyResultChip', 'historyJobResult');
+  assert.ok(classSource && labelSource && platformSource && detailSource && jobSource && historySource);
+  const escapeHtml = value => String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+  const statusClass = vm.runInNewContext(`(${classSource})`);
+  const statusLabel = vm.runInNewContext(`(${labelSource})`);
+  const resultPlatformNode = vm.runInNewContext(`(${platformSource})`, {
+    platformName: platform => platform,
+    escapeHtml,
+  });
+  const resultDetailNode = vm.runInNewContext(`(${detailSource})`, { escapeHtml });
+  const jobResult = vm.runInNewContext(`(${jobSource})`, {
+    resultPlatformNode,
+    resultDetailNode,
+    statusLabel,
+    escapeHtml,
+  });
+  const historyResultChip = vm.runInNewContext(`(${historySource})`, {
+    platformName: platform => platform,
+    statusLabel,
+    escapeHtml,
+    resultPlatformNode,
+    resultDetailNode,
+  });
+  const maliciousMessage = 'adapter uncertain <img src=x onerror=alert(1)> & needs review';
+  const uncertain = { platform: 'juejin', status: 'uncertain', message: maliciousMessage };
+  const failed = { platform: 'zhihu', status: 'failed', message: maliciousMessage };
+
+  assert.match(appSource, /\['uncertain', '\u7ed3\u679c\u5f85\u6838\u5bf9'\]/);
+  assert.equal(statusClass('uncertain'), 'failed');
+  assert.equal(statusLabel('uncertain'), '结果待核对');
+  for (const html of [
+    resultDetailNode(uncertain),
+    jobResult({ results: [uncertain] }),
+    historyResultChip(uncertain),
+  ]) {
+    assert.match(html, /禁止自动重试，请到平台后台人工核对/);
+    assert.match(html, /adapter uncertain &lt;img src=x onerror=alert\(1\)&gt; &amp; needs review/);
+    assert.doesNotMatch(html, /<img src=x/);
+  }
+  assert.match(jobResult({ results: [uncertain] }), /failed-result/);
+  assert.match(historyResultChip(uncertain), /history-result-chip failed/);
+  assert.doesNotMatch(historyResultChip(uncertain), /history-result-chip success/);
+
+  const failedDetail = resultDetailNode(failed);
+  assert.match(failedDetail, /adapter uncertain &lt;img src=x onerror=alert\(1\)&gt; &amp; needs review/);
+  assert.doesNotMatch(failedDetail, /<img src=x/);
+});
+
 test('single draft confirmation treats platform_draft as a successful result', async () => {
   const source = extractFunctionSource('confirmSinglePlatformPublish', 'hasDirtyCanonicalContent');
   const beginSource = extractFunctionSource('beginSinglePublishOperation', 'finishSinglePublishOperation');

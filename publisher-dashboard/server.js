@@ -1096,7 +1096,7 @@ function normalizeContent(row) {
 
 function normalizeJob(row) {
   if (!row) return null;
-  const results = rows('SELECT * FROM publish_results WHERE job_id = ? ORDER BY created_at', row.id);
+  const results = rows('SELECT * FROM publish_results WHERE job_id = ? ORDER BY created_at, rowid', row.id);
   return {
     ...row,
     platforms: jsonValue(row.platforms, []),
@@ -2863,6 +2863,35 @@ function normalizeStoredPublishResult(platform, info) {
   return info;
 }
 
+function persistPublishResult(jobId, platform, status, info = {}) {
+  const fallbackMessage = {
+    success: '发布成功',
+    platform_draft: '平台草稿已保存',
+    failed: '发布失败',
+    uncertain: '发布结果不确定，请到平台后台人工核对',
+  };
+  db.prepare(`
+    INSERT INTO publish_results (id, job_id, platform, status, message, url, post_id, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    makeId('res'),
+    jobId,
+    platform,
+    status,
+    info.message || info.error || fallbackMessage[status] || '',
+    info.url || null,
+    info.postId || info.post_id || null,
+    now()
+  );
+}
+
+function storedPublisherResultStatus(publishMode, info) {
+  if (info?.status === 'platform_draft') return 'platform_draft';
+  if (info?.status === 'success') return publishMode === 'draft' ? 'platform_draft' : 'success';
+  if (info?.status === 'failed') return 'failed';
+  return 'uncertain';
+}
+
 function publishSnapshotName(jobId, contentId, platform = '', extension = 'md') {
   const safeIdPattern = /^[A-Za-z0-9_-]+$/;
   const job = String(jobId || '');
@@ -3096,6 +3125,8 @@ async function publishContent(contentId, platforms = [], options = {}) {
     if (preflightFailure) {
       finalResults[platform] = { status: 'failed', error: preflightFailure };
       rawOutputs.push(`[${platform}] ${preflightFailure}`);
+      persistPublishResult(jobId, platform, 'failed', finalResults[platform]);
+      if (isAuthFailureMessage(preflightFailure)) setPlatformAuthStatus(platform, 'logged_out');
       continue;
     }
 
@@ -3110,6 +3141,7 @@ async function publishContent(contentId, platforms = [], options = {}) {
       const integrityFailure = '发布快照完整性校验失败，检测到文件缺失或篡改；已阻止平台调用';
       finalResults[platform] = { status: 'failed', error: integrityFailure };
       rawOutputs.push(`[${platform}] ${integrityFailure}`);
+      persistPublishResult(jobId, platform, 'failed', finalResults[platform]);
       continue;
     }
 
@@ -3124,46 +3156,59 @@ async function publishContent(contentId, platforms = [], options = {}) {
         publishMode
       );
     } catch (error) {
-      Object.defineProperty(error, PUBLISH_EXECUTION_META, {
-        value: { publisherCallsStarted },
+      const publisherError = error instanceof Error ? error : new Error(String(error || '平台发布器异常'));
+      const uncertainInfo = {
+        status: 'uncertain',
+        error: `平台发布器异常：${publisherError.message}；结果可能已写入平台，请人工核对`,
+      };
+      finalResults[platform] = uncertainInfo;
+      rawOutputs.push(`[${platform}] ${uncertainInfo.error}`);
+      persistPublishResult(jobId, platform, 'uncertain', uncertainInfo);
+      db.prepare("UPDATE publish_jobs SET status = 'uncertain', updated_at = ? WHERE id = ?").run(now(), jobId);
+      const current = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
+      const canonicalConflict = !current || current.updated_at !== expectedUpdatedAt;
+      const result = {
+        job: normalizeJob(one('SELECT * FROM publish_jobs WHERE id = ?', jobId)),
+        rawOutput: rawOutputs.join('\n\n'),
+        content: canonicalConflict ? null : current,
+        sourceUpdatedAt: expectedUpdatedAt,
+        canonicalConflict,
+        needsReload: canonicalConflict,
+      };
+      Object.defineProperty(publisherError, PUBLISH_EXECUTION_META, {
+        value: {
+          publisherCallsStarted,
+          successCount: Object.values(finalResults)
+            .filter(item => item.status === 'success' || item.status === 'platform_draft').length,
+          jobStatus: 'uncertain',
+          result,
+        },
         enumerable: false,
       });
-      throw error;
+      throw publisherError;
     }
-    finalResults[platform] = single.info;
-    rawOutputs.push(single.output);
-  }
-
-  let successCount = 0;
-  for (const platform of selected) {
-    const info = normalizeStoredPublishResult(platform, finalResults[platform] || { status: 'failed', error: '没有返回该平台结果' });
-    const succeeded = info.status === 'success' || info.status === 'platform_draft';
-    const status = succeeded ? (publishMode === 'draft' ? 'platform_draft' : 'success') : 'failed';
-    if (succeeded) successCount++;
-    if (status === 'failed' && isAuthFailureMessage(info.error || info.message)) {
+    const info = normalizeStoredPublishResult(platform, single?.info || {});
+    const status = storedPublisherResultStatus(publishMode, info);
+    finalResults[platform] = { ...info, status };
+    rawOutputs.push(single?.output || '');
+    persistPublishResult(jobId, platform, status, info);
+    if ((status === 'failed' || status === 'uncertain') && isAuthFailureMessage(info.error || info.message)) {
       setPlatformAuthStatus(platform, 'logged_out');
-    } else if (succeeded) {
+    } else if (status === 'success' || status === 'platform_draft') {
       const existing = db.prepare('SELECT account FROM platforms WHERE id = ?').get(platform);
       setPlatformAuthStatus(platform, 'logged_in', existing?.account || null);
     }
-    db.prepare(`
-      INSERT INTO publish_results (id, job_id, platform, status, message, url, post_id, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      makeId('res'),
-      jobId,
-      platform,
-      status,
-      info.message || info.error || (status === 'platform_draft' ? '平台草稿已保存' : status === 'success' ? '发布成功' : ''),
-      info.url || null,
-      info.postId || null,
-      now()
-    );
   }
 
-  const jobStatus = successCount === selected.length
-    ? (publishMode === 'draft' ? 'draft_saved' : 'published')
-    : (successCount > 0 ? 'partial_failed' : 'failed');
+  const storedResults = rows('SELECT status FROM publish_results WHERE job_id = ?', jobId);
+  const successCount = storedResults.filter(result => result.status === 'success' || result.status === 'platform_draft').length;
+  const uncertainCount = storedResults.filter(result => result.status === 'uncertain').length;
+
+  const jobStatus = uncertainCount > 0
+    ? 'uncertain'
+    : successCount === selected.length
+      ? (publishMode === 'draft' ? 'draft_saved' : 'published')
+      : (successCount > 0 ? 'partial_failed' : 'failed');
   db.prepare('UPDATE publish_jobs SET status = ?, updated_at = ? WHERE id = ?').run(jobStatus, now(), jobId);
   const contentAssignments = [];
   const contentValues = [];
@@ -3584,7 +3629,9 @@ function createDashboardServer(options = {}) {
       });
       const execution = result[PUBLISH_EXECUTION_META] || {};
       const journalResult = journalResultForPublish(result);
-      if (result.job?.status === 'failed') {
+      if (result.job?.status === 'uncertain') {
+        operationJournal.markUncertain(operationId, journalResult);
+      } else if (result.job?.status === 'failed') {
         if (execution.publisherCallsStarted > 0) operationJournal.markUncertain(operationId, journalResult);
         else operationJournal.fail(operationId, journalResult);
       } else {
@@ -3593,7 +3640,8 @@ function createDashboardServer(options = {}) {
       return { ...result, cached: false };
     } catch (error) {
       const execution = error?.[PUBLISH_EXECUTION_META] || {};
-      if (publisherStarted || execution.publisherCallsStarted > 0) operationJournal.markUncertain(operationId);
+      const journalResult = execution.result ? journalResultForPublish(execution.result) : null;
+      if (publisherStarted || execution.publisherCallsStarted > 0) operationJournal.markUncertain(operationId, journalResult);
       else operationJournal.fail(operationId);
       throw error;
     }

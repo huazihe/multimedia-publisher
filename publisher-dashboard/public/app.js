@@ -115,6 +115,7 @@ const HISTORY_STATUSES = [
   ['published', '发布成功'],
   ['draft_saved', '草稿已保存'],
   ['partial_failed', '部分失败'],
+  ['uncertain', '结果待核对'],
   ['failed', '发布失败'],
   ['local_draft', '本地草稿'],
   ['running', '发布中'],
@@ -371,7 +372,7 @@ function statusClass(status) {
   if (status === '正文已生成' || status === '选题已确认') return 'generated';
   if (status === '已排版') return 'layout';
   if (status === '部分失败' || status === 'partial_failed') return 'partial';
-  if (status === '发布失败' || status === 'failed' || status === 'partial_failed') return 'failed';
+  if (status === '发布失败' || status === 'failed' || status === 'partial_failed' || status === 'uncertain') return 'failed';
   if (status === '待选题' || status === '待处理' || status === '待检查') return 'pending';
   return '';
 }
@@ -383,6 +384,7 @@ function statusLabel(status) {
     draft_saved: '草稿已保存',
     platform_draft: '平台草稿已保存',
     partial_failed: '部分失败',
+    uncertain: '结果待核对',
     failed: '发布失败',
     local_draft: '本地草稿',
     running: '发布中',
@@ -1359,6 +1361,11 @@ function resultPlatformNode(result) {
 
 function resultDetailNode(result) {
   const message = result.message || result.error || '未知原因';
+  if (result.status === 'uncertain') {
+    const guidance = '禁止自动重试，请到平台后台人工核对';
+    const detail = `${guidance}。平台返回：${message}`;
+    return `<span class="failure-help" data-tooltip="${escapeHtml(detail)}" aria-label="${escapeHtml(detail)}">!</span>`;
+  }
   if (result.status === 'failed') {
     return `<span class="failure-help" data-tooltip="${escapeHtml(message)}" aria-label="${escapeHtml(message)}">!</span>`;
   }
@@ -1368,7 +1375,7 @@ function resultDetailNode(result) {
 function jobResult(job) {
   if (!job?.results?.length) return '<span class="tag">无平台结果</span>';
   return job.results.map(result => `
-    <div class="result-line compact-result ${result.status === 'failed' ? 'failed-result' : ''}">
+    <div class="result-line compact-result ${result.status === 'failed' || result.status === 'uncertain' ? 'failed-result' : ''}">
       ${resultPlatformNode(result)}
       <span class="result-status-label">${escapeHtml(statusLabel(result.status))}</span>
       ${resultDetailNode(result)}
@@ -1377,7 +1384,7 @@ function jobResult(job) {
 }
 
 function historyResultChip(result) {
-  const failed = result.status === 'failed';
+  const failed = result.status === 'failed' || result.status === 'uncertain';
   const message = result.message || result.error || '';
   const label = `${platformName(result.platform)} · ${statusLabel(result.status)}`;
   return `
