@@ -2,7 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { createHash } = require('node:crypto');
+const { createHash, randomBytes } = require('node:crypto');
 const { createRequire } = require('node:module');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -155,10 +155,22 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
+function escapeRcdata(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;');
+}
+
+function normalizeCanonicalContent(content) {
+  return {
+    title: String(content?.title ?? '').trim(),
+    summary: String(content?.summary ?? '').trim(),
+    body: String(content?.body ?? '').trim(),
+  };
+}
+
 function canonicalContentHash(content) {
-  const title = String(content?.title ?? '');
-  const summary = String(content?.summary ?? '');
-  const body = String(content?.body ?? '');
+  const { title, summary, body } = normalizeCanonicalContent(content);
   return createHash('sha256')
     .update(JSON.stringify([title, summary || '', body]), 'utf8')
     .digest('hex');
@@ -871,13 +883,67 @@ function normalizeTemplateDocument(document, values) {
     documentTitle = document.createElement('title');
     document.head.append(documentTitle);
   }
-  documentTitle.textContent = values.title;
+  documentTitle.textContent = '';
   sanitizeTree(document);
+}
+
+function serializeTemplateDocument(document, title) {
+  const documentTitle = document.head.querySelector('title');
+  if (!documentTitle) throw new Error('模板结构无法识别：缺少文档标题节点');
+  const placeholder = `__PUBLISHER_SAFE_TITLE_${randomBytes(16).toString('hex')}__`;
+  documentTitle.textContent = placeholder;
+  const serialized = document.toString();
+  const first = serialized.indexOf(placeholder);
+  if (first < 0 || serialized.indexOf(placeholder, first + placeholder.length) >= 0) {
+    throw new Error('模板文档标题序列化失败');
+  }
+  return `${serialized.slice(0, first)}${escapeRcdata(title)}${serialized.slice(first + placeholder.length)}`;
 }
 
 function parseTemplateDocument(source) {
   if (/<(?:!doctype|html)\b/i.test(source)) return parseHTML(source).document;
   return parseHTML(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"></head><body>${source}</body></html>`).document;
+}
+
+function inspectLayoutMetadata(html) {
+  const source = String(html || '');
+  if (!source.trim()) return null;
+  let document;
+  try {
+    document = parseHTML(source).document;
+  } catch {
+    return null;
+  }
+  const body = document.body;
+  const roots = [...document.querySelectorAll('[data-wechat-template-root]')];
+  if (!body || roots.length !== 1 || roots[0].getAttribute('data-wechat-template-root') !== 'true') {
+    return null;
+  }
+  const root = roots[0];
+  if (root === body || !body.contains(root)) return null;
+
+  const metadataSelector = [
+    '[data-wechat-template]',
+    '[data-canonical-sha256]',
+    '[data-layout-generated-at]',
+  ].join(',');
+  const carriers = [...document.querySelectorAll(metadataSelector)];
+  if (carriers.length !== 2 || !carriers.includes(body) || !carriers.includes(root)) return null;
+
+  const readMetadata = element => ({
+    template: element.getAttribute('data-wechat-template') || '',
+    canonicalHash: element.getAttribute('data-canonical-sha256') || '',
+    generatedAt: element.getAttribute('data-layout-generated-at') || '',
+  });
+  const bodyMetadata = readMetadata(body);
+  const rootMetadata = readMetadata(root);
+  if (JSON.stringify(bodyMetadata) !== JSON.stringify(rootMetadata)) return null;
+  if (!listLayoutTemplates().some(template => template.filename === bodyMetadata.template)) return null;
+  if (!/^[a-f0-9]{64}$/.test(bodyMetadata.canonicalHash)) return null;
+  const generatedTime = Date.parse(bodyMetadata.generatedAt);
+  if (!Number.isFinite(generatedTime)
+    || new Date(generatedTime).toISOString() !== bodyMetadata.generatedAt) return null;
+  return bodyMetadata;
 }
 
 function renderLayoutTemplate(filename, input = {}) {
@@ -886,9 +952,7 @@ function renderLayoutTemplate(filename, input = {}) {
   for (const field of ['title', 'summary', 'body']) {
     if (typeof input[field] !== 'string') throw new Error(`${field} 必须是字符串`);
   }
-  const title = input.title.trim();
-  const summary = input.summary.trim();
-  const body = input.body.trim();
+  const { title, summary, body } = normalizeCanonicalContent(input);
   if (!title) throw new Error('title 不能为空');
   if (!body) throw new Error('body 不能为空');
 
@@ -914,12 +978,14 @@ function renderLayoutTemplate(filename, input = {}) {
     canonicalHash: canonicalContentHash({ title, summary, body }),
     generatedAt,
   });
-  return document.toString();
+  return serializeTemplateDocument(document, title);
 }
 
 module.exports = {
   TEMPLATE_DIR,
   canonicalContentHash,
+  inspectLayoutMetadata,
   listLayoutTemplates,
+  normalizeCanonicalContent,
   renderLayoutTemplate,
 };

@@ -25,7 +25,10 @@ async function workbenchFetch(input, options = {}) {
 }
 
 const {
+  canonicalContentHash,
+  inspectLayoutMetadata,
   listLayoutTemplates,
+  normalizeCanonicalContent,
   renderLayoutTemplate,
 } = require('../layout-templates');
 
@@ -193,6 +196,33 @@ test('empty account configuration removes the account branch and records canonic
   assert.doesNotMatch(html, /维视智造|机器视觉/);
 });
 
+test('canonical normalization and metadata inspection use the rendered title summary and body bytes', () => {
+  const input = {
+    title: '  规范标题  ',
+    summary: '\n 规范摘要 \t',
+    body: '\n<p>规范正文</p>\n',
+  };
+  const normalized = {
+    title: '规范标题',
+    summary: '规范摘要',
+    body: '<p>规范正文</p>',
+  };
+  const generatedAt = '2026-09-02T04:05:06.000Z';
+  const html = renderLayoutTemplate('style_10.html', {
+    ...input,
+    generatedAt,
+  });
+  const metadata = inspectLayoutMetadata(html);
+
+  assert.deepEqual(normalizeCanonicalContent(input), normalized);
+  assert.equal(canonicalContentHash(input), canonicalContentHash(normalized));
+  assert.deepEqual(metadata, {
+    template: 'style_10.html',
+    canonicalHash: canonicalContentHash(normalized),
+    generatedAt,
+  });
+});
+
 test('explicit account configuration overrides environment values while both sources render escaped text', () => {
   const previousName = process.env.PUBLISHER_ACCOUNT_NAME;
   const previousDescription = process.env.PUBLISHER_ACCOUNT_DESCRIPTION;
@@ -254,6 +284,45 @@ test('explicit account configuration overrides environment values while both sou
     if (previousDescription === undefined) delete process.env.PUBLISHER_ACCOUNT_DESCRIPTION;
     else process.env.PUBLISHER_ACCOUNT_DESCRIPTION = previousDescription;
   }
+});
+
+test('serializes hostile and special document titles as inert RCDATA', () => {
+  const titles = [
+    '</title><script data-layout-xss="true">globalThis.layoutPwned = true</script><title>',
+    'A < B & C > D "double quoted" \'single quoted\'',
+  ];
+
+  for (const title of titles) {
+    const html = renderLayoutTemplate('style_10.html', {
+      title,
+      summary: '安全标题摘要',
+      body: '<p>安全标题正文</p>',
+      accountName: '',
+      accountDescription: '',
+      generatedAt: '2026-09-02T03:04:05.000Z',
+    });
+    const { document } = parseHTML(html);
+    const documentTitle = document.head.querySelector('title');
+
+    assert.ok(documentTitle);
+    assert.equal(documentTitle.textContent, title);
+    assert.equal(
+      document.querySelector('script,iframe,object,embed,link,meta[http-equiv="refresh"]'),
+      null
+    );
+    assert.doesNotMatch(html, /<script\b[^>]*data-layout-xss/i);
+  }
+
+  const special = renderLayoutTemplate('style_10.html', {
+    title: 'A < B & C > D "double quoted" \'single quoted\'',
+    summary: '',
+    body: '<p>正文</p>',
+    generatedAt: '2026-09-02T03:04:05.000Z',
+  });
+  assert.match(
+    special,
+    /<title>A &lt; B &amp; C > D "double quoted" 'single quoted'<\/title>/
+  );
 });
 
 test('renders all 40 templates with only the requested article and account copy', () => {
@@ -713,6 +782,39 @@ test('GET template list and POST selected layout return preview-compatible full 
     assert.match(previewHtml, /^<!doctype html>/i);
     assert.match(previewHtml, /data-wechat-template="style_11\.html"/);
     assert.match(previewHtml, /路由排版正文/);
+  } finally {
+    cleanupContent(content);
+  }
+});
+
+test('layout preview endpoint reparses hostile titles without executable nodes and sends restrictive CSP', async () => {
+  const { importContent, layoutContent } = dashboard();
+  let content;
+  const port = await listenOnRandomPort();
+  const hostileTitle = '</title><script data-preview-xss="true">globalThis.previewPwned = true</script><title>';
+  try {
+    content = importContent({
+      title: hostileTitle,
+      filename: 'hostile-preview-title.md',
+      body: '# 正文标题\n\n预览端点安全正文',
+    });
+    content = layoutContent(content.id, 'style_10.html', content.updated_at);
+
+    const response = await workbenchFetch(`http://127.0.0.1:${port}/content/${content.id}/preview.html`);
+    const html = await response.text();
+    const { document } = parseHTML(html);
+    const csp = response.headers.get('content-security-policy') || '';
+
+    assert.equal(response.status, 200);
+    assert.equal(document.head.querySelector('title')?.textContent, hostileTitle);
+    assert.equal(document.querySelector('script,iframe,object,embed'), null);
+    assert.doesNotMatch(html, /<script\b[^>]*data-preview-xss/i);
+    assert.match(csp, /default-src 'none'/);
+    assert.match(csp, /script-src 'none'/);
+    assert.match(csp, /object-src 'none'/);
+    assert.match(csp, /base-uri 'none'/);
+    assert.match(csp, /style-src 'unsafe-inline'/);
+    assert.match(csp, /img-src http: https: data:/);
   } finally {
     cleanupContent(content);
   }

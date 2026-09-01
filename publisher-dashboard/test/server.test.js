@@ -18,6 +18,7 @@ const { parseHTML } = (() => {
     return requireFromCore('linkedom');
   }
 })();
+const { renderLayoutTemplate } = require('../layout-templates');
 
 async function workbenchFetch(input, options = {}) {
   const target = new URL(input);
@@ -71,7 +72,9 @@ const {
   layoutContent,
   saveLocalDraft,
   previewContentForPlatform,
+  normalizeCanonicalContent,
   canonicalContentHash,
+  inspectLayoutMetadata,
   layoutHash,
   selectPlatformSourcePayload,
   writePlatformSourceFile,
@@ -79,6 +82,7 @@ const {
   hashSource,
   hashFile,
   publishSnapshotName,
+  publishManifestName,
   publishContent,
   buildPublishOperationSignature,
   createOperationJournal,
@@ -289,6 +293,7 @@ function cleanupPublishStateFixture(fixture) {
     db.prepare("DELETE FROM activity WHERE target_type = 'publish_job' AND target_id = ?").run(job.id);
     db.prepare('DELETE FROM publish_results WHERE job_id = ?').run(job.id);
     db.prepare('DELETE FROM publish_jobs WHERE id = ?').run(job.id);
+    fs.rmSync(path.join(DRAFTS_DIR, publishManifestName(job.id, fixture.id)), { force: true });
     const snapshotPlatforms = JSON.parse(job.platforms || '[]');
     for (const extension of ['md', 'html', 'txt']) {
       fs.rmSync(
@@ -841,12 +846,10 @@ test('platform source helpers select current WeChat HTML and reject stale layout
   const expectedCanonicalHash = createHash('sha256')
     .update(JSON.stringify([content.title, content.summary, content.body]), 'utf8')
     .digest('hex');
-  const currentLayout = [
-    '<!doctype html>',
-    `<html><body><article data-wechat-template="style_10.html" data-canonical-sha256="${expectedCanonicalHash}">`,
-    '已排版正文',
-    '</article></body></html>',
-  ].join('');
+  const currentLayout = renderLayoutTemplate('style_10.html', {
+    ...content,
+    generatedAt: '2026-09-02T05:06:07.000Z',
+  });
   const current = { ...content, layout_html: currentLayout };
 
   assert.equal(canonicalContentHash(current), expectedCanonicalHash);
@@ -867,6 +870,16 @@ test('platform source helpers select current WeChat HTML and reject stale layout
     assert.equal(path.basename(written.filePath), 'wechat-source.html');
     assert.equal(fs.readFileSync(written.filePath, 'utf8'), currentLayout);
     assert.equal(written.contentHash, hashFile(written.filePath));
+    assert.equal(fs.statSync(written.filePath).mode & 0o777, 0o600);
+    assert.throws(
+      () => writePlatformSourceFile(tempRoot, 'wechat-source', selected),
+      error => error?.code === 'EEXIST'
+    );
+    assert.equal(fs.readFileSync(written.filePath, 'utf8'), currentLayout);
+    assert.equal(
+      fs.readdirSync(tempRoot).some(name => name.startsWith('wechat-source.html.') && name.endsWith('.tmp')),
+      false
+    );
 
     const created = createPlatformSource(current, 'weixin', tempRoot);
     assert.equal(path.basename(created.filePath), 'weixin.html');
@@ -891,6 +904,78 @@ test('platform source helpers select current WeChat HTML and reject stale layout
     assert.equal(otherPlatform.content, contentToMarkdown(current));
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('canonical whitespace normalization keeps a freshly rendered public layout selectable', () => {
+  const content = {
+    id: 'content-public-canonical-whitespace',
+    title: '  公共标题  ',
+    summary: '\n 公共摘要 \t',
+    body: '\n<p>公共正文</p>\n',
+  };
+  const generatedAt = '2026-09-02T05:10:11.000Z';
+  const layoutHtml = renderLayoutTemplate('style_10.html', {
+    ...content,
+    generatedAt,
+  });
+  const selected = selectPlatformSourcePayload({ ...content, layout_html: layoutHtml }, 'weixin');
+
+  assert.deepEqual(normalizeCanonicalContent(content), {
+    title: '公共标题',
+    summary: '公共摘要',
+    body: '<p>公共正文</p>',
+  });
+  assert.equal(selected.format, 'html');
+  assert.equal(selected.templated, true);
+  assert.equal(selected.content, layoutHtml);
+  assert.deepEqual(selected.warnings, []);
+});
+
+test('WeChat source rejects forged, conflicting, unknown, tampered, or invalid layout metadata', () => {
+  const content = {
+    id: 'content-layout-metadata-integrity',
+    title: '元数据完整性标题',
+    summary: '元数据完整性摘要',
+    body: '<p>元数据完整性正文</p>',
+  };
+  const generatedAt = '2026-09-02T05:20:21.000Z';
+  const canonicalHash = canonicalContentHash(content);
+  const validLayout = renderLayoutTemplate('style_10.html', {
+    ...content,
+    generatedAt,
+  });
+  const metadataAttributes = [
+    'data-wechat-template="style_10.html"',
+    `data-canonical-sha256="${canonicalHash}"`,
+    `data-layout-generated-at="${generatedAt}"`,
+  ].join(' ');
+  const invalidLayouts = {
+    'forged metadata': `<!doctype html><html><body ${metadataAttributes}><article data-wechat-template-root="true" ${metadataAttributes}>伪造正文</article></body></html>`,
+    'duplicate conflicting metadata': validLayout.replace(
+      '</body>',
+      `<section data-wechat-template="style_11.html" data-canonical-sha256="${'b'.repeat(64)}" data-layout-generated-at="${generatedAt}">冲突元数据</section></body>`
+    ),
+    'unknown template': validLayout.replaceAll('style_10.html', 'missing-template.html'),
+    'tampered body': validLayout.replace('元数据完整性正文', '已篡改正文'),
+    'mismatched body and root metadata': validLayout.replace(
+      'data-wechat-template="style_10.html"',
+      'data-wechat-template="style_11.html"'
+    ),
+    'invalid generated timestamp': validLayout.replaceAll(generatedAt, 'not-an-iso-timestamp'),
+  };
+
+  assert.deepEqual(inspectLayoutMetadata(validLayout), {
+    template: 'style_10.html',
+    canonicalHash,
+    generatedAt,
+  });
+  for (const [label, layoutHtml] of Object.entries(invalidLayouts)) {
+    const selected = selectPlatformSourcePayload({ ...content, layout_html: layoutHtml }, 'weixin');
+    assert.equal(selected.format, 'markdown', label);
+    assert.equal(selected.templated, false, label);
+    assert.deepEqual(selected.warnings, ['尚未使用公众号模板'], label);
+    assert.equal(selected.content, contentToMarkdown(content), label);
   }
 });
 
@@ -928,6 +1013,7 @@ test('publish snapshot preserves an explicit-title article leading body H1', asy
         db.prepare('DELETE FROM publish_results WHERE job_id = ?').run(job.id);
         db.prepare('DELETE FROM publish_jobs WHERE id = ?').run(job.id);
         fs.rmSync(path.join(DRAFTS_DIR, publishSnapshotName(job.id, content.id)), { force: true });
+        fs.rmSync(path.join(DRAFTS_DIR, publishManifestName(job.id, content.id)), { force: true });
       }
     }
     cleanupImportedContent(content);
@@ -970,7 +1056,7 @@ test('platform preview serializes canonical content and runs only the injected C
     assert.deepEqual(preview, expected);
     assert.equal(calls.length, 1);
     assert.deepEqual(calls[0].args.slice(0, 1), ['preview']);
-    assert.deepEqual(calls[0].args.slice(2), ['-p', 'xiaohongshu']);
+    assert.deepEqual(calls[0].args.slice(2), ['-p', 'xiaohongshu', '-t', '平台预览母稿']);
     assert.equal(path.extname(calls[0].args[1]), '.md');
     assert.equal(path.dirname(path.dirname(calls[0].args[1])), tempRoot);
     assert.deepEqual(databaseSnapshot(), before);
@@ -1061,6 +1147,7 @@ test('WeChat preview falls back to canonical Markdown with a visible template wa
 test('preview and actual batch publish share templated WeChat HTML while other platforms keep Markdown', async () => {
   let content;
   let publishResult;
+  let manifestFile;
   const publishedSources = new Map();
   const tempRoot = createPreviewTempRoot('preview-publish-source-parity');
   try {
@@ -1123,13 +1210,131 @@ test('preview and actual batch publish share templated WeChat HTML while other p
       path.basename(zhihuSource.filePath),
       `${publishResult.job.id}-${content.id}-zhihu.md`
     );
+    manifestFile = path.join(
+      DRAFTS_DIR,
+      `${publishResult.job.id}-${content.id}-manifest.json`
+    );
+    const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+    assert.equal(fs.statSync(manifestFile).mode & 0o777, 0o600);
+    assert.deepEqual(manifest, {
+      version: 1,
+      jobId: publishResult.job.id,
+      contentId: content.id,
+      sources: [
+        {
+          platform: 'weixin',
+          filename: path.basename(weixinSource.filePath),
+          format: 'html',
+          sourceHash: weixinSource.contentHash,
+        },
+        {
+          platform: 'zhihu',
+          filename: path.basename(zhihuSource.filePath),
+          format: 'markdown',
+          sourceHash: zhihuSource.contentHash,
+        },
+      ],
+    });
+    assert.doesNotMatch(JSON.stringify(manifest), new RegExp(DRAFTS_DIR.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.equal(manifest.sources.every(source => !path.isAbsolute(source.filename)), true);
   } finally {
     for (const source of publishedSources.values()) fs.rmSync(source.filePath, { force: true });
+    if (manifestFile) fs.rmSync(manifestFile, { force: true });
+    if (publishResult?.job?.id) {
+      fs.rmSync(
+        path.join(DRAFTS_DIR, publishManifestName(publishResult.job.id, content.id)),
+        { force: true }
+      );
+      db.prepare("DELETE FROM activity WHERE target_type = 'publish_job' AND target_id = ?").run(publishResult.job.id);
+      db.prepare('DELETE FROM publish_results WHERE job_id = ?').run(publishResult.job.id);
+      db.prepare('DELETE FROM publish_jobs WHERE id = ?').run(publishResult.job.id);
+    }
+    cleanupImportedContent(content);
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('preview and publish receive the same canonical special title', async () => {
+  let content;
+  let publishResult;
+  let snapshotFile;
+  let publishedTitle = '';
+  const canonicalTitle = 'A & B <C> "quoted" — 👩‍💻';
+  const tempRoot = createPreviewTempRoot('preview-publish-title-parity');
+  try {
+    content = importContent({
+      title: `  ${canonicalTitle}  `,
+      filename: 'preview-publish-title-parity.md',
+      body: '# 正文章节\n\n特殊标题正文',
+    });
+    const cliPreview = validPlatformPreview({
+      platform: 'zhihu',
+      title: canonicalTitle,
+      format: 'markdown',
+      article: {
+        title: canonicalTitle,
+        markdown: '特殊标题正文',
+        html: '<p>特殊标题正文</p>',
+      },
+    });
+    const preview = await previewContentForPlatform(content.id, 'zhihu', {
+      tempRoot,
+      runner: async args => {
+        const titleIndex = args.indexOf('-t');
+        assert.notEqual(titleIndex, -1);
+        assert.equal(args[titleIndex + 1], canonicalTitle);
+        return { code: 0, stdout: `${JSON.stringify(cliPreview)}\n` };
+      },
+    });
+
+    publishResult = await publishContent(content.id, ['zhihu'], {
+      preflight: async () => null,
+      platformPublisher: async (sourceFile, platform, title) => {
+        snapshotFile = sourceFile;
+        publishedTitle = title;
+        return {
+          output: `stub output ${platform}`,
+          info: { status: 'success', message: 'stubbed title parity publish' },
+        };
+      },
+    });
+
+    assert.equal(preview.title, canonicalTitle);
+    assert.equal(preview.article.title, canonicalTitle);
+    assert.equal(publishedTitle, canonicalTitle);
+  } finally {
+    if (snapshotFile) fs.rmSync(snapshotFile, { force: true });
     if (publishResult?.job?.id) {
       db.prepare("DELETE FROM activity WHERE target_type = 'publish_job' AND target_id = ?").run(publishResult.job.id);
       db.prepare('DELETE FROM publish_results WHERE job_id = ?').run(publishResult.job.id);
       db.prepare('DELETE FROM publish_jobs WHERE id = ?').run(publishResult.job.id);
     }
+    cleanupImportedContent(content);
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('built CLI preview honors canonical title override with HTML and Unicode specials', {
+  skip: !fs.existsSync(CLI_PATH) ? 'built CLI unavailable; npm run dashboard:test builds it first' : false,
+}, async () => {
+  let content;
+  const tempRoot = createPreviewTempRoot('preview-built-cli-title-specials');
+  const title = 'A & B <C> "quoted" — 👩‍💻';
+  try {
+    content = importContent({
+      title,
+      filename: 'preview-built-cli-title-specials.md',
+      body: '# 独立正文标题\n\n特殊字符标题预览正文',
+    });
+    const preview = await previewContentForPlatform(content.id, 'xiaohongshu', {
+      tempRoot,
+      timeout: 30000,
+    });
+
+    assert.equal(preview.title, title);
+    assert.equal(preview.article.title, title);
+    assert.deepEqual(fs.readdirSync(tempRoot), []);
+  } finally {
     cleanupImportedContent(content);
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
@@ -1536,7 +1741,10 @@ test('GET platform-preview returns the injected CLI preview result', async () =>
     assert.deepEqual(await response.json(), { ok: true, preview: expected });
     assert.equal(calls.length, 1);
     assert.deepEqual(calls[0].slice(0, 1), ['preview']);
-    assert.deepEqual(calls[0].slice(2), ['-p', 'xiaohongshu']);
+    assert.deepEqual(
+      calls[0].slice(2),
+      ['-p', 'xiaohongshu', '-t', '预览端点母稿']
+    );
     assert.equal(path.dirname(path.dirname(calls[0][1])), tempRoot);
     assert.deepEqual(fs.readdirSync(tempRoot), []);
   } finally {
@@ -1747,11 +1955,17 @@ test('source-aware signatures change with the selected WeChat layout but not unu
   const canonicalHash = canonicalContentHash(baseContent);
   const firstContent = {
     ...baseContent,
-    layout_html: `<article data-wechat-template="style_10.html" data-canonical-sha256="${canonicalHash}">模板甲</article>`,
+    layout_html: renderLayoutTemplate('style_10.html', {
+      ...baseContent,
+      generatedAt: '2026-09-02T06:00:00.000Z',
+    }),
   };
   const secondContent = {
     ...baseContent,
-    layout_html: `<article data-wechat-template="style_11.html" data-canonical-sha256="${canonicalHash}">模板乙</article>`,
+    layout_html: renderLayoutTemplate('style_11.html', {
+      ...baseContent,
+      generatedAt: '2026-09-02T06:00:00.000Z',
+    }),
   };
   const expectedUpdatedAt = '2026-09-02T06:00:00.000Z';
 
@@ -1781,6 +1995,8 @@ test('source-aware signatures change with the selected WeChat layout but not unu
   );
 
   assert.equal(firstWeChat.contentHash, secondWeChat.contentHash);
+  assert.equal(inspectLayoutMetadata(firstContent.layout_html)?.canonicalHash, canonicalHash);
+  assert.equal(inspectLayoutMetadata(secondContent.layout_html)?.canonicalHash, canonicalHash);
   assert.notEqual(firstWeChat.sourceHash, secondWeChat.sourceHash);
   assert.equal(firstMarkdown.sourceHash, secondMarkdown.sourceHash);
 });
@@ -2325,6 +2541,7 @@ test('repeated publish jobs keep different job-specific snapshots', async () => 
     ]);
   } finally {
     for (const jobId of jobIds) {
+      fs.rmSync(path.join(DRAFTS_DIR, publishManifestName(jobId, content.id)), { force: true });
       db.prepare("DELETE FROM activity WHERE target_type = 'publish_job' AND target_id = ?").run(jobId);
       db.prepare('DELETE FROM publish_results WHERE job_id = ?').run(jobId);
       db.prepare('DELETE FROM publish_jobs WHERE id = ?').run(jobId);
@@ -2333,6 +2550,124 @@ test('repeated publish jobs keep different job-specific snapshots', async () => 
     for (const snapshotFile of snapshotFiles) {
       fs.rmSync(snapshotFile, { force: true });
     }
+  }
+});
+
+test('publish blocks a tampered later snapshot without calling its platform publisher', async () => {
+  let fixture;
+  let publishResult;
+  let publisherCalls = 0;
+  let tamperedFile = '';
+  try {
+    fixture = createPublishStateFixture({
+      key: 'tampered-later-snapshot',
+      planDate: '2099-08-01',
+      selectedPlatforms: ['zhihu', 'juejin'],
+      contentStatus: '已排版',
+      planStatus: '已排版',
+    });
+    publishResult = await publishContent(fixture.id, ['zhihu', 'juejin'], {
+      publishMode: 'direct',
+      preflight: async () => null,
+      platformPublisher: async (sourceFile, platform) => {
+        publisherCalls += 1;
+        assert.equal(platform, 'zhihu');
+        tamperedFile = sourceFile.replace(/-zhihu\.md$/, '-juejin.md');
+        fs.writeFileSync(tamperedFile, 'tampered after first platform call', 'utf8');
+        return {
+          output: 'stub output zhihu',
+          info: { status: 'success', message: 'first platform published' },
+        };
+      },
+    });
+
+    assert.equal(publisherCalls, 1);
+    assert.equal(publishResult.job.status, 'partial_failed');
+    assert.deepEqual(
+      publishResult.job.results.map(item => [item.platform, item.status]),
+      [['zhihu', 'success'], ['juejin', 'failed']]
+    );
+    assert.match(
+      publishResult.job.results.find(item => item.platform === 'juejin').message,
+      /完整性|篡改|哈希/
+    );
+  } finally {
+    if (publishResult?.job?.id) {
+      fs.rmSync(
+        path.join(DRAFTS_DIR, `${publishResult.job.id}-${fixture.id}-manifest.json`),
+        { force: true }
+      );
+    }
+    cleanupPublishStateFixture(fixture);
+  }
+});
+
+test('second snapshot staging failure leaves no running job or orphan and fails the journal safely', async () => {
+  let fixture;
+  let testServer;
+  let publisherCalls = 0;
+  let snapshotWrites = 0;
+  let firstSnapshot = '';
+  const operationsFile = path.join(testDataDir, 'snapshot-staging-failure-operations.json');
+  try {
+    fixture = createPublishStateFixture({
+      key: 'snapshot-staging-failure',
+      planDate: '2099-08-02',
+      selectedPlatforms: ['zhihu', 'juejin'],
+      contentStatus: '已排版',
+      planStatus: '已排版',
+    });
+    testServer = createDashboardServer({
+      operationsFile,
+      preflight: async () => null,
+      snapshotWriter: (rootDir, basename, payload) => {
+        snapshotWrites += 1;
+        assert.equal(
+          db.prepare("SELECT COUNT(*) AS count FROM publish_jobs WHERE content_id = ? AND status = 'running'").get(fixture.id).count,
+          0
+        );
+        if (snapshotWrites === 2) throw new Error('injected second snapshot write failure');
+        const written = writePlatformSourceFile(rootDir, basename, payload);
+        firstSnapshot = written.filePath;
+        return written;
+      },
+      platformPublisher: async () => {
+        publisherCalls += 1;
+        return { output: 'must not publish', info: { status: 'success' } };
+      },
+    });
+    const port = await listenOnRandomPort(testServer);
+    const response = await workbenchFetch(`http://127.0.0.1:${port}/api/publish`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contentId: fixture.id,
+        platforms: ['zhihu', 'juejin'],
+        publishMode: 'direct',
+        operationId: 'snapshot-staging-failure-operation-0001',
+        expectedUpdatedAt: currentContentUpdatedAt(fixture.id),
+      }),
+    });
+
+    assert.equal(response.status, 500);
+    assert.match((await response.json()).error, /second snapshot write failure/);
+    assert.equal(snapshotWrites, 2);
+    assert.equal(publisherCalls, 0);
+    assert.equal(
+      db.prepare('SELECT COUNT(*) AS count FROM publish_jobs WHERE content_id = ?').get(fixture.id).count,
+      0
+    );
+    assert.equal(firstSnapshot ? fs.existsSync(firstSnapshot) : false, false);
+    assert.equal(
+      fs.readdirSync(DRAFTS_DIR).some(name => name.includes(fixture.id)),
+      false
+    );
+    const journal = JSON.parse(fs.readFileSync(operationsFile, 'utf8'));
+    assert.equal(journal.records.length, 1);
+    assert.equal(journal.records[0].state, 'failed');
+  } finally {
+    await closeServer(testServer);
+    cleanupPublishStateFixture(fixture);
   }
 });
 

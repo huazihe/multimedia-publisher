@@ -14,7 +14,9 @@ const TurndownService = require('turndown');
 const { gfm: turndownGfm } = require('turndown-plugin-gfm');
 const {
   canonicalContentHash,
+  inspectLayoutMetadata,
   listLayoutTemplates,
+  normalizeCanonicalContent,
   renderLayoutTemplate,
 } = require('./layout-templates');
 
@@ -2439,17 +2441,35 @@ function hashFile(filePath) {
 }
 
 function layoutHash(html) {
-  return String(html || '').match(
-    /\bdata-canonical-sha256\s*=\s*(["'])([a-f0-9]{64})\1/i
-  )?.[2].toLowerCase() || '';
+  return inspectLayoutMetadata(html)?.canonicalHash || '';
+}
+
+function verifiedLayoutMetadata(content) {
+  const layoutHtml = String(content?.layout_html || '');
+  const metadata = inspectLayoutMetadata(layoutHtml);
+  if (!metadata) return null;
+  const canonical = normalizeCanonicalContent(content);
+  if (metadata.canonicalHash !== canonicalContentHash(canonical)) return null;
+  let expected;
+  try {
+    expected = renderLayoutTemplate(metadata.template, {
+      ...canonical,
+      generatedAt: metadata.generatedAt,
+    });
+  } catch {
+    return null;
+  }
+  return expected === layoutHtml ? metadata : null;
 }
 
 function selectPlatformSourcePayload(content, platform) {
   const platformId = String(platform || '').trim().toLowerCase();
   if (!platformId) throw new Error('平台源缺少平台 ID');
-  const canonicalMarkdown = contentToMarkdown(content);
+  const canonical = normalizeCanonicalContent(content);
+  const canonicalContent = { ...content, ...canonical };
+  const canonicalMarkdown = contentToMarkdown(canonicalContent);
   const useLayout = platformId === 'weixin'
-    && layoutHash(content?.layout_html) === canonicalContentHash(content);
+    && Boolean(verifiedLayoutMetadata(canonicalContent));
   const sourceContent = useLayout ? String(content.layout_html) : canonicalMarkdown;
   const format = useLayout ? 'html' : 'markdown';
   return {
@@ -2463,18 +2483,47 @@ function selectPlatformSourcePayload(content, platform) {
   };
 }
 
+function atomicWriteExclusiveFile(filePath, content) {
+  const target = path.resolve(filePath);
+  fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+  const temporaryPath = `${target}.${process.pid}.${randomBytes(16).toString('hex')}.tmp`;
+  let descriptor;
+  try {
+    descriptor = fs.openSync(temporaryPath, 'wx', 0o600);
+    fs.fchmodSync(descriptor, 0o600);
+    fs.writeFileSync(descriptor, content);
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    fs.linkSync(temporaryPath, target);
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+    fs.rmSync(temporaryPath, { force: true });
+  }
+  return target;
+}
+
 function writePlatformSourceFile(rootDir, basename, payload) {
   const safeBasename = String(basename || '');
   if (!/^[A-Za-z0-9_-]+$/.test(safeBasename)) throw new Error('平台源文件名无效');
   if (!payload || typeof payload !== 'object' || !['html', 'md'].includes(payload.extension)) {
     throw new Error('平台源载荷无效');
   }
+  const sourceContent = String(payload.content ?? '');
+  const expectedHash = String(payload.contentHash || '');
+  if (!/^[a-f0-9]{64}$/.test(expectedHash) || hashSource(sourceContent) !== expectedHash) {
+    throw new Error('平台源载荷哈希无效');
+  }
   const filePath = path.join(path.resolve(rootDir), `${safeBasename}.${payload.extension}`);
-  fs.writeFileSync(filePath, String(payload.content || ''), 'utf8');
+  atomicWriteExclusiveFile(filePath, sourceContent);
+  if (hashFile(filePath) !== expectedHash) {
+    fs.rmSync(filePath, { force: true });
+    throw new Error('平台源文件写入完整性校验失败');
+  }
   return {
     ...payload,
     filePath,
-    contentHash: hashFile(filePath),
+    contentHash: expectedHash,
   };
 }
 
@@ -2622,11 +2671,15 @@ async function previewContentForPlatform(contentId, platform, options = {}) {
   const previewDir = fs.mkdtempSync(path.join(tempRoot, 'publisher-dashboard-preview-'));
   try {
     const source = createPlatformSource(content, platformId, previewDir, { basename: 'content' });
+    const canonicalTitle = normalizeCanonicalContent(content).title;
 
     const runner = options.runner || runWeibotCli;
     let result;
     try {
-      result = await runner(['preview', source.filePath, '-p', platformId], options.timeout || 30000);
+      result = await runner(
+        ['preview', source.filePath, '-p', platformId, '-t', canonicalTitle],
+        options.timeout || 30000
+      );
     } catch (error) {
       throw mapPreviewExecutionError(error);
     }
@@ -2825,6 +2878,97 @@ function publishSnapshotName(jobId, contentId, platform = '', extension = 'md') 
   return `${job}-${content}${platformId ? `-${platformId}` : ''}.${sourceExtension}`;
 }
 
+function publishManifestName(jobId, contentId) {
+  const safeIdPattern = /^[A-Za-z0-9_-]+$/;
+  const job = String(jobId || '');
+  const content = String(contentId || '');
+  if (!safeIdPattern.test(job) || !safeIdPattern.test(content)) {
+    throw new Error('发布清单 ID 无效');
+  }
+  return `${job}-${content}-manifest.json`;
+}
+
+function writePublishManifestFile(rootDir, filename, manifest) {
+  const safeFilename = String(filename || '');
+  if (safeFilename !== path.basename(safeFilename)
+    || !/^[A-Za-z0-9_-]+-manifest\.json$/.test(safeFilename)) {
+    throw new Error('发布清单文件名无效');
+  }
+  const filePath = path.join(path.resolve(rootDir), safeFilename);
+  atomicWriteExclusiveFile(filePath, `${JSON.stringify(manifest, null, 2)}\n`);
+  return { filePath };
+}
+
+function cleanupStagedPublishFiles(filePaths) {
+  for (const filePath of [...new Set(filePaths)].reverse()) {
+    fs.rmSync(filePath, { force: true });
+  }
+}
+
+function stagePublishSources(content, selected, jobId, contentId, options = {}) {
+  const snapshotWriter = options.snapshotWriter || writePlatformSourceFile;
+  const manifestWriter = options.manifestWriter || writePublishManifestFile;
+  const stagedPaths = [];
+  const platformSources = new Map();
+  try {
+    for (const platform of selected) {
+      const payload = selectPlatformSourcePayload(content, platform);
+      const snapshotName = publishSnapshotName(
+        jobId,
+        contentId,
+        selected.length > 1 ? platform : '',
+        payload.extension
+      );
+      const basename = snapshotName.slice(0, -(payload.extension.length + 1));
+      const expectedPath = path.join(DRAFTS_DIR, snapshotName);
+      stagedPaths.push(expectedPath);
+      const written = snapshotWriter(DRAFTS_DIR, basename, payload);
+      if (!written
+        || path.resolve(written.filePath || '') !== path.resolve(expectedPath)
+        || written.contentHash !== payload.contentHash
+        || hashFile(expectedPath) !== payload.contentHash) {
+        throw new Error(`平台 ${platform} 的发布快照写入校验失败`);
+      }
+      platformSources.set(platform, {
+        ...written,
+        contentHash: payload.contentHash,
+      });
+    }
+
+    const manifest = {
+      version: 1,
+      jobId,
+      contentId,
+      sources: selected.map(platform => {
+        const source = platformSources.get(platform);
+        return {
+          platform,
+          filename: path.basename(source.filePath),
+          format: source.format,
+          sourceHash: source.contentHash,
+        };
+      }),
+    };
+    const manifestFilename = publishManifestName(jobId, contentId);
+    const expectedManifestPath = path.join(DRAFTS_DIR, manifestFilename);
+    stagedPaths.push(expectedManifestPath);
+    const writtenManifest = manifestWriter(DRAFTS_DIR, manifestFilename, manifest);
+    if (!writtenManifest
+      || path.resolve(writtenManifest.filePath || '') !== path.resolve(expectedManifestPath)) {
+      throw new Error('发布快照清单写入校验失败');
+    }
+    return {
+      platformSources,
+      manifest,
+      manifestFile: expectedManifestPath,
+      filePaths: stagedPaths,
+    };
+  } catch (error) {
+    cleanupStagedPublishFiles(stagedPaths);
+    throw error;
+  }
+}
+
 function normalizePublishPlatforms(content, platforms) {
   return [...new Set((Array.isArray(platforms) && platforms.length ? platforms : content?.selected_platforms || [])
     .map(platform => String(platform || '').trim().toLowerCase())
@@ -2919,32 +3063,26 @@ async function publishContent(contentId, platforms = [], options = {}) {
   if (loadedContent.updated_at !== expectedUpdatedAt) {
     throw statusError('文章已在其他标签页更新，请重新加载最新版本', 409);
   }
-  const content = immutableSnapshot(loadedContent);
+  const content = immutableSnapshot({
+    ...loadedContent,
+    ...normalizeCanonicalContent(loadedContent),
+  });
   const selected = normalizePublishPlatforms(content, platforms);
   if (!selected.length) throw new Error('请选择至少一个平台');
   const publishMode = options.publishMode === 'draft' ? 'draft' : 'direct';
 
   const jobId = makeId('job');
-  db.prepare(`
-    INSERT INTO publish_jobs (id, content_id, title, status, platforms, created_at, updated_at)
-    VALUES (?, ?, ?, 'running', ?, ?, ?)
-  `).run(jobId, contentId, content.title, encodeJson(selected), now(), now());
-
-  const platformSources = new Map();
-  for (const platform of selected) {
-    const payload = selectPlatformSourcePayload(content, platform);
-    const snapshotName = publishSnapshotName(
-      jobId,
-      contentId,
-      selected.length > 1 ? platform : '',
-      payload.extension
-    );
-    const basename = snapshotName.slice(0, -(payload.extension.length + 1));
-    platformSources.set(
-      platform,
-      writePlatformSourceFile(DRAFTS_DIR, basename, payload)
-    );
+  const staged = stagePublishSources(content, selected, jobId, contentId, options);
+  try {
+    db.prepare(`
+      INSERT INTO publish_jobs (id, content_id, title, status, platforms, created_at, updated_at)
+      VALUES (?, ?, ?, 'running', ?, ?, ?)
+    `).run(jobId, contentId, content.title, encodeJson(selected), now(), now());
+  } catch (error) {
+    cleanupStagedPublishFiles(staged.filePaths);
+    throw error;
   }
+  const platformSources = staged.platformSources;
 
   const finalResults = {};
   const rawOutputs = [];
@@ -2959,12 +3097,26 @@ async function publishContent(contentId, platforms = [], options = {}) {
       continue;
     }
 
+    const platformSource = platformSources.get(platform);
+    let actualSourceHash = '';
+    try {
+      actualSourceHash = hashFile(platformSource.filePath);
+    } catch {
+      actualSourceHash = '';
+    }
+    if (actualSourceHash !== platformSource.contentHash) {
+      const integrityFailure = '发布快照完整性校验失败，检测到文件缺失或篡改；已阻止平台调用';
+      finalResults[platform] = { status: 'failed', error: integrityFailure };
+      rawOutputs.push(`[${platform}] ${integrityFailure}`);
+      continue;
+    }
+
     publisherCallsStarted += 1;
     if (typeof options.onPublisherStart === 'function') options.onPublisherStart(platform);
     let single;
     try {
       single = await platformPublisher(
-        platformSources.get(platform).filePath,
+        platformSource.filePath,
         platform,
         content.title,
         publishMode
@@ -3315,7 +3467,20 @@ function sendLayoutPreview(res, contentId) {
     sendJson(res, { ok: false, error: 'Not found' }, 404);
     return;
   }
-  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.writeHead(200, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Content-Security-Policy': [
+      "default-src 'none'",
+      "script-src 'none'",
+      "object-src 'none'",
+      "base-uri 'none'",
+      "form-action 'none'",
+      "frame-ancestors 'none'",
+      "style-src 'unsafe-inline'",
+      'img-src http: https: data:',
+    ].join('; '),
+    'X-Content-Type-Options': 'nosniff',
+  });
   res.end(previewDocument(content));
 }
 
@@ -3328,6 +3493,8 @@ function createDashboardServer(options = {}) {
   const publishDependencies = {
     ...(options.preflight ? { preflight: options.preflight } : {}),
     ...(options.platformPublisher ? { platformPublisher: options.platformPublisher } : {}),
+    ...(options.snapshotWriter ? { snapshotWriter: options.snapshotWriter } : {}),
+    ...(options.manifestWriter ? { manifestWriter: options.manifestWriter } : {}),
   };
   const nowMs = typeof options.nowMs === 'function' ? options.nowMs : Date.now;
   const operationJournal = options.operationJournal || createOperationJournal({
@@ -3822,15 +3989,19 @@ module.exports = {
   layoutContent,
   saveLocalDraft,
   contentToMarkdown,
+  normalizeCanonicalContent,
   canonicalContentHash,
+  inspectLayoutMetadata,
   layoutHash,
   selectPlatformSourcePayload,
   writePlatformSourceFile,
   createPlatformSource,
   hashSource,
   hashFile,
+  atomicWriteExclusiveFile,
   previewContentForPlatform,
   publishSnapshotName,
+  publishManifestName,
   buildPublishOperationSignature,
   publishContent,
   createOperationJournal,
