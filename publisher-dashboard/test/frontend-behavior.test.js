@@ -739,6 +739,114 @@ test('a 409 save conflict preserves the editor DOM and displays an explicit relo
   assert.match(document.querySelector('[data-content-save-state]').textContent, /重新加载最新版本/);
 });
 
+for (const testCase of [
+  { statusCode: 400, message: '标题不能超过 200 个 Unicode 字符' },
+  { statusCode: 413, message: '正文不能超过 5 MiB' },
+]) {
+  test(`normal Save surfaces ${testCase.statusCode}, stays dirty, unlocks controls, and preserves caller errors`, async () => {
+    const saveSource = extractFunctionSource('saveContent', 'markContentDirty');
+    const snapshotSource = extractFunctionSource('contentOperationSnapshot', 'setContentOperationBusy');
+    const busySource = extractFunctionSource('setContentOperationBusy', 'beginContentOperation');
+    const beginSource = extractFunctionSource('beginContentOperation', 'contentOperationIsStable');
+    const stableSource = extractFunctionSource('contentOperationIsStable', 'preserveContentOperationChanges');
+    const preserveSource = extractFunctionSource('preserveContentOperationChanges', 'endContentOperation');
+    const endSource = extractFunctionSource('endContentOperation', 'createPublishOperationId');
+    assert.ok(saveSource && snapshotSource && busySource && beginSource && stableSource && preserveSource && endSource);
+    const contentId = `save-error-${testCase.statusCode}`;
+    const { document } = parseHTML(`
+      <div data-content-body="${contentId}" contenteditable="true"><p>Unsaved local body</p></div>
+      <input data-content-title="${contentId}" value="Unsaved local title">
+      <textarea data-content-summary="${contentId}">Unsaved local summary</textarea>
+      <button class="is-hidden" data-action="save-content" data-id="${contentId}" data-save-content-button="${contentId}">保存</button>
+      <button data-action="layout-content" data-id="${contentId}">排版</button>
+      <span data-content-save-state="${contentId}"></span>
+    `);
+    const state = {
+      selectedContentId: contentId,
+      data: {
+        contents: [{
+          id: contentId,
+          title: 'Stored title',
+          summary: 'Stored summary',
+          body: '<p>Stored body</p>',
+          type: '行业分析',
+          status: '已排版',
+          layout_html: '<article>Stored layout</article>',
+          updated_at: '2026-09-02T08:00:00.000Z',
+        }],
+      },
+      dirtyContentIds: new Set([contentId]),
+      contentEditRevisions: new Map([[contentId, 1]]),
+      contentOperationLocks: new Map(),
+      contentOperationSequence: 0,
+    };
+    const $ = selector => document.querySelector(selector);
+    const $$ = selector => [...document.querySelectorAll(selector)];
+    const contentOperationSnapshot = vm.runInNewContext(`(${snapshotSource})`, { state, $ });
+    const setContentOperationBusy = vm.runInNewContext(`(${busySource})`, { state, $, $$ });
+    const beginContentOperation = vm.runInNewContext(`(${beginSource})`, {
+      state,
+      contentOperationSnapshot,
+      setContentOperationBusy,
+    });
+    const contentOperationIsStable = vm.runInNewContext(`(${stableSource})`, { state, contentOperationSnapshot });
+    const preserveContentOperationChanges = vm.runInNewContext(`(${preserveSource})`, {
+      state,
+      contentOperationSnapshot,
+    });
+    const endContentOperation = vm.runInNewContext(`(${endSource})`, { state, setContentOperationBusy });
+    const messages = [];
+    const requestError = new Error(testCase.message);
+    requestError.statusCode = testCase.statusCode;
+    const saveContent = vm.runInNewContext(`(${saveSource})`, {
+      state,
+      $,
+      request: async () => {
+        assert.equal($('[data-content-body]').getAttribute('contenteditable'), 'false');
+        assert.equal($('[data-action="save-content"]').disabled, true);
+        assert.equal($('[data-action="layout-content"]').disabled, true);
+        throw requestError;
+      },
+      clearPlatformPreviews: () => { throw new Error('failed save must not clear previews'); },
+      toast: (message, type) => messages.push({ message, type }),
+      loadData: async () => { throw new Error('failed save must not reload'); },
+      encodeURIComponent,
+      beginContentOperation,
+      contentOperationIsStable,
+      preserveContentOperationChanges,
+      endContentOperation,
+    });
+
+    const result = await saveContent(contentId, { userInitiated: true });
+
+    assert.equal(result.saveError, true);
+    assert.equal(result.statusCode, testCase.statusCode);
+    assert.equal(result.stable, false);
+    assert.equal(state.dirtyContentIds.has(contentId), true);
+    assert.equal(state.contentOperationLocks.size, 0);
+    assert.equal($('[data-content-body]').innerHTML, '<p>Unsaved local body</p>');
+    assert.equal($('[data-content-title]').value, 'Unsaved local title');
+    assert.equal($('[data-content-summary]').value, 'Unsaved local summary');
+    assert.equal($('[data-content-body]').getAttribute('contenteditable'), 'true');
+    assert.equal($('[data-action="save-content"]').disabled, false);
+    assert.equal($('[data-action="layout-content"]').disabled, false);
+    assert.equal($('[data-save-content-button]').classList.contains('is-hidden'), false);
+    assert.match($('[data-content-save-state]').textContent, /保存失败.*请修改后重试/);
+    assert.match($('[data-content-save-state]').textContent, new RegExp(testCase.message.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.deepEqual(messages.at(-1), {
+      message: $('[data-content-save-state]').textContent,
+      type: 'error',
+    });
+
+    await assert.rejects(
+      () => saveContent(contentId, { silent: true }),
+      error => error.statusCode === testCase.statusCode
+    );
+    assert.equal(state.contentOperationLocks.size, 0);
+    assert.equal($('[data-content-body]').getAttribute('contenteditable'), 'true');
+  });
+}
+
 test('per-content operation lock disables editing and controls while blocking dirty revisions', () => {
   const snapshotSource = extractFunctionSource('contentOperationSnapshot', 'setContentOperationBusy');
   const busySource = extractFunctionSource('setContentOperationBusy', 'beginContentOperation');
@@ -1548,4 +1656,5 @@ test('frontend source wires cancel, dirty navigation, beforeunload, and import i
   assert.match(appSource, /function beginPasteImport\s*\(/);
   assert.match(appSource, /import-content-input[^\n]*addEventListener\(['"]paste['"]/);
   assert.match(appSource, /function readImportFile[\s\S]*?invalidateImportRead\(state\)/);
+  assert.match(appSource, /if \(name === 'save-content'\)\s+void saveContent\(id, \{ userInitiated: true \}\)/);
 });

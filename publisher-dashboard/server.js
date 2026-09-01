@@ -218,6 +218,26 @@ function timestampAfter(previousTimestamp) {
   return new Date(nextMs).toISOString();
 }
 
+function updateContentRowWithMonotonicTimestamp(contentId, assignments, values = [], options = {}) {
+  const hasExpectedRevision = Object.prototype.hasOwnProperty.call(options, 'expectedUpdatedAt');
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const current = one('SELECT updated_at FROM contents WHERE id = ?', contentId);
+    if (!current) return { changes: 0, updatedAt: null };
+    if (hasExpectedRevision && current.updated_at !== options.expectedUpdatedAt) {
+      return { changes: 0, updatedAt: null };
+    }
+    const updatedAt = timestampAfter(current.updated_at);
+    const result = db.prepare(`
+      UPDATE contents
+      SET ${assignments}, updated_at = ?
+      WHERE id = ? AND updated_at = ?
+    `).run(...values, updatedAt, contentId, current.updated_at);
+    if (result.changes === 1) return { changes: 1, updatedAt };
+    if (hasExpectedRevision) return { changes: 0, updatedAt: null };
+  }
+  throw statusError('内容状态更新冲突，请重试', 409);
+}
+
 function statusError(message, statusCode) {
   const error = new Error(message);
   error.statusCode = statusCode;
@@ -2166,56 +2186,50 @@ function validateContentFieldLimits(fields) {
   }
   if (typeof fields.body === 'string'
     && Buffer.byteLength(fields.body, 'utf8') > MAX_CONTENT_BODY_BYTES) {
-    throw statusError('正文不能超过 5 MiB', 400);
+    throw statusError('正文不能超过 5 MiB', 413);
   }
 }
 
 function updateContent(contentId, payload = {}) {
   const input = validateContentUpdatePayload(payload);
-  const storedContent = one('SELECT * FROM contents WHERE id = ?', contentId);
-  const content = normalizeContent(storedContent);
-  if (!content) throw new Error('内容不存在');
-  const body = normalizeCanonicalBody(input.body ?? content.body ?? '');
-  const title = (input.title || '').trim() || titleFromMarkdown(body, content.title);
-  const summary = (input.summary ?? content.summary ?? '').trim();
-  const type = (input.type ?? content.type ?? '').trim();
-  validateContentFieldLimits({ title, summary, body, type });
-  const canonicalChanged = title !== storedContent.title
-    || summary !== (storedContent.summary ?? '')
-    || body !== storedContent.body
-    || type !== (storedContent.type ?? '');
-  const status = canonicalChanged ? (content.plan_date ? '正文已生成' : '已导入') : content.status;
-  const layoutHtml = canonicalChanged ? '' : (content.layout_html ?? '');
-  const updatedAt = timestampAfter(storedContent.updated_at);
-  const result = db.prepare(`
-    UPDATE contents
-    SET title = ?, summary = ?, body = ?, type = ?, status = ?, layout_html = ?, updated_at = ?
-    WHERE id = ? AND updated_at = ?
-  `).run(
-    title,
-    summary,
-    body,
-    type,
-    status,
-    layoutHtml,
-    updatedAt,
-    contentId,
-    input.expectedUpdatedAt
-  );
-  if (result.changes === 0) {
-    throw statusError('文章已在其他位置更新，请重新加载最新版本', 409);
-  }
-  if (content.plan_date) {
-    if (canonicalChanged) {
-      db.prepare("UPDATE weekly_plans SET topic = ?, type = ?, status = '正文已生成', updated_at = ? WHERE date = ?")
-        .run(title, type, updatedAt, content.plan_date);
-    } else {
-      db.prepare('UPDATE weekly_plans SET topic = ?, type = ?, updated_at = ? WHERE date = ?')
-        .run(title, type, updatedAt, content.plan_date);
+  return runTransaction(() => {
+    const storedContent = one('SELECT * FROM contents WHERE id = ?', contentId);
+    const content = normalizeContent(storedContent);
+    if (!content) throw new Error('内容不存在');
+    const body = normalizeCanonicalBody(input.body ?? content.body ?? '');
+    const title = (input.title || '').trim() || titleFromMarkdown(body, content.title);
+    const summary = (input.summary ?? content.summary ?? '').trim();
+    const type = (input.type ?? content.type ?? '').trim();
+    validateContentFieldLimits({ title, summary, body, type });
+    const canonicalChanged = title !== storedContent.title
+      || summary !== (storedContent.summary ?? '')
+      || body !== storedContent.body
+      || type !== (storedContent.type ?? '');
+    const status = canonicalChanged ? (content.plan_date ? '正文已生成' : '已导入') : content.status;
+    const layoutHtml = canonicalChanged ? '' : (content.layout_html ?? '');
+    const mutation = updateContentRowWithMonotonicTimestamp(
+      contentId,
+      'title = ?, summary = ?, body = ?, type = ?, status = ?, layout_html = ?',
+      [title, summary, body, type, status, layoutHtml],
+      { expectedUpdatedAt: input.expectedUpdatedAt }
+    );
+    if (mutation.changes === 0) {
+      throw statusError('文章已在其他位置更新，请重新加载最新版本', 409);
     }
-  }
-  addActivity(`更新正文《${title}》`, 'content', contentId, '用户');
-  return normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
+    if (content.plan_date) {
+      if (canonicalChanged) {
+        db.prepare("UPDATE weekly_plans SET topic = ?, type = ?, status = '正文已生成', updated_at = ? WHERE date = ?")
+          .run(title, type, mutation.updatedAt, content.plan_date);
+      } else {
+        db.prepare('UPDATE weekly_plans SET topic = ?, type = ?, updated_at = ? WHERE date = ?')
+          .run(title, type, mutation.updatedAt, content.plan_date);
+      }
+    }
+    addActivity(`更新正文《${title}》`, 'content', contentId, '用户');
+    const updated = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
+    if (!updated) throw new Error('更新内容读取失败');
+    return updated;
+  });
 }
 
 function generateContent(planDate, explicitTopic) {
@@ -2264,11 +2278,16 @@ function layoutContent(contentId, template) {
       body: content.body,
     })
     : buildLayoutHtml(content.title, content.body);
-  db.prepare("UPDATE contents SET layout_html = ?, status = '已排版', updated_at = ? WHERE id = ?")
-    .run(html, now(), contentId);
+  const mutation = updateContentRowWithMonotonicTimestamp(
+    contentId,
+    "layout_html = ?, status = '已排版'",
+    [html],
+    { expectedUpdatedAt: content.updated_at }
+  );
+  if (mutation.changes === 0) throw statusError('文章已被更新，请重新生成排版', 409);
   if (content.plan_date) {
     db.prepare("UPDATE weekly_plans SET status = '已排版', updated_at = ? WHERE date = ?")
-      .run(now(), content.plan_date);
+      .run(mutation.updatedAt, content.plan_date);
   }
   addActivity(`完成排版预览《${content.title}》`, 'content', contentId);
   return normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
@@ -2280,11 +2299,16 @@ function saveLocalDraft(contentId, platforms = []) {
   const selected = (Array.isArray(platforms) ? platforms : content.selected_platforms)
     .map(platform => String(platform || '').trim().toLowerCase())
     .filter(platform => platform && !RETIRED_PLATFORM_IDS.includes(platform));
-  db.prepare("UPDATE contents SET status = '草稿已保存', selected_platforms = ?, updated_at = ? WHERE id = ?")
-    .run(encodeJson(selected), now(), contentId);
+  const mutation = updateContentRowWithMonotonicTimestamp(
+    contentId,
+    "status = '草稿已保存', selected_platforms = ?",
+    [encodeJson(selected)],
+    { expectedUpdatedAt: content.updated_at }
+  );
+  if (mutation.changes === 0) throw statusError('文章已被更新，请重新保存草稿', 409);
   if (content.plan_date) {
     db.prepare("UPDATE weekly_plans SET status = '草稿已保存', updated_at = ? WHERE date = ?")
-      .run(now(), content.plan_date);
+      .run(mutation.updatedAt, content.plan_date);
   }
 
   const jobId = makeId('job');
@@ -2723,11 +2747,11 @@ async function publishContent(contentId, platforms = [], options = {}) {
     const aggregateStatus = jobStatus === 'published'
       ? '已发布'
       : jobStatus === 'draft_saved' ? '草稿已保存' : '发布失败';
-    db.prepare('UPDATE contents SET status = ?, updated_at = ? WHERE id = ?')
-      .run(aggregateStatus, now(), contentId);
+    const mutation = updateContentRowWithMonotonicTimestamp(contentId, 'status = ?', [aggregateStatus]);
+    if (mutation.changes === 0) throw new Error('内容不存在');
     if (content.plan_date) {
       db.prepare('UPDATE weekly_plans SET status = ?, updated_at = ? WHERE date = ?')
-        .run(aggregateStatus, now(), content.plan_date);
+        .run(aggregateStatus, mutation.updatedAt, content.plan_date);
     }
   }
 
@@ -3296,7 +3320,7 @@ function createDashboardServer(options = {}) {
 
     const contentUpdateMatch = url.pathname.match(/^\/api\/content\/([^/]+)$/);
     if (contentUpdateMatch && req.method === 'POST') {
-      const body = await readBody(req);
+      const body = await readBody(req, { invalidJsonStatusCode: 400 });
       sendJson(res, { ok: true, content: updateContent(contentUpdateMatch[1], body) });
       return;
     }

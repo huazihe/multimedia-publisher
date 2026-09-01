@@ -2401,17 +2401,25 @@ async function saveContent(id, options = {}) {
     if (!options.silent) toast('正文已保存');
     return { content: res.content, stable: true };
   } catch (error) {
-    if (error?.statusCode !== 409) throw error;
-    const conflictMessage = '文章已在其他标签页更新，请先复制当前修改，再重新加载最新版本';
+    if (error?.statusCode !== 409 && !options.userInitiated) throw error;
+    const message = error?.statusCode === 409
+      ? '文章已在其他标签页更新，请先复制当前修改，再重新加载最新版本'
+      : `保存失败：${error?.message || '未知错误'}。请修改后重试`;
     state.dirtyContentIds.add(targetKey);
     $(`[data-save-content-button="${target}"]`)?.classList.remove('is-hidden');
     const saveState = $(`[data-content-save-state="${target}"]`);
     if (saveState) {
-      saveState.textContent = conflictMessage;
+      saveState.textContent = message;
       saveState.classList.add('is-dirty');
     }
-    toast(conflictMessage, 'error');
-    return { content: null, stable: false, conflict: true };
+    toast(message, 'error');
+    if (error?.statusCode === 409) return { content: null, stable: false, conflict: true };
+    return {
+      content: null,
+      stable: false,
+      saveError: true,
+      statusCode: Number.isInteger(error?.statusCode) ? error.statusCode : 0,
+    };
   } finally {
     if (ownsOperation) endContentOperation(operationContext);
   }
@@ -2807,7 +2815,7 @@ document.addEventListener('click', event => {
   if (name === 'layout-content') layoutContent(id);
   if (name === 'generate-wechat-layout') generateWechatLayout(id);
   if (name === 'random-wechat-template') chooseRandomWechatTemplate();
-  if (name === 'save-content') saveContent(id);
+  if (name === 'save-content') void saveContent(id, { userInitiated: true });
   if (name === 'save-draft') saveDraft(id);
   if (name === 'publish-content' || name === 'publish-selected') publishContent(id);
   if (name === 'select-preview-platform') selectPreviewPlatform(platform);

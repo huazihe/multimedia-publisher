@@ -55,6 +55,8 @@ const {
   generateContent,
   updateContent,
   importContent,
+  layoutContent,
+  saveLocalDraft,
   previewContentForPlatform,
   publishSnapshotName,
   publishContent,
@@ -97,6 +99,26 @@ function updateCurrentContent(contentId, payload = {}) {
   const current = db.prepare('SELECT updated_at FROM contents WHERE id = ?').get(contentId);
   assert.ok(current, `内容不存在: ${contentId}`);
   return updateContent(contentId, { ...payload, expectedUpdatedAt: current.updated_at });
+}
+
+async function withFixedClock(timestamp, callback) {
+  const NativeDate = globalThis.Date;
+  const fixedMs = NativeDate.parse(timestamp);
+  class FixedDate extends NativeDate {
+    constructor(...args) {
+      super(...(args.length ? args : [fixedMs]));
+    }
+
+    static now() {
+      return fixedMs;
+    }
+  }
+  globalThis.Date = FixedDate;
+  try {
+    return await callback();
+  } finally {
+    globalThis.Date = NativeDate;
+  }
 }
 
 function databaseSnapshot() {
@@ -2175,6 +2197,144 @@ test('updateContent rejects a stale revision with status 409 and preserves the n
   }
 });
 
+test('fixed-clock save then layout keeps the revision monotonic and rejects the original token', async () => {
+  let content;
+  await withFixedClock('2026-09-02T08:00:00.000Z', async () => {
+    try {
+      content = importContent({ filename: 'layout-aba.md', body: '# Layout ABA\n\nOriginal body.' });
+      const original = { ...content };
+      const saved = updateContent(content.id, canonicalRevisionPayload(original, { summary: 'Saved summary' }));
+      const laidOut = layoutContent(content.id);
+
+      assert.throws(
+        () => updateContent(content.id, canonicalRevisionPayload(original, { title: 'Stale layout writer' })),
+        error => error.statusCode === 409
+      );
+      assert.ok(Date.parse(laidOut.updated_at) > Date.parse(saved.updated_at));
+      assert.equal(db.prepare('SELECT updated_at FROM contents WHERE id = ?').get(content.id).updated_at, laidOut.updated_at);
+    } finally {
+      cleanupImportedContent(content);
+    }
+  });
+});
+
+test('fixed-clock save then local draft keeps the revision monotonic and rejects the original token', async () => {
+  let fixture;
+  await withFixedClock('2026-09-02T08:10:00.000Z', async () => {
+    try {
+      fixture = createPublishStateFixture({
+        key: 'draft-aba',
+        planDate: '2099-06-01',
+        selectedPlatforms: [],
+        contentStatus: '已排版',
+        planStatus: '已排版',
+      });
+      const original = { ...fixture };
+      const saved = updateContent(fixture.id, canonicalRevisionPayload(original, { summary: 'Saved summary' }));
+      saveLocalDraft(fixture.id, ['zhihu']);
+      const drafted = db.prepare('SELECT updated_at FROM contents WHERE id = ?').get(fixture.id);
+
+      assert.throws(
+        () => updateContent(fixture.id, canonicalRevisionPayload(original, { title: 'Stale draft writer' })),
+        error => error.statusCode === 409
+      );
+      assert.ok(Date.parse(drafted.updated_at) > Date.parse(saved.updated_at));
+    } finally {
+      cleanupPublishStateFixture(fixture);
+    }
+  });
+});
+
+test('fixed-clock save then publish status keeps the revision monotonic and rejects the original token', async () => {
+  let fixture;
+  await withFixedClock('2026-09-02T08:20:00.000Z', async () => {
+    try {
+      fixture = createPublishStateFixture({
+        key: 'publish-aba',
+        planDate: '2099-06-02',
+        selectedPlatforms: ['zhihu'],
+        contentStatus: '已排版',
+        planStatus: '已排版',
+      });
+      const original = { ...fixture };
+      const saved = updateContent(fixture.id, canonicalRevisionPayload(original, { summary: 'Saved summary' }));
+      await publishContent(fixture.id, ['zhihu'], {
+        preflight: async () => null,
+        platformPublisher: successfulPlatformPublisher(),
+      });
+      const published = db.prepare('SELECT updated_at FROM contents WHERE id = ?').get(fixture.id);
+
+      assert.throws(
+        () => updateContent(fixture.id, canonicalRevisionPayload(original, { title: 'Stale publish writer' })),
+        error => error.statusCode === 409
+      );
+      assert.ok(Date.parse(published.updated_at) > Date.parse(saved.updated_at));
+    } finally {
+      cleanupPublishStateFixture(fixture);
+    }
+  });
+});
+
+test('updateContent rolls back content, plan, and revision when activity insertion fails', () => {
+  let fixture;
+  const triggerName = 'fail_content_update_activity';
+  db.exec(`DROP TRIGGER IF EXISTS ${triggerName}`);
+  try {
+    fixture = createPublishStateFixture({
+      key: 'atomic-content-update',
+      planDate: '2099-06-03',
+      selectedPlatforms: [],
+      contentStatus: '已排版',
+      planStatus: '已排版',
+    });
+    const originalContent = db.prepare(`
+      SELECT title, summary, body, type, status, layout_html, updated_at
+      FROM contents WHERE id = ?
+    `).get(fixture.id);
+    const originalPlan = db.prepare(`
+      SELECT topic, type, status, updated_at
+      FROM weekly_plans WHERE date = ?
+    `).get(fixture.planDate);
+    const payload = canonicalRevisionPayload(originalContent, {
+      title: 'Atomic updated title',
+      type: 'Atomic updated type',
+    });
+    db.exec(`
+      CREATE TRIGGER ${triggerName}
+      BEFORE INSERT ON activity
+      WHEN NEW.target_type = 'content' AND NEW.action LIKE '更新正文%'
+      BEGIN
+        SELECT RAISE(ABORT, 'forced content update activity failure');
+      END
+    `);
+
+    assert.throws(
+      () => updateContent(fixture.id, payload),
+      /forced content update activity failure/
+    );
+    assert.deepEqual(db.prepare(`
+      SELECT title, summary, body, type, status, layout_html, updated_at
+      FROM contents WHERE id = ?
+    `).get(fixture.id), originalContent);
+    assert.deepEqual(db.prepare(`
+      SELECT topic, type, status, updated_at
+      FROM weekly_plans WHERE date = ?
+    `).get(fixture.planDate), originalPlan);
+
+    db.exec(`DROP TRIGGER ${triggerName}`);
+    const retried = updateContent(fixture.id, payload);
+    assert.equal(retried.title, 'Atomic updated title');
+    assert.notEqual(retried.updated_at, originalContent.updated_at);
+    const updatedPlan = db.prepare('SELECT topic, type, status FROM weekly_plans WHERE date = ?').get(fixture.planDate);
+    assert.equal(updatedPlan.topic, 'Atomic updated title');
+    assert.equal(updatedPlan.type, 'Atomic updated type');
+    assert.equal(updatedPlan.status, '正文已生成');
+  } finally {
+    db.exec(`DROP TRIGGER IF EXISTS ${triggerName}`);
+    cleanupPublishStateFixture(fixture);
+  }
+});
+
 test('canonical field changes invalidate plan-linked layout and reset generated status', () => {
   let content;
   try {
@@ -2290,16 +2450,16 @@ test('updateContent enforces Unicode field limits and a 5 MiB UTF-8 body limit',
   try {
     content = importContent({ filename: 'field-limits.md', body: '# Field limits\n\nBody.' });
     const invalidFields = [
-      ['title', '😀'.repeat(201), /标题.*200/],
-      ['summary', '摘'.repeat(1001), /摘要.*1000/],
-      ['type', '类'.repeat(101), /类型.*100/],
-      ['body', 'a'.repeat(5 * 1024 * 1024 + 1), /正文.*5 MiB/],
+      ['title', '😀'.repeat(201), /标题.*200/, 400],
+      ['summary', '摘'.repeat(1001), /摘要.*1000/, 400],
+      ['type', '类'.repeat(101), /类型.*100/, 400],
+      ['body', 'a'.repeat(5 * 1024 * 1024 + 1), /正文.*5 MiB/, 413],
     ];
-    for (const [field, value, message] of invalidFields) {
+    for (const [field, value, message, statusCode] of invalidFields) {
       assert.throws(
         () => updateContent(content.id, canonicalRevisionPayload(content, { [field]: value })),
         error => {
-          assert.equal(error.statusCode, 400);
+          assert.equal(error.statusCode, statusCode);
           assert.match(error.message, message);
           return true;
         }
@@ -2365,6 +2525,7 @@ test('updateContent validates every final resolved field after fallback and norm
       field: 'body',
       submittedValue: 'a'.repeat(5 * 1024 * 1024 - 1),
       message: /正文.*5 MiB/,
+      statusCode: 413,
     },
   ];
 
@@ -2385,7 +2546,7 @@ test('updateContent validates every final resolved field after fallback and norm
       assert.throws(
         () => updateContent(content.id, payload),
         error => {
-          assert.equal(error.statusCode, 400);
+          assert.equal(error.statusCode, testCase.statusCode || 400);
           assert.match(error.message, testCase.message);
           return true;
         }
@@ -2494,6 +2655,58 @@ test('content update endpoint returns 409 for a stale revision without overwriti
     const stored = db.prepare('SELECT title, updated_at FROM contents WHERE id = ?').get(content.id);
     assert.equal(stored.title, 'Endpoint newer title');
     assert.equal(stored.updated_at, firstResult.content.updated_at);
+  } finally {
+    await closeServer(testServer);
+    cleanupImportedContent(content);
+  }
+});
+
+test('content update endpoint returns 413 for a body over 5 MiB', async () => {
+  let content;
+  let testServer;
+  try {
+    content = importContent({ filename: 'endpoint-body-limit.md', body: '# Body limit\n\nOriginal body.' });
+    testServer = createDashboardServer();
+    const port = await listenOnRandomPort(testServer);
+    const response = await workbenchFetch(`http://127.0.0.1:${port}/api/content/${content.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(canonicalRevisionPayload(content, {
+        body: 'a'.repeat(5 * 1024 * 1024 + 1),
+      })),
+    });
+    const result = await response.json();
+
+    assert.equal(response.status, 413);
+    assert.equal(result.ok, false);
+    assert.match(result.error, /正文.*5 MiB/);
+    const stored = db.prepare('SELECT body, updated_at FROM contents WHERE id = ?').get(content.id);
+    assert.equal(stored.body, content.body);
+    assert.equal(stored.updated_at, content.updated_at);
+  } finally {
+    await closeServer(testServer);
+    cleanupImportedContent(content);
+  }
+});
+
+test('content update endpoint returns 400 for malformed JSON', async () => {
+  let content;
+  let testServer;
+  try {
+    content = importContent({ filename: 'endpoint-malformed-json.md', body: '# JSON syntax\n\nOriginal body.' });
+    testServer = createDashboardServer();
+    const port = await listenOnRandomPort(testServer);
+    const response = await workbenchFetch(`http://127.0.0.1:${port}/api/content/${content.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{"title":',
+    });
+    const result = await response.json();
+
+    assert.equal(response.status, 400);
+    assert.equal(result.ok, false);
+    assert.match(result.error, /JSON 格式无效/);
+    assert.equal(db.prepare('SELECT updated_at FROM contents WHERE id = ?').get(content.id).updated_at, content.updated_at);
   } finally {
     await closeServer(testServer);
     cleanupImportedContent(content);
