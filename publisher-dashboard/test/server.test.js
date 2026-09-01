@@ -101,6 +101,12 @@ function updateCurrentContent(contentId, payload = {}) {
   return updateContent(contentId, { ...payload, expectedUpdatedAt: current.updated_at });
 }
 
+function currentContentUpdatedAt(contentId) {
+  const current = db.prepare('SELECT updated_at FROM contents WHERE id = ?').get(contentId);
+  assert.ok(current, `内容不存在: ${contentId}`);
+  return current.updated_at;
+}
+
 async function withFixedClock(timestamp, callback) {
   const NativeDate = globalThis.Date;
   const fixedMs = NativeDate.parse(timestamp);
@@ -360,6 +366,7 @@ test('local API requires trusted origin and per-server CSRF for mutations', asyn
       platform: 'zhihu',
       publishMode: 'direct',
       operationId: 'csrf-publish-operation-0001',
+      expectedUpdatedAt: imported.updated_at,
     });
     response = await nativeFetch(publishEndpoint, {
       method: 'POST',
@@ -1245,10 +1252,11 @@ test('publisher side-effect exception marks signature uncertain and blocks a new
     });
     const port = await listenOnRandomPort(testServer);
     const endpoint = `http://127.0.0.1:${port}/api/content/${fixture.id}/publish-platform`;
+    let expectedUpdatedAt = currentContentUpdatedAt(fixture.id);
     const publish = operationId => workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId }),
+      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId, expectedUpdatedAt }),
     });
 
     let response = await publish('post-effect-uncertain-operation-0001');
@@ -1294,10 +1302,11 @@ test('all preflight failures record failed and allow a new operationId retry', a
     });
     const port = await listenOnRandomPort(testServer);
     const endpoint = `http://127.0.0.1:${port}/api/content/${fixture.id}/publish-platform`;
+    let expectedUpdatedAt = currentContentUpdatedAt(fixture.id);
     const publish = operationId => workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId }),
+      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId, expectedUpdatedAt }),
     });
 
     let response = await publish('preflight-failed-operation-0001');
@@ -1339,10 +1348,11 @@ test('publisher-started all-failed result records uncertain and blocks a new ope
     });
     const port = await listenOnRandomPort(testServer);
     const endpoint = `http://127.0.0.1:${port}/api/content/${fixture.id}/publish-platform`;
+    const expectedUpdatedAt = currentContentUpdatedAt(fixture.id);
     const publish = operationId => workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId }),
+      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId, expectedUpdatedAt }),
     });
 
     let response = await publish('publisher-all-failed-operation-0001');
@@ -1384,6 +1394,7 @@ test('partial publisher success records completed and replays without another pu
     });
     const port = await listenOnRandomPort(testServer);
     const endpoint = `http://127.0.0.1:${port}/api/publish`;
+    const expectedUpdatedAt = currentContentUpdatedAt(fixture.id);
     const publish = operationId => workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1392,6 +1403,7 @@ test('partial publisher success records completed and replays without another pu
         platforms: ['zhihu', 'juejin'],
         publishMode: 'direct',
         operationId,
+        expectedUpdatedAt,
       }),
     });
 
@@ -1432,10 +1444,11 @@ test('lost completed response persists replay alias and changed alias signature 
     });
     const port = await listenOnRandomPort(testServer);
     const endpoint = `http://127.0.0.1:${port}/api/content/${fixture.id}/publish-platform`;
+    let expectedUpdatedAt = currentContentUpdatedAt(fixture.id);
     const publish = operationId => workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId }),
+      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId, expectedUpdatedAt }),
     });
 
     const lostResponse = await publish('lost-response-operation-0001');
@@ -1447,7 +1460,9 @@ test('lost completed response persists replay alias and changed alias signature 
     let document = JSON.parse(fs.readFileSync(operationsFile, 'utf8'));
     assert.equal(document.records.find(record => record.operationId === 'lost-response-operation-0002').aliasOf, 'lost-response-operation-0001');
 
-    updateCurrentContent(fixture.id, { body: '# Changed after lost response\n\nNew canonical signature.' });
+    expectedUpdatedAt = updateCurrentContent(fixture.id, {
+      body: '# Changed after lost response\n\nNew canonical signature.',
+    }).updated_at;
     response = await publish('lost-response-operation-0002');
     assert.equal(response.status, 409);
     assert.match((await response.json()).error, /operationId|内容版本|发布参数/);
@@ -1619,11 +1634,17 @@ test('POST publish-platform records sequential jobs without changing aggregate c
     });
     const port = await listenOnRandomPort(testServer);
     const endpoint = `http://127.0.0.1:${port}/api/content/${encodeURIComponent(fixture.id)}/publish-platform`;
+    const expectedUpdatedAt = currentContentUpdatedAt(fixture.id);
 
     let response = await workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ platform: ' ZHIHU ', publishMode: 'draft', operationId: 'sequential-operation-0001' }),
+      body: JSON.stringify({
+        platform: ' ZHIHU ',
+        publishMode: 'draft',
+        operationId: 'sequential-operation-0001',
+        expectedUpdatedAt,
+      }),
     });
     assert.equal(response.status, 200);
     let result = await response.json();
@@ -1643,7 +1664,12 @@ test('POST publish-platform records sequential jobs without changing aggregate c
     response = await workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ platform: 'juejin', publishMode: 'direct', operationId: 'sequential-operation-0002' }),
+      body: JSON.stringify({
+        platform: 'juejin',
+        publishMode: 'direct',
+        operationId: 'sequential-operation-0002',
+        expectedUpdatedAt,
+      }),
     });
     assert.equal(response.status, 200);
     result = await response.json();
@@ -1665,6 +1691,237 @@ test('POST publish-platform records sequential jobs without changing aggregate c
     cleanupPublishStateFixture(fixture);
   }
 });
+
+for (const mode of ['single', 'batch']) {
+  test(`stale canonical revision rejects ${mode} publish before any publisher call`, async () => {
+    let fixture;
+    let testServer;
+    let publisherCalls = 0;
+    try {
+      fixture = createPublishStateFixture({
+        key: `stale-${mode}-publish-admission`,
+        planDate: mode === 'single' ? '2099-06-11' : '2099-06-12',
+        selectedPlatforms: ['weixin'],
+        contentStatus: '已排版',
+        planStatus: '已排版',
+      });
+      const admitted = getDashboardData().contents.find(item => item.id === fixture.id);
+      const expectedUpdatedAt = admitted.updated_at;
+      const newer = updateContent(fixture.id, canonicalRevisionPayload(admitted, {
+        title: `Second-tab before ${mode} publish`,
+      }));
+      const jobsBefore = db.prepare('SELECT COUNT(*) AS count FROM publish_jobs WHERE content_id = ?').get(fixture.id).count;
+      testServer = createDashboardServer({
+        preflight: async () => null,
+        platformPublisher: async () => {
+          publisherCalls += 1;
+          return { output: 'must not run', info: { status: 'success' } };
+        },
+      });
+      const port = await listenOnRandomPort(testServer);
+      const endpoint = mode === 'single'
+        ? `http://127.0.0.1:${port}/api/content/${fixture.id}/publish-platform`
+        : `http://127.0.0.1:${port}/api/publish`;
+      const payload = mode === 'single'
+        ? {
+          platform: 'zhihu',
+          publishMode: 'direct',
+          operationId: 'stale-single-admission-0001',
+          expectedUpdatedAt,
+        }
+        : {
+          contentId: fixture.id,
+          platforms: ['zhihu'],
+          publishMode: 'direct',
+          operationId: 'stale-batch-admission-0001',
+          expectedUpdatedAt,
+        };
+      const response = await workbenchFetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const result = await response.json();
+
+      assert.equal(response.status, 409);
+      assert.equal(result.ok, false);
+      assert.match(result.error, /其他|更新|版本|冲突/);
+      assert.equal(publisherCalls, 0);
+      assert.equal(db.prepare('SELECT COUNT(*) AS count FROM publish_jobs WHERE content_id = ?').get(fixture.id).count, jobsBefore);
+      assert.equal(db.prepare('SELECT updated_at FROM contents WHERE id = ?').get(fixture.id).updated_at, newer.updated_at);
+    } finally {
+      await closeServer(testServer);
+      cleanupPublishStateFixture(fixture);
+    }
+  });
+}
+
+test('single and batch publish endpoints require a nonempty expectedUpdatedAt before publisher admission', async () => {
+  let fixture;
+  let testServer;
+  let publisherCalls = 0;
+  try {
+    fixture = createPublishStateFixture({
+      key: 'publish-revision-required',
+      planDate: '2099-06-13',
+      selectedPlatforms: ['zhihu'],
+      contentStatus: '已排版',
+      planStatus: '已排版',
+    });
+    testServer = createDashboardServer({
+      preflight: async () => null,
+      platformPublisher: async () => {
+        publisherCalls += 1;
+        return { output: 'must not run', info: { status: 'success' } };
+      },
+    });
+    const port = await listenOnRandomPort(testServer);
+    const requests = [
+      {
+        url: `http://127.0.0.1:${port}/api/content/${fixture.id}/publish-platform`,
+        body: {
+          platform: 'zhihu',
+          publishMode: 'direct',
+          operationId: 'missing-single-revision-0001',
+        },
+      },
+      {
+        url: `http://127.0.0.1:${port}/api/publish`,
+        body: {
+          contentId: fixture.id,
+          platforms: ['zhihu'],
+          publishMode: 'direct',
+          operationId: 'missing-batch-revision-0001',
+          expectedUpdatedAt: '',
+        },
+      },
+    ];
+    for (const request of requests) {
+      const response = await workbenchFetch(request.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(request.body),
+      });
+      assert.equal(response.status, 400);
+      assert.match((await response.json()).error, /expectedUpdatedAt/);
+    }
+    assert.equal(publisherCalls, 0);
+  } finally {
+    await closeServer(testServer);
+    cleanupPublishStateFixture(fixture);
+  }
+});
+
+for (const mode of ['single', 'batch']) {
+  test(`canonical update during long ${mode} publish preserves snapshot job results without touching current content`, async () => {
+    let fixture;
+    let testServer;
+    let publisherCalls = 0;
+    let releasePublisher;
+    let signalPublisherStarted;
+    let publishedTitle = '';
+    let publishedMarkdown = '';
+    const publisherGate = new Promise(resolve => { releasePublisher = resolve; });
+    const publisherStarted = new Promise(resolve => { signalPublisherStarted = resolve; });
+    const operationId = `long-${mode}-canonical-conflict-0001`;
+    try {
+      fixture = createPublishStateFixture({
+        key: `long-${mode}-canonical-conflict`,
+        planDate: mode === 'single' ? '2099-06-14' : '2099-06-15',
+        selectedPlatforms: ['weixin'],
+        contentStatus: '已排版',
+        planStatus: '已排版',
+      });
+      const admitted = getDashboardData().contents.find(item => item.id === fixture.id);
+      const expectedUpdatedAt = admitted.updated_at;
+      testServer = createDashboardServer({
+        preflight: async () => null,
+        platformPublisher: async (markdownFile, platform, title) => {
+          publisherCalls += 1;
+          publishedTitle = title;
+          publishedMarkdown = fs.readFileSync(markdownFile, 'utf8');
+          signalPublisherStarted();
+          await publisherGate;
+          return {
+            output: `snapshot publish ${platform}`,
+            info: {
+              status: 'success',
+              message: 'snapshot published',
+              url: 'https://example.invalid/snapshot',
+              postId: `snapshot-${mode}`,
+            },
+          };
+        },
+      });
+      const port = await listenOnRandomPort(testServer);
+      const endpoint = mode === 'single'
+        ? `http://127.0.0.1:${port}/api/content/${fixture.id}/publish-platform`
+        : `http://127.0.0.1:${port}/api/publish`;
+      const payload = mode === 'single'
+        ? { platform: 'zhihu', publishMode: 'direct', operationId, expectedUpdatedAt }
+        : {
+          contentId: fixture.id,
+          platforms: ['zhihu'],
+          publishMode: 'direct',
+          operationId,
+          expectedUpdatedAt,
+        };
+      const pendingResponse = workbenchFetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      await publisherStarted;
+
+      const newer = updateContent(fixture.id, canonicalRevisionPayload(admitted, {
+        title: `Second-tab during ${mode} publish`,
+        summary: `New canonical summary during ${mode} publish`,
+      }));
+      const currentBeforeCompletion = db.prepare(`
+        SELECT title, summary, body, type, status, layout_html, selected_platforms, updated_at
+        FROM contents WHERE id = ?
+      `).get(fixture.id);
+      releasePublisher();
+      const response = await pendingResponse;
+      const result = await response.json();
+
+      assert.equal(response.status, 200);
+      assert.equal(result.ok, true);
+      assert.equal(result.canonicalConflict, true);
+      assert.equal(result.needsReload, true);
+      assert.equal(result.sourceUpdatedAt, expectedUpdatedAt);
+      assert.equal(result.content, null);
+      assert.equal(result.job.content_id, fixture.id);
+      assert.deepEqual(result.job.results.map(item => [item.platform, item.status]), [['zhihu', 'success']]);
+      assert.equal(publisherCalls, 1);
+      assert.equal(publishedTitle, admitted.title);
+      assert.match(publishedMarkdown, new RegExp(`# ${admitted.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+      assert.doesNotMatch(publishedMarkdown, new RegExp(newer.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+      assert.deepEqual(db.prepare(`
+        SELECT title, summary, body, type, status, layout_html, selected_platforms, updated_at
+        FROM contents WHERE id = ?
+      `).get(fixture.id), currentBeforeCompletion);
+
+      const replayResponse = await workbenchFetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const replay = await replayResponse.json();
+      assert.equal(replayResponse.status, 200);
+      assert.equal(replay.cached, true);
+      assert.equal(replay.canonicalConflict, true);
+      assert.equal(replay.needsReload, true);
+      assert.equal(replay.content, null);
+      assert.deepEqual(replay.job.results.map(item => [item.platform, item.status]), [['zhihu', 'success']]);
+      assert.equal(publisherCalls, 1);
+    } finally {
+      releasePublisher?.();
+      await closeServer(testServer);
+      cleanupPublishStateFixture(fixture);
+    }
+  });
+}
 
 test('POST publish-platform keeps state stable across concurrent single-platform jobs', async () => {
   let fixture;
@@ -1706,10 +1963,11 @@ test('POST publish-platform keeps state stable across concurrent single-platform
     });
     const port = await listenOnRandomPort(testServer);
     const endpoint = `http://127.0.0.1:${port}/api/content/${encodeURIComponent(fixture.id)}/publish-platform`;
+    const expectedUpdatedAt = currentContentUpdatedAt(fixture.id);
     const request = (platform, publishMode, operationId) => workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ platform, publishMode, operationId }),
+      body: JSON.stringify({ platform, publishMode, operationId, expectedUpdatedAt }),
     });
 
     const responses = await Promise.all([
@@ -1781,10 +2039,11 @@ test('POST publish-platform rejects an in-flight duplicate and releases the guar
     });
     const port = await listenOnRandomPort(testServer);
     const endpoint = `http://127.0.0.1:${port}/api/content/${fixture.id}/publish-platform`;
+    const expectedUpdatedAt = currentContentUpdatedAt(fixture.id);
     const publish = operationId => workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId }),
+      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId, expectedUpdatedAt }),
     });
 
     const operationId = 'in-flight-operation-0001';
@@ -1814,6 +2073,7 @@ test('POST publish-platform rejects an in-flight duplicate and releases the guar
         platform: 'juejin',
         publishMode: 'direct',
         operationId,
+        expectedUpdatedAt,
       }),
     });
     assert.equal(conflictingResponse.status, 409);
@@ -1855,10 +2115,11 @@ test('single publish completed cache expires by TTL and evicts oldest entries wh
     });
     const port = await listenOnRandomPort(testServer);
     const endpoint = `http://127.0.0.1:${port}/api/content/${fixture.id}/publish-platform`;
+    let expectedUpdatedAt = currentContentUpdatedAt(fixture.id);
     const publish = operationId => workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId }),
+      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId, expectedUpdatedAt }),
     });
 
     let response = await publish('cache-policy-operation-0001');
@@ -1872,11 +2133,11 @@ test('single publish completed cache expires by TTL and evicts oldest entries wh
     assert.equal(response.status, 200);
     assert.equal(calls, 2);
 
-    updateCurrentContent(fixture.id, { body: '# Cache version two\n\nChanged canonical body.' });
+    expectedUpdatedAt = updateCurrentContent(fixture.id, { body: '# Cache version two\n\nChanged canonical body.' }).updated_at;
     response = await publish('cache-policy-operation-0002');
     assert.equal(response.status, 200);
     assert.equal(calls, 3);
-    updateCurrentContent(fixture.id, { body: '# Cache version three\n\nChanged canonical body again.' });
+    expectedUpdatedAt = updateCurrentContent(fixture.id, { body: '# Cache version three\n\nChanged canonical body again.' }).updated_at;
     response = await publish('cache-policy-operation-0001');
     assert.equal(response.status, 200);
     assert.equal(calls, 4);
@@ -1914,6 +2175,7 @@ test('batch publish journal survives server restart, replays completion, and rej
       planStatus: '已排版',
     });
     requestBody.contentId = fixture.id;
+    requestBody.expectedUpdatedAt = currentContentUpdatedAt(fixture.id);
     const startServer = async () => {
       const instance = createDashboardServer({
         operationsFile,
@@ -2025,7 +2287,12 @@ test('POST publish-platform validates one known platform, mode, body, and conten
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId }),
+        body: JSON.stringify({
+          platform: 'zhihu',
+          publishMode: 'direct',
+          operationId,
+          expectedUpdatedAt: content.updated_at,
+        }),
       }
     );
     assert.equal(missingResponse.status, 404);
@@ -2059,6 +2326,7 @@ test('POST /api/publish keeps the existing batch publisher contract', async () =
       platformPublisher: successfulPlatformPublisher(platformCalls),
     });
     const port = await listenOnRandomPort(testServer);
+    let expectedUpdatedAt = currentContentUpdatedAt(fixture.id);
     let response = await workbenchFetch(`http://127.0.0.1:${port}/api/publish`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2067,6 +2335,7 @@ test('POST /api/publish keeps the existing batch publisher contract', async () =
         platforms: ['zhihu', 'juejin'],
         publishMode: 'draft',
         operationId: 'batch-contract-operation-0001',
+        expectedUpdatedAt,
       }),
     });
     let result = await response.json();
@@ -2090,6 +2359,7 @@ test('POST /api/publish keeps the existing batch publisher contract', async () =
       planStatus: '草稿已保存',
     });
 
+    expectedUpdatedAt = currentContentUpdatedAt(fixture.id);
     response = await workbenchFetch(`http://127.0.0.1:${port}/api/publish`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2097,6 +2367,7 @@ test('POST /api/publish keeps the existing batch publisher contract', async () =
         contentId: fixture.id,
         platforms: ['weixin'],
         operationId: 'batch-contract-operation-0002',
+        expectedUpdatedAt,
       }),
     });
     result = await response.json();
@@ -2209,7 +2480,7 @@ test('fixed-clock save then layout keeps the revision monotonic and rejects the 
       content = importContent({ filename: 'layout-aba.md', body: '# Layout ABA\n\nOriginal body.' });
       const original = { ...content };
       const saved = updateContent(content.id, canonicalRevisionPayload(original, { summary: 'Saved summary' }));
-      const laidOut = layoutContent(content.id);
+      const laidOut = layoutContent(content.id, undefined, saved.updated_at);
 
       assert.throws(
         () => updateContent(content.id, canonicalRevisionPayload(original, { title: 'Stale layout writer' })),
@@ -2236,7 +2507,7 @@ test('fixed-clock save then local draft keeps the revision monotonic and rejects
       });
       const original = { ...fixture };
       const saved = updateContent(fixture.id, canonicalRevisionPayload(original, { summary: 'Saved summary' }));
-      saveLocalDraft(fixture.id, ['zhihu']);
+      saveLocalDraft(fixture.id, ['zhihu'], saved.updated_at);
       const drafted = db.prepare('SELECT updated_at FROM contents WHERE id = ?').get(fixture.id);
 
       assert.throws(
@@ -2369,7 +2640,10 @@ test('layoutContent rolls back content, plan, activity, and revision when its ac
       END
     `);
 
-    assert.throws(() => layoutContent(fixture.id), /forced layout activity failure/);
+    assert.throws(
+      () => layoutContent(fixture.id, undefined, originalContent.updated_at),
+      /forced layout activity failure/
+    );
     assert.deepEqual(db.prepare(`
       SELECT title, summary, body, type, status, layout_html, selected_platforms, updated_at
       FROM contents WHERE id = ?
@@ -2423,7 +2697,7 @@ test('saveLocalDraft rolls back content, plan, jobs, results, activity, and revi
     `);
 
     assert.throws(
-      () => saveLocalDraft(fixture.id, ['zhihu']),
+      () => saveLocalDraft(fixture.id, ['zhihu'], originalContent.updated_at),
       /forced local draft result failure/
     );
     assert.deepEqual(db.prepare(`
@@ -2450,6 +2724,101 @@ test('saveLocalDraft rolls back content, plan, jobs, results, activity, and revi
   } finally {
     db.exec(`DROP TRIGGER IF EXISTS ${triggerName}`);
     cleanupPublishStateFixture(fixture);
+  }
+});
+
+for (const operation of ['layout', 'draft']) {
+  test(`stale ${operation} admission returns 409 before derived writes and keeps the stale token unusable`, async () => {
+    let fixture;
+    let testServer;
+    try {
+      fixture = createPublishStateFixture({
+        key: `stale-${operation}-admission`,
+        planDate: operation === 'layout' ? '2099-06-09' : '2099-06-10',
+        selectedPlatforms: ['weixin'],
+        contentStatus: '已排版',
+        planStatus: '已排版',
+      });
+      const initial = getDashboardData().contents.find(item => item.id === fixture.id);
+      const saved = updateContent(fixture.id, canonicalRevisionPayload(initial, { summary: 'Initiating tab save' }));
+      const expectedUpdatedAt = saved.updated_at;
+      const newer = updateContent(fixture.id, canonicalRevisionPayload(saved, {
+        title: `Second-tab ${operation} update`,
+      }));
+      const contentBefore = db.prepare(`
+        SELECT title, summary, body, type, status, layout_html, selected_platforms, updated_at
+        FROM contents WHERE id = ?
+      `).get(fixture.id);
+      const planBefore = db.prepare('SELECT topic, type, status, updated_at FROM weekly_plans WHERE date = ?')
+        .get(fixture.planDate);
+      const jobsBefore = db.prepare('SELECT COUNT(*) AS count FROM publish_jobs WHERE content_id = ?').get(fixture.id).count;
+      const activityBefore = db.prepare("SELECT COUNT(*) AS count FROM activity WHERE target_type = 'content' AND target_id = ?")
+        .get(fixture.id).count;
+      testServer = createDashboardServer();
+      const port = await listenOnRandomPort(testServer);
+      const endpoint = operation === 'layout'
+        ? `http://127.0.0.1:${port}/api/content/${fixture.id}/layout`
+        : `http://127.0.0.1:${port}/api/content/${fixture.id}/save-draft`;
+      const response = await workbenchFetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          expectedUpdatedAt,
+          ...(operation === 'draft' ? { platforms: ['zhihu'] } : {}),
+        }),
+      });
+      const result = await response.json();
+
+      assert.equal(response.status, 409);
+      assert.equal(result.ok, false);
+      assert.match(result.error, /其他|更新|版本|冲突/);
+      assert.deepEqual(db.prepare(`
+        SELECT title, summary, body, type, status, layout_html, selected_platforms, updated_at
+        FROM contents WHERE id = ?
+      `).get(fixture.id), contentBefore);
+      assert.deepEqual(
+        db.prepare('SELECT topic, type, status, updated_at FROM weekly_plans WHERE date = ?').get(fixture.planDate),
+        planBefore
+      );
+      assert.equal(db.prepare('SELECT COUNT(*) AS count FROM publish_jobs WHERE content_id = ?').get(fixture.id).count, jobsBefore);
+      assert.equal(
+        db.prepare("SELECT COUNT(*) AS count FROM activity WHERE target_type = 'content' AND target_id = ?").get(fixture.id).count,
+        activityBefore
+      );
+      assert.equal(db.prepare('SELECT updated_at FROM contents WHERE id = ?').get(fixture.id).updated_at, newer.updated_at);
+      assert.throws(
+        () => updateContent(fixture.id, canonicalRevisionPayload(saved, { title: 'Laundered stale overwrite' })),
+        error => error.statusCode === 409
+      );
+    } finally {
+      await closeServer(testServer);
+      cleanupPublishStateFixture(fixture);
+    }
+  });
+}
+
+test('derived layout and draft endpoints require a nonempty expectedUpdatedAt', async () => {
+  let content;
+  let testServer;
+  try {
+    content = importContent({ filename: 'derived-revision-required.md', body: '# Required revision\n\nBody.' });
+    testServer = createDashboardServer();
+    const port = await listenOnRandomPort(testServer);
+    for (const [suffix, payload] of [
+      ['layout', {}],
+      ['save-draft', { platforms: ['zhihu'], expectedUpdatedAt: '' }],
+    ]) {
+      const response = await workbenchFetch(`http://127.0.0.1:${port}/api/content/${content.id}/${suffix}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      assert.equal(response.status, 400);
+      assert.match((await response.json()).error, /expectedUpdatedAt/);
+    }
+  } finally {
+    await closeServer(testServer);
+    cleanupImportedContent(content);
   }
 });
 
@@ -2847,7 +3216,10 @@ test('save-draft endpoint preserves job fields and adds normalized content metad
     const response = await workbenchFetch(`http://127.0.0.1:${port}/api/content/${fixture.id}/save-draft`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ platforms: ['zhihu'] }),
+      body: JSON.stringify({
+        platforms: ['zhihu'],
+        expectedUpdatedAt: currentContentUpdatedAt(fixture.id),
+      }),
     });
     const result = await response.json();
 

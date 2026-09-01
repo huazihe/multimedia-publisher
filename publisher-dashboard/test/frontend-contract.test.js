@@ -351,7 +351,10 @@ test('implements import, lazy adaptation preview, templated WeChat layout, and s
 
   assert.match(appSource, /<iframe[^>]*\ssandbox\s+srcdoc=/s);
   assert.match(appSource, /<pre[^>]*>\$\{escapeHtml\([^)]*(?:content|markdown|text)/s);
-  assert.match(appSource, /body:\s*JSON\.stringify\(\{\s*template\s*\}\)/);
+  assert.match(appSource, /async function layoutContent[\s\S]*?expectedUpdatedAt[\s\S]*?\/layout/);
+  assert.match(appSource, /async function saveDraft[\s\S]*?expectedUpdatedAt[\s\S]*?\/save-draft/);
+  assert.match(appSource, /async function confirmSinglePlatformPublish[\s\S]*?expectedUpdatedAt[\s\S]*?\/publish-platform/);
+  assert.match(appSource, /async function publishContent[\s\S]*?expectedUpdatedAt[\s\S]*?\/api\/publish/);
   assert.match(appSource, /if\s*\((?:templateProvided\s*&&\s*)?!template\)\s*(?:\{|)\s*throw\s+new Error/);
   assert.match(appSource, /mode:\s*['"]draft['"]/);
   assert.match(appSource, /mode:\s*['"]direct['"]/);

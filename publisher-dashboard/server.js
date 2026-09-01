@@ -258,10 +258,19 @@ function normalizeOperationSignature(signature) {
     : [];
   const publishMode = signature.publishMode === 'draft' ? 'draft' : signature.publishMode === 'direct' ? 'direct' : '';
   const contentHash = String(signature.contentHash || '').toLowerCase();
+  const expectedUpdatedAt = typeof signature.expectedUpdatedAt === 'string'
+    ? signature.expectedUpdatedAt
+    : '';
   if (!contentId || !platforms.length || !publishMode || !/^[a-f0-9]{64}$/.test(contentHash)) {
     throw new Error('发布操作签名无效');
   }
-  return { contentId, platforms, publishMode, contentHash };
+  return {
+    contentId,
+    platforms,
+    publishMode,
+    contentHash,
+    ...(expectedUpdatedAt ? { expectedUpdatedAt } : {}),
+  };
 }
 
 function operationSignatureKey(signature) {
@@ -278,10 +287,18 @@ function normalizeJournalResult(result) {
       status: String(item?.status || ''),
     })).filter(item => item.platform && item.status)
     : [];
+  const sourceUpdatedAt = typeof result.sourceUpdatedAt === 'string' ? result.sourceUpdatedAt : '';
+  const contentUpdatedAt = typeof result.contentUpdatedAt === 'string' ? result.contentUpdatedAt : '';
+  const canonicalConflict = result.canonicalConflict === true;
+  const needsReload = result.needsReload === true || canonicalConflict;
   return {
     ...(jobId ? { jobId } : {}),
     ...(jobStatus ? { jobStatus } : {}),
     ...(platformResults.length ? { platformResults } : {}),
+    ...(sourceUpdatedAt ? { sourceUpdatedAt } : {}),
+    ...(contentUpdatedAt ? { contentUpdatedAt } : {}),
+    ...(canonicalConflict ? { canonicalConflict: true } : {}),
+    ...(needsReload ? { needsReload: true } : {}),
   };
 }
 
@@ -364,8 +381,22 @@ function createOperationJournal(options = {}) {
   return {
     filePath,
     get(operationId) {
-      reload();
+      if (reloadAndPrune()) persist();
       return records.find(record => record.operationId === operationId) || null;
+    },
+    findBySourceRevision({ contentId, platforms, publishMode, expectedUpdatedAt }) {
+      if (reloadAndPrune()) persist();
+      const normalizedPlatforms = [...new Set((Array.isArray(platforms) ? platforms : [])
+        .map(platform => String(platform || '').trim().toLowerCase())
+        .filter(Boolean))].sort();
+      return records.find(record => {
+        const signature = normalizeOperationSignature(record.signature);
+        return signature.contentId === String(contentId || '')
+          && signature.publishMode === publishMode
+          && signature.expectedUpdatedAt === expectedUpdatedAt
+          && (!normalizedPlatforms.length
+            || JSON.stringify(signature.platforms) === JSON.stringify(normalizedPlatforms));
+      }) || null;
     },
     begin(operationId, signature) {
       const canonicalSignature = normalizeOperationSignature(signature);
@@ -2190,6 +2221,13 @@ function validateContentFieldLimits(fields) {
   }
 }
 
+function validateExpectedUpdatedAt(value) {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw statusError('expectedUpdatedAt 必须是非空字符串', 400);
+  }
+  return value;
+}
+
 function updateContent(contentId, payload = {}) {
   const input = validateContentUpdatePayload(payload);
   return runTransaction(() => {
@@ -2264,14 +2302,18 @@ function generateContent(planDate, explicitTopic) {
   return normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
 }
 
-function layoutContent(contentId, template) {
-  const templateProvided = arguments.length >= 2;
+function layoutContent(contentId, template, expectedUpdatedAt) {
+  const templateProvided = template !== undefined || arguments.length === 2;
   if (templateProvided && (typeof template !== 'string' || !template.trim())) {
     throw statusError('template 必须是非空字符串', 400);
   }
+  const expectedRevision = validateExpectedUpdatedAt(expectedUpdatedAt);
   return runTransaction(() => {
     const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
     if (!content) throw new Error('内容不存在');
+    if (content.updated_at !== expectedRevision) {
+      throw statusError('文章已在其他标签页更新，请重新加载最新版本', 409);
+    }
     const html = templateProvided
       ? renderLayoutTemplate(template, {
         title: content.title,
@@ -2283,7 +2325,7 @@ function layoutContent(contentId, template) {
       contentId,
       "layout_html = ?, status = '已排版'",
       [html],
-      { expectedUpdatedAt: content.updated_at }
+      { expectedUpdatedAt: expectedRevision }
     );
     if (mutation.changes === 0) throw statusError('文章已被更新，请重新生成排版', 409);
     if (content.plan_date) {
@@ -2297,10 +2339,14 @@ function layoutContent(contentId, template) {
   });
 }
 
-function saveLocalDraft(contentId, platforms = []) {
+function saveLocalDraft(contentId, platforms = [], expectedUpdatedAt) {
+  const expectedRevision = validateExpectedUpdatedAt(expectedUpdatedAt);
   return runTransaction(() => {
     const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
     if (!content) throw new Error('内容不存在');
+    if (content.updated_at !== expectedRevision) {
+      throw statusError('文章已在其他标签页更新，请重新加载最新版本', 409);
+    }
     const selected = (Array.isArray(platforms) ? platforms : content.selected_platforms)
       .map(platform => String(platform || '').trim().toLowerCase())
       .filter(platform => platform && !RETIRED_PLATFORM_IDS.includes(platform));
@@ -2308,7 +2354,7 @@ function saveLocalDraft(contentId, platforms = []) {
       contentId,
       "status = '草稿已保存', selected_platforms = ?",
       [encodeJson(selected)],
-      { expectedUpdatedAt: content.updated_at }
+      { expectedUpdatedAt: expectedRevision }
     );
     if (mutation.changes === 0) throw statusError('文章已被更新，请重新保存草稿', 409);
     if (content.plan_date) {
@@ -2331,7 +2377,7 @@ function saveLocalDraft(contentId, platforms = []) {
     const job = normalizeJob(one('SELECT * FROM publish_jobs WHERE id = ?', jobId));
     const updatedContent = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
     if (!job || !updatedContent) throw new Error('草稿结果读取失败');
-    return { job, content: updatedContent };
+    return { job, content: updatedContent, sourceUpdatedAt: expectedRevision };
   });
 }
 
@@ -2637,12 +2683,23 @@ function validatePublishOperationId(operationId) {
   return operationId;
 }
 
-function buildPublishOperationSignature(content, platforms, publishMode) {
+function immutableSnapshot(value) {
+  if (Array.isArray(value)) return Object.freeze(value.map(item => immutableSnapshot(item)));
+  if (value && typeof value === 'object') {
+    return Object.freeze(Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, immutableSnapshot(item)])
+    ));
+  }
+  return value;
+}
+
+function buildPublishOperationSignature(content, platforms, publishMode, expectedUpdatedAt = '') {
   return normalizeOperationSignature({
     contentId: content.id,
     platforms: [...platforms].sort(),
     publishMode,
     contentHash: createHash('sha256').update(contentToMarkdown(content), 'utf8').digest('hex'),
+    expectedUpdatedAt,
   });
 }
 
@@ -2654,30 +2711,51 @@ function journalResultForPublish(result) {
       platform: item.platform,
       status: item.status,
     })),
+    sourceUpdatedAt: result.sourceUpdatedAt,
+    contentUpdatedAt: result.content?.updated_at || '',
+    canonicalConflict: result.canonicalConflict === true,
+    needsReload: result.needsReload === true,
   };
 }
 
 function replayedPublishResult(record) {
   const jobId = record.result?.jobId;
   const storedJob = jobId ? normalizeJob(one('SELECT * FROM publish_jobs WHERE id = ?', jobId)) : null;
-  const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', record.signature.contentId));
-  if (storedJob) return { job: storedJob, rawOutput: '', content };
-  return {
-    job: {
+  const storedContent = normalizeContent(one('SELECT * FROM contents WHERE id = ?', record.signature.contentId));
+  const sourceUpdatedAt = record.result?.sourceUpdatedAt || record.signature.expectedUpdatedAt || '';
+  const contentUpdatedAt = record.result?.contentUpdatedAt || '';
+  const canonicalConflict = record.result?.canonicalConflict === true
+    || !storedContent
+    || !contentUpdatedAt
+    || storedContent.updated_at !== contentUpdatedAt;
+  const job = storedJob || {
       id: jobId || record.operationId,
       content_id: record.signature.contentId,
       status: record.result?.jobStatus || 'published',
       platforms: record.signature.platforms,
       results: record.result?.platformResults || [],
-    },
+    };
+  return {
+    job,
     rawOutput: '',
-    content,
+    content: canonicalConflict ? null : storedContent,
+    sourceUpdatedAt,
+    canonicalConflict,
+    needsReload: canonicalConflict || record.result?.needsReload === true,
   };
 }
 
 async function publishContent(contentId, platforms = [], options = {}) {
-  const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
-  if (!content) throw new Error('内容不存在');
+  const loadedContent = options.contentSnapshot
+    || normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
+  if (!loadedContent) throw new Error('内容不存在');
+  const expectedUpdatedAt = validateExpectedUpdatedAt(
+    options.expectedUpdatedAt || loadedContent.updated_at
+  );
+  if (loadedContent.updated_at !== expectedUpdatedAt) {
+    throw statusError('文章已在其他标签页更新，请重新加载最新版本', 409);
+  }
+  const content = immutableSnapshot(loadedContent);
   const selected = normalizePublishPlatforms(content, platforms);
   if (!selected.length) throw new Error('请选择至少一个平台');
   const publishMode = options.publishMode === 'draft' ? 'draft' : 'direct';
@@ -2751,19 +2829,45 @@ async function publishContent(contentId, platforms = [], options = {}) {
     ? (publishMode === 'draft' ? 'draft_saved' : 'published')
     : (successCount > 0 ? 'partial_failed' : 'failed');
   db.prepare('UPDATE publish_jobs SET status = ?, updated_at = ? WHERE id = ?').run(jobStatus, now(), jobId);
+  const contentAssignments = [];
+  const contentValues = [];
   if (options.persistSelection !== false) {
-    db.prepare('UPDATE contents SET selected_platforms = ? WHERE id = ?').run(encodeJson(selected), contentId);
+    contentAssignments.push('selected_platforms = ?');
+    contentValues.push(encodeJson(selected));
   }
+  let aggregateStatus = '';
   if (options.updateAggregateStatus !== false) {
-    const aggregateStatus = jobStatus === 'published'
+    aggregateStatus = jobStatus === 'published'
       ? '已发布'
       : jobStatus === 'draft_saved' ? '草稿已保存' : '发布失败';
-    const mutation = updateContentRowWithMonotonicTimestamp(contentId, 'status = ?', [aggregateStatus]);
-    if (mutation.changes === 0) throw new Error('内容不存在');
-    if (content.plan_date) {
-      db.prepare('UPDATE weekly_plans SET status = ?, updated_at = ? WHERE date = ?')
-        .run(aggregateStatus, mutation.updatedAt, content.plan_date);
+    contentAssignments.push('status = ?');
+    contentValues.push(aggregateStatus);
+  }
+
+  let canonicalConflict = false;
+  let resultContent = null;
+  if (contentAssignments.length) {
+    const mutation = updateContentRowWithMonotonicTimestamp(
+      contentId,
+      contentAssignments.join(', '),
+      contentValues,
+      { expectedUpdatedAt }
+    );
+    if (mutation.changes === 0) {
+      canonicalConflict = true;
+    } else {
+      if (aggregateStatus && content.plan_date) {
+        db.prepare('UPDATE weekly_plans SET status = ?, updated_at = ? WHERE date = ?')
+          .run(aggregateStatus, mutation.updatedAt, content.plan_date);
+      }
+      const current = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
+      if (current?.updated_at === mutation.updatedAt) resultContent = current;
+      else canonicalConflict = true;
     }
+  } else {
+    const current = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
+    if (current?.updated_at === expectedUpdatedAt) resultContent = current;
+    else canonicalConflict = true;
   }
 
   const activityVerb = publishMode === 'draft' ? '保存平台草稿' : '一键发布';
@@ -2771,9 +2875,12 @@ async function publishContent(contentId, platforms = [], options = {}) {
   const result = {
     job: normalizeJob(one('SELECT * FROM publish_jobs WHERE id = ?', jobId)),
     rawOutput: rawOutputs.join('\n\n'),
-    content: normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId)),
+    content: canonicalConflict ? null : resultContent,
+    sourceUpdatedAt: expectedUpdatedAt,
+    canonicalConflict,
+    needsReload: canonicalConflict,
   };
-  if (!result.job || !result.content) throw new Error('发布结果读取失败');
+  if (!result.job || (!canonicalConflict && !result.content)) throw new Error('发布结果读取失败');
   Object.defineProperty(result, PUBLISH_EXECUTION_META, {
     value: { publisherCallsStarted, successCount, jobStatus },
     enumerable: false,
@@ -2815,11 +2922,18 @@ function runFakeAiCommand(payload) {
     progress.push('正文已生成，可进入内容中心审核');
   } else if (type === 'layout_preview') {
     if (!payload.contentId) throw new Error('请选择要排版的内容');
-    result = { content: layoutContent(payload.contentId) };
+    const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', payload.contentId));
+    if (!content) throw new Error('内容不存在');
+    result = {
+      content: layoutContent(payload.contentId, undefined, content.updated_at),
+      sourceUpdatedAt: content.updated_at,
+    };
     progress.push('排版预览已生成');
   } else if (type === 'save_draft') {
     if (!payload.contentId) throw new Error('请选择要保存的内容');
-    result = saveLocalDraft(payload.contentId, payload.platforms || []);
+    const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', payload.contentId));
+    if (!content) throw new Error('内容不存在');
+    result = saveLocalDraft(payload.contentId, payload.platforms || [], content.updated_at);
     progress.push('已保存到内容中心草稿');
   } else {
     progress.push('当前为 V1.0 假数据流程，已记录指令');
@@ -3052,15 +3166,46 @@ function createDashboardServer(options = {}) {
     contentId,
     platforms,
     publishMode,
+    expectedUpdatedAt,
     persistSelection = true,
     updateAggregateStatus = true,
   }) => {
     validatePublishOperationId(operationId);
+    const expectedRevision = validateExpectedUpdatedAt(expectedUpdatedAt);
     if (publishMode !== 'draft' && publishMode !== 'direct') {
       throw statusError('publishMode 必须是 draft 或 direct', 400);
     }
-    const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
-    if (!content) throw statusError('内容不存在', 404);
+    const requestedPlatforms = normalizePublishPlatforms(null, platforms);
+    const existingOperation = operationJournal.get(operationId);
+    const matchingSourceOperation = existingOperation || operationJournal.findBySourceRevision({
+      contentId,
+      platforms: requestedPlatforms,
+      publishMode,
+      expectedUpdatedAt: expectedRevision,
+    });
+    if (existingOperation || (matchingSourceOperation && matchingSourceOperation.state !== 'failed')) {
+      const priorSignature = normalizeOperationSignature(matchingSourceOperation.signature);
+      const replaySignature = {
+        ...priorSignature,
+        contentId: String(contentId || ''),
+        platforms: requestedPlatforms.length ? requestedPlatforms : priorSignature.platforms,
+        publishMode,
+        expectedUpdatedAt: expectedRevision,
+      };
+      const priorAdmission = operationJournal.begin(operationId, replaySignature);
+      if (priorAdmission.kind === 'replay') {
+        return { ...replayedPublishResult(priorAdmission.record), cached: true };
+      }
+    }
+
+    const content = runTransaction(() => {
+      const current = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
+      if (!current) throw statusError('内容不存在', 404);
+      if (current.updated_at !== expectedRevision) {
+        throw statusError('文章已在其他标签页更新，请重新加载最新版本', 409);
+      }
+      return immutableSnapshot(current);
+    });
     const selected = normalizePublishPlatforms(content, platforms);
     if (!selected.length) throw statusError('请选择至少一个平台', 400);
     for (const platform of selected) {
@@ -3069,7 +3214,7 @@ function createDashboardServer(options = {}) {
       }
     }
 
-    const signature = buildPublishOperationSignature(content, selected, publishMode);
+    const signature = buildPublishOperationSignature(content, selected, publishMode, expectedRevision);
     const admission = operationJournal.begin(operationId, signature);
     if (admission.kind === 'replay') {
       return { ...replayedPublishResult(admission.record), cached: true };
@@ -3080,6 +3225,8 @@ function createDashboardServer(options = {}) {
       const result = await publishContent(contentId, selected, {
         ...publishDependencies,
         publishMode,
+        expectedUpdatedAt: expectedRevision,
+        contentSnapshot: content,
         persistSelection,
         updateAggregateStatus,
         onPublisherStart: () => { publisherStarted = true; },
@@ -3334,7 +3481,11 @@ function createDashboardServer(options = {}) {
     const contentUpdateMatch = url.pathname.match(/^\/api\/content\/([^/]+)$/);
     if (contentUpdateMatch && req.method === 'POST') {
       const body = await readBody(req, { invalidJsonStatusCode: 400 });
-      sendJson(res, { ok: true, content: updateContent(contentUpdateMatch[1], body) });
+      sendJson(res, {
+        ok: true,
+        content: updateContent(contentUpdateMatch[1], body),
+        sourceUpdatedAt: body.expectedUpdatedAt,
+      });
       return;
     }
 
@@ -3346,16 +3497,19 @@ function createDashboardServer(options = {}) {
       }
       const templateProvided = Object.prototype.hasOwnProperty.call(body, 'template');
       const content = templateProvided
-        ? layoutContent(layoutMatch[1], body.template)
-        : layoutContent(layoutMatch[1]);
-      sendJson(res, { ok: true, content });
+        ? layoutContent(layoutMatch[1], body.template, body.expectedUpdatedAt)
+        : layoutContent(layoutMatch[1], undefined, body.expectedUpdatedAt);
+      sendJson(res, { ok: true, content, sourceUpdatedAt: body.expectedUpdatedAt });
       return;
     }
 
     const draftMatch = url.pathname.match(/^\/api\/content\/([^/]+)\/save-draft$/);
     if (draftMatch && req.method === 'POST') {
       const body = await readBody(req);
-      sendJson(res, { ok: true, ...saveLocalDraft(draftMatch[1], body.platforms || []) });
+      sendJson(res, {
+        ok: true,
+        ...saveLocalDraft(draftMatch[1], body.platforms || [], body.expectedUpdatedAt),
+      });
       return;
     }
 
@@ -3386,6 +3540,7 @@ function createDashboardServer(options = {}) {
         contentId,
         platforms: [platform],
         publishMode: body.publishMode,
+        expectedUpdatedAt: body.expectedUpdatedAt,
         persistSelection: false,
         updateAggregateStatus: false,
       });
@@ -3406,6 +3561,7 @@ function createDashboardServer(options = {}) {
         contentId: body.contentId,
         platforms: body.platforms || [],
         publishMode: body.publishMode || 'direct',
+        expectedUpdatedAt: body.expectedUpdatedAt,
       });
       sendJson(res, { ok: true, ...result });
       return;

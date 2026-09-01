@@ -152,6 +152,7 @@ const state = {
   contentEditRevisions: new Map(),
   contentOperationLocks: new Map(),
   contentOperationSequence: 0,
+  contentCanonicalConflicts: new Set(),
   layoutTemplates: [],
   layoutTemplatesLoaded: false,
   layoutTemplatesLoading: false,
@@ -460,6 +461,7 @@ async function loadData(options = {}) {
   }
   state.workbenchCsrfToken = res.data.csrfToken || '';
   state.data = res.data;
+  state.contentCanonicalConflicts?.clear();
   state.selectedDate ||= res.data.today;
   if (!state.planStartDate || !state.planEndDate) {
     state.planStartDate = getMonday(res.data.today);
@@ -2232,17 +2234,33 @@ async function confirmSinglePlatformPublish() {
         return false;
       }
     }
+    const expectedUpdatedAt = state.data?.contents
+      ?.find(content => String(content.id) === String(operation.contentId))?.updated_at || '';
     const result = await request(`/api/content/${encodeURIComponent(operation.contentId)}/publish-platform`, {
       method: 'POST',
       body: JSON.stringify({
         platform: operation.platform,
         publishMode: operation.mode,
         operationId: operation.operationId,
+        expectedUpdatedAt,
       }),
     });
-    mergeContentRevisionMetadata(result.content, operation.contentId);
-    const platformResult = result.job?.results?.find(item => item.platform === operation.platform);
     if (state.singlePublishOperationToken !== operation.token) return false;
+    if (result.canonicalConflict === true || result.needsReload === true) {
+      markContentCanonicalConflict(operation.contentId);
+      return false;
+    }
+    const merged = mergeContentRevisionMetadata(result.content, operation.contentId, {
+      expectedUpdatedAt,
+      sourceUpdatedAt: result.sourceUpdatedAt,
+      canonicalConflict: result.canonicalConflict,
+      needsReload: result.needsReload,
+    });
+    if (!merged) {
+      markContentCanonicalConflict(operation.contentId);
+      return false;
+    }
+    const platformResult = result.job?.results?.find(item => item.platform === operation.platform);
     if (!contentOperationIsStable(operationContext)) {
       preserveContentOperationChanges(operationContext, result.content);
       setSinglePublishFeedback(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
@@ -2272,6 +2290,10 @@ async function confirmSinglePlatformPublish() {
     return true;
   } catch (error) {
     if (state.singlePublishOperationToken === operation.token) {
+      if (error?.statusCode === 409) {
+        markContentCanonicalConflict(operation.contentId);
+        return false;
+      }
       setSinglePublishFeedback(error.message || '平台操作失败', 'error');
       toast(error.message || '平台操作失败', 'error');
     }
@@ -2347,12 +2369,37 @@ async function generateContent(date) {
   await loadData();
 }
 
-function mergeContentRevisionMetadata(serverContent, contentId = serverContent?.id) {
-  if (!serverContent || !contentId) return false;
+function markContentCanonicalConflict(
+  contentId,
+  message = '文章已在其他标签页更新，请重新加载最新版本后再继续'
+) {
+  if (!contentId) return false;
+  const target = String(contentId);
+  state.contentCanonicalConflicts ||= new Set();
+  state.contentCanonicalConflicts.add(target);
+  state.dirtyContentIds.add(target);
+  $(`[data-save-content-button="${target}"]`)?.classList.remove('is-hidden');
+  const saveState = $(`[data-content-save-state="${target}"]`);
+  if (saveState) {
+    saveState.textContent = message;
+    saveState.classList.add('is-dirty');
+  }
+  toast(message, 'error');
+  return true;
+}
+
+function mergeContentRevisionMetadata(serverContent, contentId = serverContent?.id, proof = {}) {
+  if (!serverContent || !contentId || proof.canonicalConflict === true || proof.needsReload === true) return false;
+  if (typeof proof.expectedUpdatedAt !== 'string'
+    || !proof.expectedUpdatedAt
+    || proof.sourceUpdatedAt !== proof.expectedUpdatedAt
+    || typeof serverContent.updated_at !== 'string'
+    || !serverContent.updated_at) return false;
   const target = String(contentId);
   const contentIndex = state.data?.contents?.findIndex(content => String(content.id) === target) ?? -1;
   if (contentIndex < 0) return false;
   const existing = state.data.contents[contentIndex];
+  if (existing.updated_at !== proof.expectedUpdatedAt) return false;
   state.data.contents[contentIndex] = {
     ...existing,
     ...(typeof serverContent.updated_at === 'string' ? { updated_at: serverContent.updated_at } : {}),
@@ -2366,6 +2413,10 @@ async function saveContent(id, options = {}) {
   const target = id || state.selectedContentId;
   if (!target) return { content: null, stable: true };
   const targetKey = String(target);
+  if (state.contentCanonicalConflicts?.has(targetKey)) {
+    markContentCanonicalConflict(targetKey);
+    return { content: null, stable: false, conflict: true, blocked: true };
+  }
   const ownsOperation = !options.operationContext;
   const operationContext = options.operationContext || beginContentOperation(targetKey);
   if (!operationContext) {
@@ -2378,6 +2429,7 @@ async function saveContent(id, options = {}) {
     const summaryEditor = $(`[data-content-summary="${target}"]`);
     const body = editor ? (editor.innerHTML ?? editor.value) : undefined;
     const current = state.data.contents.find(content => content.id === target);
+    const expectedUpdatedAt = current?.updated_at;
     const res = await request(`/api/content/${encodeURIComponent(target)}`, {
       method: 'POST',
       body: JSON.stringify({
@@ -2385,11 +2437,20 @@ async function saveContent(id, options = {}) {
         summary: summaryEditor?.value ?? current?.summary,
         type: current?.type,
         body: body ?? current?.body ?? '',
-        expectedUpdatedAt: current?.updated_at,
+        expectedUpdatedAt,
       }),
     });
     state.selectedContentId = res.content.id;
-    mergeContentRevisionMetadata(res.content, targetKey);
+    const merged = mergeContentRevisionMetadata(res.content, targetKey, {
+      expectedUpdatedAt,
+      sourceUpdatedAt: res.sourceUpdatedAt,
+      canonicalConflict: res.canonicalConflict,
+      needsReload: res.needsReload,
+    });
+    if (!merged) {
+      markContentCanonicalConflict(targetKey);
+      return { content: null, stable: false, conflict: true, blocked: true };
+    }
     clearPlatformPreviews(target);
     if (!contentOperationIsStable(operationContext)) {
       preserveContentOperationChanges(operationContext, res.content);
@@ -2424,10 +2485,12 @@ async function saveContent(id, options = {}) {
     if (!options.silent) toast('正文已保存');
     return { content: res.content, stable: true };
   } catch (error) {
-    if (error?.statusCode !== 409 && !options.userInitiated) throw error;
-    const message = error?.statusCode === 409
-      ? '文章已在其他标签页更新，请先复制当前修改，再重新加载最新版本'
-      : `保存失败：${error?.message || '未知错误'}。请修改后重试`;
+    if (error?.statusCode === 409) {
+      markContentCanonicalConflict(targetKey);
+      return { content: null, stable: false, conflict: true, blocked: true };
+    }
+    if (!options.userInitiated) throw error;
+    const message = `保存失败：${error?.message || '未知错误'}。请修改后重试`;
     state.dirtyContentIds.add(targetKey);
     $(`[data-save-content-button="${target}"]`)?.classList.remove('is-hidden');
     const saveState = $(`[data-content-save-state="${target}"]`);
@@ -2436,7 +2499,6 @@ async function saveContent(id, options = {}) {
       saveState.classList.add('is-dirty');
     }
     toast(message, 'error');
-    if (error?.statusCode === 409) return { content: null, stable: false, conflict: true };
     return {
       content: null,
       stable: false,
@@ -2489,11 +2551,26 @@ async function layoutContent(id, template) {
         return false;
       }
     }
-    const requestOptions = templateProvided
-      ? { method: 'POST', body: JSON.stringify({ template }) }
-      : { method: 'POST' };
+    const expectedUpdatedAt = state.data?.contents
+      ?.find(content => String(content.id) === String(target))?.updated_at || '';
+    const requestOptions = {
+      method: 'POST',
+      body: JSON.stringify({
+        expectedUpdatedAt,
+        ...(templateProvided ? { template } : {}),
+      }),
+    };
     const res = await request(`/api/content/${encodeURIComponent(target)}/layout`, requestOptions);
-    mergeContentRevisionMetadata(res.content, target);
+    const merged = mergeContentRevisionMetadata(res.content, target, {
+      expectedUpdatedAt,
+      sourceUpdatedAt: res.sourceUpdatedAt,
+      canonicalConflict: res.canonicalConflict,
+      needsReload: res.needsReload,
+    });
+    if (!merged) {
+      markContentCanonicalConflict(target);
+      return false;
+    }
     if (!contentOperationIsStable(operationContext)) {
       preserveContentOperationChanges(operationContext, res.content);
       toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
@@ -2521,6 +2598,12 @@ async function layoutContent(id, template) {
     openLayoutDialog(getSelectedContent());
     toast('排版预览已生成');
     return true;
+  } catch (error) {
+    if (error?.statusCode === 409) {
+      markContentCanonicalConflict(target);
+      return false;
+    }
+    throw error;
   } finally {
     endContentOperation(operationContext);
   }
@@ -2540,11 +2623,22 @@ async function saveDraft(id) {
         return false;
       }
     }
+    const expectedUpdatedAt = state.data?.contents
+      ?.find(content => String(content.id) === String(target))?.updated_at || '';
     const res = await request(`/api/content/${target}/save-draft`, {
       method: 'POST',
-      body: JSON.stringify({ platforms: selectedPlatforms }),
+      body: JSON.stringify({ platforms: selectedPlatforms, expectedUpdatedAt }),
     });
-    mergeContentRevisionMetadata(res.content, target);
+    const merged = mergeContentRevisionMetadata(res.content, target, {
+      expectedUpdatedAt,
+      sourceUpdatedAt: res.sourceUpdatedAt,
+      canonicalConflict: res.canonicalConflict,
+      needsReload: res.needsReload,
+    });
+    if (!merged) {
+      markContentCanonicalConflict(target);
+      return false;
+    }
     if (!contentOperationIsStable(operationContext)) {
       preserveContentOperationChanges(operationContext, res.content);
       toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
@@ -2569,6 +2663,12 @@ async function saveDraft(id) {
     }
     toast('已保存到内容中心草稿');
     return true;
+  } catch (error) {
+    if (error?.statusCode === 409) {
+      markContentCanonicalConflict(target);
+      return false;
+    }
+    throw error;
   } finally {
     endContentOperation(operationContext);
   }
@@ -2603,11 +2703,26 @@ async function publishContent(id) {
     state.selectedPlatforms = new Set(operation.platforms);
     state.lastProgress = [`正在直接发布到 ${operation.platforms.length} 个平台`, '进入多平台直发流程'];
     renderProgress(state.lastProgress);
+    const expectedUpdatedAt = state.data?.contents
+      ?.find(content => String(content.id) === String(target))?.updated_at || '';
     const result = await request('/api/publish', {
       method: 'POST',
-      body: JSON.stringify(operation),
+      body: JSON.stringify({ ...operation, expectedUpdatedAt }),
     });
-    mergeContentRevisionMetadata(result.content, target);
+    if (result.canonicalConflict === true || result.needsReload === true) {
+      markContentCanonicalConflict(target);
+      return false;
+    }
+    const merged = mergeContentRevisionMetadata(result.content, target, {
+      expectedUpdatedAt,
+      sourceUpdatedAt: result.sourceUpdatedAt,
+      canonicalConflict: result.canonicalConflict,
+      needsReload: result.needsReload,
+    });
+    if (!merged) {
+      markContentCanonicalConflict(target);
+      return false;
+    }
     if (!contentOperationIsStable(operationContext)) {
       preserveContentOperationChanges(operationContext, result.content);
       toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
@@ -2634,6 +2749,10 @@ async function publishContent(id) {
     switchView('publish');
     return true;
   } catch (error) {
+    if (error?.statusCode === 409) {
+      markContentCanonicalConflict(target);
+      return false;
+    }
     toast(error.message, 'error');
     try {
       const loaded = await loadData({ operationContext });

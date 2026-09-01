@@ -57,6 +57,12 @@ function cleanupContent(content) {
   dashboardServer.db.prepare('DELETE FROM contents WHERE id = ?').run(content.id);
 }
 
+function currentContentUpdatedAt(contentId) {
+  const current = dashboard().db.prepare('SELECT updated_at FROM contents WHERE id = ?').get(contentId);
+  assert.ok(current, `内容不存在: ${contentId}`);
+  return current.updated_at;
+}
+
 async function listenOnRandomPort() {
   const { server } = dashboard();
   if (server.listening) return server.address().port;
@@ -461,12 +467,12 @@ test('layoutContent renders a selected template and keeps the generic fallback',
       body: '# 布局集成标题\n\n## 集成小节\n\n布局集成正文',
     });
 
-    const generic = layoutContent(content.id);
+    const generic = layoutContent(content.id, undefined, content.updated_at);
     assert.equal(generic.status, '已排版');
     assert.match(generic.layout_html, /class="wechat-preview"/);
     assert.doesNotMatch(generic.layout_html, /data-wechat-template=/);
 
-    const templated = layoutContent(content.id, 'style_10.html');
+    const templated = layoutContent(content.id, 'style_10.html', generic.updated_at);
     assert.equal(templated.status, '已排版');
     assert.match(templated.layout_html, /^<!doctype html>/i);
     assert.match(templated.layout_html, /data-wechat-template="style_10\.html"/);
@@ -488,10 +494,13 @@ test('layoutContent rejects every explicitly invalid template value with status 
       body: '# 排版参数校验标题\n\n排版参数校验正文',
     });
 
-    const generic = layoutContent(content.id);
+    const generic = layoutContent(content.id, undefined, content.updated_at);
     assert.match(generic.layout_html, /class="wechat-preview"/);
     for (const invalidTemplate of [undefined, '', null, false, 42, [], {}]) {
-      assert.throws(() => layoutContent(content.id, invalidTemplate), error => {
+      const invoke = invalidTemplate === undefined
+        ? () => layoutContent(content.id, undefined)
+        : () => layoutContent(content.id, invalidTemplate, generic.updated_at);
+      assert.throws(invoke, error => {
         assert.equal(error.statusCode, 400);
         assert.match(error.message, /template.*非空字符串/);
         return true;
@@ -516,7 +525,10 @@ test('POST layout falls back only when template is omitted and rejects explicit 
     const postLayout = templateBody => workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(templateBody),
+      body: JSON.stringify({
+        ...templateBody,
+        expectedUpdatedAt: currentContentUpdatedAt(content.id),
+      }),
     });
 
     let response = await postLayout({});
@@ -549,7 +561,7 @@ test('POST layout returns 400 for malformed template paths and 404 for absent fi
     const postTemplate = template => workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ template }),
+      body: JSON.stringify({ template, expectedUpdatedAt: currentContentUpdatedAt(content.id) }),
     });
 
     for (const malformed of ['../style_10.html', 'nested/style_10.html', 'style_10.txt', 'style_10.HTML']) {
@@ -588,7 +600,10 @@ test('GET template list and POST selected layout return preview-compatible full 
     const layoutResponse = await workbenchFetch(`http://127.0.0.1:${port}/api/content/${content.id}/layout`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ template: 'style_11.html' }),
+      body: JSON.stringify({
+        template: 'style_11.html',
+        expectedUpdatedAt: currentContentUpdatedAt(content.id),
+      }),
     });
     const layoutResult = await layoutResponse.json();
     assert.equal(layoutResponse.status, 200);

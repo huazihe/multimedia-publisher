@@ -46,6 +46,11 @@ function evaluateContentRevisionMerger(state) {
   return source ? vm.runInNewContext(`(${source})`, { state }) : () => false;
 }
 
+function evaluateCanonicalConflictMarker(state, $, toast) {
+  const source = extractFunctionSource('markContentCanonicalConflict', 'mergeContentRevisionMetadata');
+  return source ? vm.runInNewContext(`(${source})`, { state, $, toast }) : () => false;
+}
+
 test('client format inference treats .txt as authoritative', () => {
   const source = extractFunctionSource('inferImportFormat', 'importedBodyByteLength');
   assert.ok(source);
@@ -225,6 +230,7 @@ test('batch double-click keeps one immutable operationId and sends one publish r
   const second = publishContent();
   assert.equal(requests.length, 1);
   assert.equal(requests[0].body.operationId, 'batch-operation-00000001');
+  assert.equal(requests[0].body.expectedUpdatedAt, '2026-09-02T08:00:00.000Z');
   assert.equal(Object.isFrozen(state.batchPublishOperation), true);
   assert.deepEqual(busyStates, [true]);
   assert.equal(await second, false);
@@ -232,6 +238,9 @@ test('batch double-click keeps one immutable operationId and sends one publish r
   releaseRequest({
     ok: true,
     content: { id: 'content-batch-double-click', status: '已发布', layout_html: '', updated_at: '2026-09-02T08:00:00.001Z' },
+    sourceUpdatedAt: '2026-09-02T08:00:00.000Z',
+    canonicalConflict: false,
+    needsReload: false,
   });
   assert.equal(await first, true);
   assert.deepEqual(busyStates, [true, false]);
@@ -279,6 +288,9 @@ test('full publish confirmation stays successful when post-success refresh fails
       return {
         job: { results: [{ platform: 'zhihu', status: 'success', message: 'published' }] },
         content: { id: 'c1', status: '已排版', layout_html: '', updated_at: '2026-09-02T08:00:00.000Z' },
+        sourceUpdatedAt: '2026-09-02T08:00:00.000Z',
+        canonicalConflict: false,
+        needsReload: false,
       };
     },
     loadData: async () => {
@@ -292,6 +304,7 @@ test('full publish confirmation stays successful when post-success refresh fails
 
   assert.equal(await confirmSinglePlatformPublish(), true);
   assert.equal(requestBody.operationId, 'full-confirm-operation-0001');
+  assert.equal(requestBody.expectedUpdatedAt, '2026-09-02T08:00:00.000Z');
   assert.equal(state.pendingSinglePublish, null);
   assert.equal(state.singlePublishSubmitting, false);
   assert.ok(events.indexOf('close') < events.indexOf('refresh-failed'));
@@ -361,11 +374,19 @@ test('single draft confirmation treats platform_draft as a successful result', a
     request: async () => ({
       job: { results: [{ platform: 'zhihu', status: 'platform_draft', message: '草稿写入完成' }] },
       content: { id: 'draft-content', status: '已排版', layout_html: '', updated_at: '2026-09-02T08:00:00.000Z' },
+      sourceUpdatedAt: '2026-09-02T08:00:00.000Z',
+      canonicalConflict: false,
+      needsReload: false,
     }),
     loadData: async () => ({ applied: true }),
     toast: (message, type) => toasts.push({ message, type: type || '' }),
     encodeURIComponent,
     mergeContentRevisionMetadata: evaluateContentRevisionMerger(state),
+    markContentCanonicalConflict: evaluateCanonicalConflictMarker(
+      state,
+      selector => selector.startsWith('[data-content-body') ? null : { close() {} },
+      (message, type) => toasts.push({ message, type: type || '' })
+    ),
   });
 
   assert.equal(await confirmSinglePlatformPublish(), true);
@@ -528,6 +549,7 @@ test('deferred save preserves a newer editor revision and merges only server met
     contentEditRevisions: new Map(),
     contentOperationLocks: new Map(),
     contentOperationSequence: 0,
+    contentCanonicalConflicts: new Set(),
     contentOperationLocks: new Map(),
     contentOperationSequence: 0,
   };
@@ -574,6 +596,7 @@ test('deferred save preserves a newer editor revision and merges only server met
     preserveContentOperationChanges,
     endContentOperation,
     mergeContentRevisionMetadata: evaluateContentRevisionMerger(state),
+    markContentCanonicalConflict: evaluateCanonicalConflictMarker(state, $, () => {}),
   });
 
   const pendingSave = saveContent(contentId, { silent: true });
@@ -594,6 +617,7 @@ test('deferred save preserves a newer editor revision and merges only server met
       status: '草稿已保存',
       updated_at: '2026-08-31T02:00:00.000Z',
     },
+    sourceUpdatedAt: content.updated_at,
   });
 
   const saveResult = await pendingSave;
@@ -651,9 +675,10 @@ test('skipReload save advances the revision token before the next save without r
     '2026-08-31T02:00:00.000Z',
     '2026-08-31T03:00:00.000Z',
   ];
+  const $ = selector => nodes.get(selector) || null;
   const saveContent = vm.runInNewContext(`(${saveSource})`, {
     state,
-    $: selector => nodes.get(selector) || null,
+    $,
     request: async (url, options) => {
       const payload = JSON.parse(options.body);
       submitted.push(payload);
@@ -668,6 +693,7 @@ test('skipReload save advances the revision token before the next save without r
           layout_html: '',
           updated_at: responseTokens[submitted.length - 1],
         },
+        sourceUpdatedAt: payload.expectedUpdatedAt,
       };
     },
     clearPlatformPreviews: () => {},
@@ -679,6 +705,7 @@ test('skipReload save advances the revision token before the next save without r
     preserveContentOperationChanges: () => { throw new Error('stable save must not preserve an unstable revision'); },
     endContentOperation: () => true,
     mergeContentRevisionMetadata: evaluateContentRevisionMerger(state),
+    markContentCanonicalConflict: evaluateCanonicalConflictMarker(state, $, () => {}),
   });
 
   const first = await saveContent(contentId, { silent: true, skipReload: true });
@@ -704,7 +731,7 @@ test('skipReload save advances the revision token before the next save without r
   assert.equal(state.contentEditRevisions.get(contentId), 2);
 });
 
-function createRefreshFailureRevisionHarness(contentId) {
+function createRefreshFailureRevisionHarness(contentId, harnessOptions = {}) {
   const editor = { isContentEditable: true, innerHTML: '<p>First local body</p>' };
   const titleEditor = { value: 'First local title' };
   const summaryEditor = { value: 'First local summary' };
@@ -729,6 +756,7 @@ function createRefreshFailureRevisionHarness(contentId) {
     contentEditRevisions: new Map([[contentId, 1]]),
     contentOperationLocks: new Map(),
     contentOperationSequence: 0,
+    contentCanonicalConflicts: new Set(),
   };
   const nodes = new Map([
     [`[data-content-body="${contentId}"]`, editor],
@@ -739,6 +767,7 @@ function createRefreshFailureRevisionHarness(contentId) {
   ]);
   const $ = selector => nodes.get(selector) || null;
   const submitted = [];
+  const derivedSubmitted = [];
   let canonicalSaveCount = 0;
   const currentResponseContent = (updatedAt, overrides = {}) => ({
     ...content,
@@ -759,17 +788,33 @@ function createRefreshFailureRevisionHarness(contentId) {
         content: currentResponseContent(
           canonicalSaveCount === 1 ? '2026-09-02T08:00:00.001Z' : '2026-09-02T08:00:00.003Z'
         ),
+        sourceUpdatedAt: payload.expectedUpdatedAt,
       };
     }
     if (url.endsWith('/layout')) {
+      const payload = JSON.parse(options.body || '{}');
+      derivedSubmitted.push({ operation: 'layout', payload });
+      if (harnessOptions.derivedConflict === 'layout') {
+        const error = new Error('文章已在其他标签页更新，请重新加载最新版本');
+        error.statusCode = 409;
+        throw error;
+      }
       return {
         content: currentResponseContent('2026-09-02T08:00:00.002Z', {
           status: '已排版',
           layout_html: '<article>New layout</article>',
         }),
+        sourceUpdatedAt: payload.expectedUpdatedAt,
       };
     }
     if (url.endsWith('/save-draft')) {
+      const payload = JSON.parse(options.body || '{}');
+      derivedSubmitted.push({ operation: 'draft', payload });
+      if (harnessOptions.derivedConflict === 'draft') {
+        const error = new Error('文章已在其他标签页更新，请重新加载最新版本');
+        error.statusCode = 409;
+        throw error;
+      }
       return {
         job: {
           id: 'job-refresh-failure',
@@ -785,6 +830,7 @@ function createRefreshFailureRevisionHarness(contentId) {
           status: '草稿已保存',
           selected_platforms: ['zhihu'],
         }),
+        sourceUpdatedAt: payload.expectedUpdatedAt,
       };
     }
     throw new Error(`Unexpected request: ${url}`);
@@ -798,6 +844,7 @@ function createRefreshFailureRevisionHarness(contentId) {
   const toast = (message, type) => toasts.push({ message, type: type || '' });
   const loadData = async () => { throw new Error('bootstrap unavailable'); };
   const mergeContentRevisionMetadata = evaluateContentRevisionMerger(state);
+  const markContentCanonicalConflict = evaluateCanonicalConflictMarker(state, $, toast);
   const saveSource = extractFunctionSource('saveContent', 'markContentDirty');
   const saveContent = vm.runInNewContext(`(${saveSource})`, {
     state,
@@ -812,6 +859,7 @@ function createRefreshFailureRevisionHarness(contentId) {
     preserveContentOperationChanges,
     endContentOperation,
     mergeContentRevisionMetadata,
+    markContentCanonicalConflict,
   });
 
   return {
@@ -822,6 +870,7 @@ function createRefreshFailureRevisionHarness(contentId) {
     loadData,
     saveContent,
     submitted,
+    derivedSubmitted,
     toasts,
     toast,
     beginContentOperation,
@@ -829,6 +878,7 @@ function createRefreshFailureRevisionHarness(contentId) {
     preserveContentOperationChanges,
     endContentOperation,
     mergeContentRevisionMetadata,
+    markContentCanonicalConflict,
     editSecondRevision() {
       editor.innerHTML = '<p>Second local body</p>';
       titleEditor.value = 'Second local title';
@@ -889,6 +939,7 @@ for (const operation of ['layout', 'draft']) {
 
     const first = await runOperation(harness.contentId);
     assert.equal(first, true);
+    assert.equal(harness.derivedSubmitted[0].payload.expectedUpdatedAt, '2026-09-02T08:00:00.001Z');
     assert.equal(harness.state.data.contents[0].updated_at, '2026-09-02T08:00:00.002Z');
     assert.match(harness.toasts.at(-1).message, /已生成.*刷新失败|已保存.*刷新失败/);
 
@@ -922,6 +973,238 @@ test('all successful content mutation flows share metadata merge before refresh'
     assert.ok(refreshIndex < 0 || mergeIndex < refreshIndex, `${name} must merge metadata before refresh`);
   }
 });
+
+test('revision metadata merge requires matching source proof and rejects canonical conflicts', () => {
+  const contentId = 'guarded-metadata-merge';
+  const state = {
+    data: {
+      contents: [{
+        id: contentId,
+        title: 'Local DOM title',
+        status: '正文已生成',
+        layout_html: '',
+        updated_at: '2026-09-02T09:00:00.001Z',
+      }],
+    },
+    contentEditRevisions: new Map([[contentId, 7]]),
+  };
+  const mergeContentRevisionMetadata = evaluateContentRevisionMerger(state);
+  const returnedContent = {
+    id: contentId,
+    title: 'Other-tab title must not merge',
+    status: '已排版',
+    layout_html: '<article>Derived layout</article>',
+    updated_at: '2026-09-02T09:00:00.003Z',
+  };
+
+  assert.equal(mergeContentRevisionMetadata(returnedContent, contentId, {
+    expectedUpdatedAt: '2026-09-02T09:00:00.001Z',
+    sourceUpdatedAt: '2026-09-02T09:00:00.002Z',
+  }), false);
+  assert.equal(mergeContentRevisionMetadata(returnedContent, contentId, {
+    expectedUpdatedAt: '2026-09-02T09:00:00.001Z',
+    sourceUpdatedAt: '2026-09-02T09:00:00.001Z',
+    canonicalConflict: true,
+    needsReload: true,
+  }), false);
+  assert.equal(state.data.contents[0].updated_at, '2026-09-02T09:00:00.001Z');
+  assert.equal(state.data.contents[0].status, '正文已生成');
+  assert.equal(state.data.contents[0].layout_html, '');
+  assert.equal(state.contentEditRevisions.get(contentId), 7);
+
+  assert.equal(mergeContentRevisionMetadata(returnedContent, contentId, {
+    expectedUpdatedAt: '2026-09-02T09:00:00.001Z',
+    sourceUpdatedAt: '2026-09-02T09:00:00.001Z',
+  }), true);
+  assert.equal(state.data.contents[0].updated_at, '2026-09-02T09:00:00.003Z');
+  assert.equal(state.data.contents[0].status, '已排版');
+  assert.equal(state.contentEditRevisions.get(contentId), 7);
+});
+
+for (const operation of ['layout', 'draft']) {
+  test(`second-tab update before ${operation} keeps the saved token isolated, marks conflict, and blocks later Save`, async () => {
+    const harness = createRefreshFailureRevisionHarness(`${operation}-admission-conflict`, {
+      derivedConflict: operation,
+    });
+    const source = operation === 'layout'
+      ? extractFunctionSource('layoutContent', 'saveDraft')
+      : extractFunctionSource('saveDraft', 'publishContent');
+    const runOperation = vm.runInNewContext(`(${source})`, {
+      state: harness.state,
+      $: harness.$,
+      request: harness.request,
+      saveContent: harness.saveContent,
+      loadData: async () => { throw new Error('stale derived admission must not refresh'); },
+      toast: harness.toast,
+      encodeURIComponent,
+      beginContentOperation: harness.beginContentOperation,
+      contentOperationIsStable: harness.contentOperationIsStable,
+      preserveContentOperationChanges: harness.preserveContentOperationChanges,
+      endContentOperation: harness.endContentOperation,
+      mergeContentRevisionMetadata: harness.mergeContentRevisionMetadata,
+      markContentCanonicalConflict: harness.markContentCanonicalConflict,
+      CONTENT_CHANGED_DURING_SAVE_MESSAGE: '正文在保存期间又有修改，请先保存后重试',
+      readSelectedPlatforms: () => ['zhihu'],
+      openLayoutDialog: () => { throw new Error('stale layout must not open preview'); },
+      getSelectedContent: () => harness.state.data.contents[0],
+    });
+
+    assert.equal(await runOperation(harness.contentId), false);
+    assert.equal(harness.derivedSubmitted[0].payload.expectedUpdatedAt, '2026-09-02T08:00:00.001Z');
+    assert.equal(harness.state.data.contents[0].updated_at, '2026-09-02T08:00:00.001Z');
+    assert.equal(harness.state.dirtyContentIds.has(harness.contentId), true);
+    assert.equal(harness.state.contentCanonicalConflicts.has(harness.contentId), true);
+    assert.match(harness.toasts.at(-1).message, /其他标签页.*重新加载/);
+
+    harness.editSecondRevision();
+    const requestsBeforeBlockedSave = harness.submitted.length;
+    const blocked = await harness.saveContent(harness.contentId, { userInitiated: true });
+    assert.equal(blocked.blocked, true);
+    assert.equal(blocked.conflict, true);
+    assert.equal(harness.submitted.length, requestsBeforeBlockedSave);
+    assert.equal(harness.$(`[data-content-body="${harness.contentId}"]`).innerHTML, '<p>Second local body</p>');
+  });
+}
+
+for (const mode of ['single', 'batch']) {
+  test(`${mode} publish canonicalConflict never merges a token and marks the editor blocked`, async () => {
+    const contentId = `${mode}-publish-response-conflict`;
+    const content = {
+      id: contentId,
+      title: 'Local snapshot title',
+      summary: 'Local summary',
+      body: '<p>Local snapshot body</p>',
+      type: '行业分析',
+      status: '正文已生成',
+      layout_html: '',
+      updated_at: '2026-09-02T10:00:00.001Z',
+    };
+    const state = {
+      selectedContentId: contentId,
+      data: { contents: [content] },
+      dirtyContentIds: new Set(),
+      contentEditRevisions: new Map([[contentId, 3]]),
+      contentOperationLocks: new Map(),
+      contentCanonicalConflicts: new Set(),
+      selectedPlatforms: new Set(['zhihu']),
+      lastProgress: [],
+      batchPublishSubmitting: false,
+      batchPublishOperation: null,
+      pendingSinglePublish: mode === 'single' ? Object.freeze({
+        contentId,
+        platform: 'zhihu',
+        mode: 'direct',
+        operationId: 'frontend-single-conflict-0001',
+      }) : null,
+      singlePublishSubmitting: false,
+      singlePublishOperationToken: '',
+      singlePublishOperationSequence: 0,
+    };
+    const toasts = [];
+    const toast = (message, type) => toasts.push({ message, type: type || '' });
+    const saveButton = { classList: { remove() {} } };
+    const saveState = { textContent: '', classList: { add() {} } };
+    const dialog = { close() {} };
+    const $ = selector => {
+      if (selector.startsWith('[data-content-body')) return null;
+      if (selector.startsWith('[data-save-content-button')) return saveButton;
+      if (selector.startsWith('[data-content-save-state')) return saveState;
+      return dialog;
+    };
+    const mergeContentRevisionMetadata = evaluateContentRevisionMerger(state);
+    const markContentCanonicalConflict = evaluateCanonicalConflictMarker(state, $, toast);
+    let refreshes = 0;
+    let requestBody;
+    const request = async (url, options) => {
+      requestBody = JSON.parse(options.body);
+      return {
+        job: {
+          id: `${mode}-conflict-job`,
+          content_id: contentId,
+          title: content.title,
+          status: 'published',
+          platforms: ['zhihu'],
+          created_at: '2026-09-02T10:00:00.002Z',
+          updated_at: '2026-09-02T10:00:00.002Z',
+          results: [{
+            id: `${mode}-conflict-result`,
+            job_id: `${mode}-conflict-job`,
+            platform: 'zhihu',
+            status: 'success',
+            message: 'snapshot published',
+            url: 'https://example.invalid/snapshot',
+            post_id: `${mode}-post`,
+            created_at: '2026-09-02T10:00:00.002Z',
+          }],
+        },
+        rawOutput: 'snapshot published',
+        content: null,
+        sourceUpdatedAt: content.updated_at,
+        canonicalConflict: true,
+        needsReload: true,
+        cached: false,
+      };
+    };
+    const common = {
+      state,
+      $,
+      request,
+      beginContentOperation: target => ({ contentId: String(target), token: `${mode}-content-operation` }),
+      contentOperationIsStable: () => true,
+      preserveContentOperationChanges: () => { throw new Error('publish conflict must not pair server metadata with local DOM'); },
+      endContentOperation: () => true,
+      saveContent: async () => ({ stable: true }),
+      loadData: async () => { refreshes += 1; throw new Error('canonical conflict must not refresh automatically'); },
+      toast,
+      mergeContentRevisionMetadata,
+      markContentCanonicalConflict,
+      CONTENT_CHANGED_DURING_SAVE_MESSAGE: '正文在保存期间又有修改，请先保存后重试',
+      encodeURIComponent,
+    };
+
+    let result;
+    if (mode === 'single') {
+      const beginSource = extractFunctionSource('beginSinglePublishOperation', 'finishSinglePublishOperation');
+      const finishSource = extractFunctionSource('finishSinglePublishOperation', 'canCancelSinglePublish');
+      const source = extractFunctionSource('confirmSinglePlatformPublish', 'hasDirtyCanonicalContent');
+      result = await vm.runInNewContext(`(${source})`, {
+        ...common,
+        beginSinglePublishOperation: vm.runInNewContext(`(${beginSource})`),
+        finishSinglePublishOperation: vm.runInNewContext(`(${finishSource})`),
+        setSinglePublishBusy: () => {},
+        setSinglePublishFeedback: () => {},
+        platformName: platform => platform,
+      })();
+    } else {
+      const createSource = extractFunctionSource('createPublishOperationId', 'beginBatchPublishOperation');
+      const beginSource = extractFunctionSource('beginBatchPublishOperation', 'finishBatchPublishOperation');
+      const finishSource = extractFunctionSource('finishBatchPublishOperation', 'setBatchPublishBusy');
+      const source = extractFunctionSource('publishContent', 'checkAuth');
+      const createPublishOperationId = vm.runInNewContext(`(${createSource})`, {
+        crypto: { randomUUID: () => 'frontend-batch-conflict-0001' },
+      });
+      result = await vm.runInNewContext(`(${source})`, {
+        ...common,
+        readSelectedPlatforms: () => ['zhihu'],
+        beginBatchPublishOperation: vm.runInNewContext(`(${beginSource})`, { createPublishOperationId }),
+        finishBatchPublishOperation: vm.runInNewContext(`(${finishSource})`),
+        setBatchPublishBusy: () => {},
+        renderProgress: () => {},
+        switchView: () => { throw new Error('conflicted publish must not navigate'); },
+      })(contentId);
+    }
+
+    assert.equal(result, false);
+    assert.equal(requestBody.expectedUpdatedAt, content.updated_at);
+    assert.equal(state.data.contents[0].updated_at, content.updated_at);
+    assert.equal(state.data.contents[0].status, '正文已生成');
+    assert.equal(state.contentEditRevisions.get(contentId), 3);
+    assert.equal(state.dirtyContentIds.has(contentId), true);
+    assert.equal(state.contentCanonicalConflicts.has(contentId), true);
+    assert.equal(refreshes, 0);
+    assert.match(toasts.at(-1).message, /其他标签页.*重新加载/);
+  });
+}
 
 test('a 409 save conflict preserves the editor DOM and displays an explicit reload-latest message', async () => {
   const saveSource = extractFunctionSource('saveContent', 'markContentDirty');
@@ -963,6 +1246,11 @@ test('a 409 save conflict preserves the editor DOM and displays an explicit relo
     contentOperationIsStable: () => true,
     preserveContentOperationChanges: () => {},
     endContentOperation: () => true,
+    markContentCanonicalConflict: evaluateCanonicalConflictMarker(
+      state,
+      selector => document.querySelector(selector),
+      (message, type) => messages.push({ message, type })
+    ),
   });
 
   const result = await saveContent(contentId, { silent: true });
@@ -1242,16 +1530,26 @@ function createFullContentOperationHarness(contentId = 'full-operation-content')
       await gate.promise;
       deferred.delete(key);
     }
-    if (key === 'save') return { content: { ...content, updated_at: '2026-08-31T02:00:00.000Z' } };
+    const payload = options.body ? JSON.parse(options.body) : {};
+    if (key === 'save') {
+      return {
+        content: { ...content, updated_at: '2026-08-31T02:00:00.000Z' },
+        sourceUpdatedAt: payload.expectedUpdatedAt,
+      };
+    }
     if (key === 'layout') {
       downstreamCompleted = true;
-      return { content: { ...content, status: '已排版', updated_at: '2026-08-31T02:30:00.000Z' } };
+      return {
+        content: { ...content, status: '已排版', updated_at: '2026-08-31T02:30:00.000Z' },
+        sourceUpdatedAt: payload.expectedUpdatedAt,
+      };
     }
     if (key === 'draft') {
       downstreamCompleted = true;
       return {
         job: { status: 'local_draft', results: [] },
         content: { ...content, status: '草稿已保存', updated_at: '2026-08-31T02:30:00.000Z' },
+        sourceUpdatedAt: payload.expectedUpdatedAt,
       };
     }
     if (key === 'publish') {
@@ -1259,6 +1557,9 @@ function createFullContentOperationHarness(contentId = 'full-operation-content')
       return {
         job: { status: 'published', results: [] },
         content: { ...content, status: '已发布', updated_at: '2026-08-31T02:30:00.000Z' },
+        sourceUpdatedAt: payload.expectedUpdatedAt,
+        canonicalConflict: false,
+        needsReload: false,
       };
     }
     if (key === 'bootstrap') return { data: bootstrapData() };
@@ -1297,6 +1598,7 @@ function createFullContentOperationHarness(contentId = 'full-operation-content')
     preserveContentOperationChanges,
     endContentOperation,
     mergeContentRevisionMetadata: evaluateContentRevisionMerger(state),
+    markContentCanonicalConflict: evaluateCanonicalConflictMarker(state, $, toast),
   });
 
   return {
@@ -1549,6 +1851,7 @@ function createDeferredCanonicalSaveHarness(contentId = 'content-downstream-race
     preserveContentOperationChanges,
     endContentOperation,
     mergeContentRevisionMetadata: evaluateContentRevisionMerger(state),
+    markContentCanonicalConflict: evaluateCanonicalConflictMarker(state, $, toast),
   });
   markContentDirty(contentId);
 
@@ -1580,6 +1883,7 @@ function createDeferredCanonicalSaveHarness(contentId = 'content-downstream-race
           body: '<p>saved revision normalized</p>',
           updated_at: '2026-08-31T02:00:00.000Z',
         },
+        sourceUpdatedAt: content.updated_at,
       });
     },
   };
