@@ -408,7 +408,12 @@ async function request(path, options = {}) {
     headers,
   });
   const data = await res.json().catch(() => ({}));
-  if (!data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  if (!data.ok) {
+    const error = new Error(data.error || `HTTP ${res.status}`);
+    error.statusCode = res.status;
+    if (data.code) error.apiCode = data.code;
+    throw error;
+  }
   return data;
 }
 
@@ -2364,6 +2369,7 @@ async function saveContent(id, options = {}) {
         summary: summaryEditor?.value ?? current?.summary,
         type: current?.type,
         body: body ?? current?.body ?? '',
+        expectedUpdatedAt: current?.updated_at,
       }),
     });
     state.selectedContentId = res.content.id;
@@ -2382,6 +2388,18 @@ async function saveContent(id, options = {}) {
     }
     if (!options.silent) toast('正文已保存');
     return { content: res.content, stable: true };
+  } catch (error) {
+    if (error?.statusCode !== 409) throw error;
+    const conflictMessage = '文章已在其他标签页更新，请先复制当前修改，再重新加载最新版本';
+    state.dirtyContentIds.add(targetKey);
+    $(`[data-save-content-button="${target}"]`)?.classList.remove('is-hidden');
+    const saveState = $(`[data-content-save-state="${target}"]`);
+    if (saveState) {
+      saveState.textContent = conflictMessage;
+      saveState.classList.add('is-dirty');
+    }
+    toast(conflictMessage, 'error');
+    return { content: null, stable: false, conflict: true };
   } finally {
     if (ownsOperation) endContentOperation(operationContext);
   }
@@ -2409,7 +2427,6 @@ function bindContentEditorDirtyTracking(id) {
     $(`[data-content-summary="${id}"]`),
   ].filter(Boolean);
   for (const field of fields) {
-    field.addEventListener('focusin', () => markContentDirty(id));
     field.addEventListener('input', () => markContentDirty(id));
   }
 }

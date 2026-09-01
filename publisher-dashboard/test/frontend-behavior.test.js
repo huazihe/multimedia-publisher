@@ -69,6 +69,28 @@ test('request sends the bootstrap CSRF token on mutations only', async () => {
   assert.equal(calls[1].options.headers['X-Workbench-CSRF'], undefined);
 });
 
+test('request exposes HTTP status codes to frontend conflict handling', async () => {
+  const source = extractFunctionSource('request', 'loadLayoutTemplates');
+  assert.ok(source);
+  const request = vm.runInNewContext(`(${source})`, {
+    API: 'http://127.0.0.1:18810',
+    state: { workbenchCsrfToken: 'csrf-token-for-test' },
+    fetch: async () => ({
+      status: 409,
+      json: async () => ({ ok: false, error: '内容版本冲突' }),
+    }),
+  });
+
+  await assert.rejects(
+    () => request('/api/content/c1', { method: 'POST', body: '{}' }),
+    error => {
+      assert.equal(error.statusCode, 409);
+      assert.match(error.message, /版本冲突/);
+      return true;
+    }
+  );
+});
+
 test('defensive client sanitizer removes active content while keeping safe article and code markup', () => {
   const source = extractFunctionSource('sanitizeClientCanonicalHtml', 'editableArticleHtml');
   assert.ok(source, '缺少客户端 canonical HTML 防御性净化函数');
@@ -438,6 +460,30 @@ test('dirty transition saves first and never calls transition after save failure
   assert.equal(cleanUnload({ preventDefault: () => { prevented += 1; } }), undefined);
 });
 
+test('focusing a content editor without input does not mark it dirty', () => {
+  const source = extractFunctionSource('bindContentEditorDirtyTracking', 'layoutContent');
+  assert.ok(source);
+  const contentId = 'focus-only-content';
+  const { document, window } = parseHTML(`
+    <div data-content-body="${contentId}" contenteditable="true"><p>正文</p></div>
+    <input data-content-title="${contentId}" value="标题">
+    <textarea data-content-summary="${contentId}">摘要</textarea>
+  `);
+  let dirtyMarks = 0;
+  const bindContentEditorDirtyTracking = vm.runInNewContext(`(${source})`, {
+    $: selector => document.querySelector(selector),
+    markContentDirty: () => { dirtyMarks += 1; },
+  });
+  bindContentEditorDirtyTracking(contentId);
+
+  document.querySelector('[data-content-body]').dispatchEvent(new window.Event('focusin', { bubbles: true }));
+  document.querySelector('[data-content-title]').dispatchEvent(new window.Event('focusin', { bubbles: true }));
+  assert.equal(dirtyMarks, 0);
+
+  document.querySelector('[data-content-body]').dispatchEvent(new window.Event('input', { bubbles: true }));
+  assert.equal(dirtyMarks, 1);
+});
+
 test('deferred save preserves a newer editor revision and merges only server metadata', async () => {
   const saveSource = extractFunctionSource('saveContent', 'markContentDirty');
   const dirtySource = extractFunctionSource('markContentDirty', 'bindContentEditorDirtyTracking');
@@ -513,6 +559,7 @@ test('deferred save preserves a newer editor revision and merges only server met
 
   const pendingSave = saveContent(contentId, { silent: true });
   assert.equal(submittedBody.body, '<p>first revision</p>');
+  assert.equal(submittedBody.expectedUpdatedAt, content.updated_at);
 
   editor.innerHTML = '<p>second revision stays live</p>';
   titleEditor.value = 'Second title stays live';
@@ -545,6 +592,61 @@ test('deferred save preserves a newer editor revision and merges only server met
   assert.equal(state.data.contents[0].status, '草稿已保存');
   assert.equal(state.data.contents[0].updated_at, '2026-08-31T02:00:00.000Z');
   assert.equal(reloads, 0);
+});
+
+test('a 409 save conflict preserves the editor DOM and displays an explicit reload-latest message', async () => {
+  const saveSource = extractFunctionSource('saveContent', 'markContentDirty');
+  assert.ok(saveSource);
+  const contentId = 'cross-tab-conflict';
+  const { document } = parseHTML(`
+    <div data-content-body="${contentId}" contenteditable="true"><p>Unsaved local body</p></div>
+    <input data-content-title="${contentId}" value="Unsaved local title">
+    <textarea data-content-summary="${contentId}">Unsaved local summary</textarea>
+    <span data-content-save-state="${contentId}"></span>
+  `);
+  const storedContent = {
+    id: contentId,
+    title: 'Stored title',
+    summary: 'Stored summary',
+    body: '<p>Stored body</p>',
+    type: '行业分析',
+    updated_at: '2026-08-31T01:00:00.000Z',
+  };
+  const state = {
+    selectedContentId: contentId,
+    data: { contents: [storedContent] },
+    dirtyContentIds: new Set([contentId]),
+    contentOperationLocks: new Map(),
+  };
+  const messages = [];
+  let reloads = 0;
+  const conflict = new Error('内容版本冲突');
+  conflict.statusCode = 409;
+  const saveContent = vm.runInNewContext(`(${saveSource})`, {
+    state,
+    $: selector => document.querySelector(selector),
+    request: async () => { throw conflict; },
+    clearPlatformPreviews: () => { throw new Error('conflict must not clear previews'); },
+    toast: (message, type) => messages.push({ message, type }),
+    loadData: async () => { reloads += 1; },
+    encodeURIComponent,
+    beginContentOperation: target => ({ contentId: String(target), token: 'conflict-save' }),
+    contentOperationIsStable: () => true,
+    preserveContentOperationChanges: () => {},
+    endContentOperation: () => true,
+  });
+
+  const result = await saveContent(contentId, { silent: true });
+
+  assert.equal(result.conflict, true);
+  assert.equal(result.stable, false);
+  assert.equal(document.querySelector('[data-content-body]').innerHTML, '<p>Unsaved local body</p>');
+  assert.equal(document.querySelector('[data-content-title]').value, 'Unsaved local title');
+  assert.equal(document.querySelector('[data-content-summary]').value, 'Unsaved local summary');
+  assert.equal(state.dirtyContentIds.has(contentId), true);
+  assert.equal(reloads, 0);
+  assert.match(messages.map(item => item.message).join('\n'), /文章已在其他标签页更新/);
+  assert.match(document.querySelector('[data-content-save-state]').textContent, /重新加载最新版本/);
 });
 
 test('per-content operation lock disables editing and controls while blocking dirty revisions', () => {

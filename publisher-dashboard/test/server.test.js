@@ -82,6 +82,23 @@ function cleanupImportedContent(content) {
   db.prepare('DELETE FROM contents WHERE id = ?').run(content.id);
 }
 
+function canonicalRevisionPayload(content, overrides = {}) {
+  return {
+    title: content.title,
+    summary: content.summary ?? '',
+    body: content.body,
+    type: content.type ?? '',
+    expectedUpdatedAt: content.updated_at,
+    ...overrides,
+  };
+}
+
+function updateCurrentContent(contentId, payload = {}) {
+  const current = db.prepare('SELECT updated_at FROM contents WHERE id = ?').get(contentId);
+  assert.ok(current, `内容不存在: ${contentId}`);
+  return updateContent(contentId, { ...payload, expectedUpdatedAt: current.updated_at });
+}
+
 function databaseSnapshot() {
   const tables = [
     'platforms',
@@ -1408,7 +1425,7 @@ test('lost completed response persists replay alias and changed alias signature 
     let document = JSON.parse(fs.readFileSync(operationsFile, 'utf8'));
     assert.equal(document.records.find(record => record.operationId === 'lost-response-operation-0002').aliasOf, 'lost-response-operation-0001');
 
-    updateContent(fixture.id, { body: '# Changed after lost response\n\nNew canonical signature.' });
+    updateCurrentContent(fixture.id, { body: '# Changed after lost response\n\nNew canonical signature.' });
     response = await publish('lost-response-operation-0002');
     assert.equal(response.status, 409);
     assert.match((await response.json()).error, /operationId|内容版本|发布参数/);
@@ -1831,11 +1848,11 @@ test('single publish completed cache expires by TTL and evicts oldest entries wh
     assert.equal(response.status, 200);
     assert.equal(calls, 2);
 
-    updateContent(fixture.id, { body: '# Cache version two\n\nChanged canonical body.' });
+    updateCurrentContent(fixture.id, { body: '# Cache version two\n\nChanged canonical body.' });
     response = await publish('cache-policy-operation-0002');
     assert.equal(response.status, 200);
     assert.equal(calls, 3);
-    updateContent(fixture.id, { body: '# Cache version three\n\nChanged canonical body again.' });
+    updateCurrentContent(fixture.id, { body: '# Cache version three\n\nChanged canonical body again.' });
     response = await publish('cache-policy-operation-0001');
     assert.equal(response.status, 200);
     assert.equal(calls, 4);
@@ -2111,7 +2128,7 @@ test('content body can be updated', () => {
   let content;
   try {
     content = generateContent('2099-02-02');
-    const updated = updateContent(content.id, {
+    const updated = updateCurrentContent(content.id, {
       body: '# User Edited Title\n\nUser edited body.',
     });
 
@@ -2120,6 +2137,182 @@ test('content body can be updated', () => {
   } finally {
     if (content?.id) db.prepare('DELETE FROM contents WHERE id = ?').run(content.id);
     db.prepare("DELETE FROM weekly_plans WHERE date = '2099-02-02'").run();
+  }
+});
+
+test('updateContent rejects a stale revision with status 409 and preserves the newer update', () => {
+  let content;
+  try {
+    content = importContent({ filename: 'optimistic-lock.md', body: '# Original title\n\nOriginal body.' });
+    const originalToken = '2099-01-01T00:00:00.999Z';
+    db.prepare('UPDATE contents SET updated_at = ? WHERE id = ?').run(originalToken, content.id);
+    content = { ...content, updated_at: originalToken };
+
+    const newer = updateContent(content.id, canonicalRevisionPayload(content, {
+      title: 'Newer title',
+      body: '<p>Newer body.</p>',
+    }));
+    assert.ok(Date.parse(newer.updated_at) > Date.parse(originalToken));
+
+    assert.throws(
+      () => updateContent(content.id, canonicalRevisionPayload(content, {
+        title: 'Stale title',
+        body: '<p>Stale body.</p>',
+      })),
+      error => {
+        assert.equal(error.statusCode, 409);
+        assert.match(error.message, /更新|版本|冲突/);
+        return true;
+      }
+    );
+
+    const stored = db.prepare('SELECT title, body, updated_at FROM contents WHERE id = ?').get(content.id);
+    assert.equal(stored.title, 'Newer title');
+    assert.equal(stored.body, '<p>Newer body.</p>');
+    assert.equal(stored.updated_at, newer.updated_at);
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('canonical field changes invalidate plan-linked layout and reset generated status', () => {
+  let content;
+  try {
+    content = generateContent('2099-02-03');
+    const baseline = {
+      title: 'Baseline title',
+      summary: 'Baseline summary',
+      body: '<p>Baseline body.</p>',
+      type: 'Baseline type',
+    };
+    const changes = [
+      ['title', 'Changed title'],
+      ['summary', 'Changed summary'],
+      ['body', '<p>Changed body.</p>'],
+      ['type', 'Changed type'],
+    ];
+
+    for (const [index, [field, value]] of changes.entries()) {
+      const token = new Date(Date.UTC(2099, 1, 3, 0, 0, 0, index)).toISOString();
+      db.prepare(`
+        UPDATE contents
+        SET title = ?, summary = ?, body = ?, type = ?, status = '已排版', layout_html = ?, updated_at = ?
+        WHERE id = ?
+      `).run(
+        baseline.title,
+        baseline.summary,
+        baseline.body,
+        baseline.type,
+        '<article>derived layout</article>',
+        token,
+        content.id
+      );
+
+      const updated = updateContent(content.id, {
+        ...baseline,
+        [field]: value,
+        expectedUpdatedAt: token,
+      });
+      assert.equal(updated[field], value, `${field} should be updated`);
+      assert.equal(updated.layout_html, '', `${field} should invalidate layout`);
+      assert.equal(updated.status, '正文已生成', `${field} should reset plan-linked status`);
+    }
+  } finally {
+    if (content?.id) cleanupImportedContent(content);
+    db.prepare("DELETE FROM weekly_plans WHERE date = '2099-02-03'").run();
+  }
+});
+
+test('imported canonical changes reset imported status while an exact no-op preserves layout', () => {
+  let content;
+  try {
+    content = importContent({ filename: 'layout-invalidation.md', body: '# Imported title\n\nImported body.' });
+    let token = '2099-03-01T00:00:00.000Z';
+    db.prepare("UPDATE contents SET status = '已排版', layout_html = ?, updated_at = ? WHERE id = ?")
+      .run('<article>imported layout</article>', token, content.id);
+    content = {
+      ...content,
+      status: '已排版',
+      layout_html: '<article>imported layout</article>',
+      updated_at: token,
+    };
+
+    const changed = updateContent(content.id, canonicalRevisionPayload(content, { summary: 'Changed summary' }));
+    assert.equal(changed.status, '已导入');
+    assert.equal(changed.layout_html, '');
+
+    token = '2099-03-01T00:00:01.000Z';
+    db.prepare("UPDATE contents SET status = '已排版', layout_html = ?, updated_at = ? WHERE id = ?")
+      .run('<article>preserved layout</article>', token, content.id);
+    const noOpBase = { ...changed, status: '已排版', layout_html: '<article>preserved layout</article>', updated_at: token };
+    const noOp = updateContent(content.id, canonicalRevisionPayload(noOpBase));
+
+    assert.equal(noOp.status, '已排版');
+    assert.equal(noOp.layout_html, '<article>preserved layout</article>');
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('updateContent validates payload string fields and requires an optimistic-lock token', () => {
+  let content;
+  try {
+    content = importContent({ filename: 'field-types.md', body: '# Field types\n\nBody.' });
+    const valid = canonicalRevisionPayload(content);
+    const invalidPayloads = [
+      null,
+      [],
+      { ...valid, title: 123 },
+      { ...valid, summary: {} },
+      { ...valid, body: Buffer.from('body') },
+      { ...valid, type: false },
+      { title: valid.title, summary: valid.summary, body: valid.body, type: valid.type },
+      { ...valid, expectedUpdatedAt: 123 },
+    ];
+
+    for (const payload of invalidPayloads) {
+      assert.throws(
+        () => updateContent(content.id, payload),
+        error => {
+          assert.equal(error.statusCode, 400);
+          assert.match(error.message, /JSON 对象|字符串|expectedUpdatedAt/);
+          return true;
+        }
+      );
+    }
+  } finally {
+    cleanupImportedContent(content);
+  }
+});
+
+test('updateContent enforces Unicode field limits and a 5 MiB UTF-8 body limit', () => {
+  let content;
+  try {
+    content = importContent({ filename: 'field-limits.md', body: '# Field limits\n\nBody.' });
+    const invalidFields = [
+      ['title', '😀'.repeat(201), /标题.*200/],
+      ['summary', '摘'.repeat(1001), /摘要.*1000/],
+      ['type', '类'.repeat(101), /类型.*100/],
+      ['body', 'a'.repeat(5 * 1024 * 1024 + 1), /正文.*5 MiB/],
+    ];
+    for (const [field, value, message] of invalidFields) {
+      assert.throws(
+        () => updateContent(content.id, canonicalRevisionPayload(content, { [field]: value })),
+        error => {
+          assert.equal(error.statusCode, 400);
+          assert.match(error.message, message);
+          return true;
+        }
+      );
+    }
+
+    content = updateContent(content.id, canonicalRevisionPayload(content, { title: '😀'.repeat(200) }));
+    content = updateContent(content.id, canonicalRevisionPayload(content, { summary: '摘'.repeat(1000) }));
+    content = updateContent(content.id, canonicalRevisionPayload(content, { type: '类'.repeat(100) }));
+    content = updateContent(content.id, canonicalRevisionPayload(content, { body: 'a'.repeat(5 * 1024 * 1024) }));
+    assert.ok(content.body.includes('a'.repeat(100)));
+  } finally {
+    cleanupImportedContent(content);
   }
 });
 
@@ -2134,7 +2327,7 @@ test('updateContent sanitizes canonical HTML and preserves code round trip', () 
       '<script>alert("stored-xss")</script>',
       '<pre><code class="language-html">&lt;button data-action="code"&gt;代码示例&lt;/button&gt;</code></pre>',
     ].join('');
-    const updated = updateContent(content.id, { body: unsafeBody });
+    const updated = updateCurrentContent(content.id, { body: unsafeBody });
     const stored = db.prepare('SELECT body FROM contents WHERE id = ?').get(content.id).body;
 
     for (const body of [updated.body, stored]) {
@@ -2147,7 +2340,7 @@ test('updateContent sanitizes canonical HTML and preserves code round trip', () 
     assert.match(markdown, /<button data-action="code">代码示例<\/button>/);
 
     const markdownCode = '```html\n<script data-action="code">alert("literal")</script>\n```';
-    const markdownUpdated = updateContent(content.id, { body: markdownCode });
+    const markdownUpdated = updateCurrentContent(content.id, { body: markdownCode });
     assert.doesNotMatch(markdownUpdated.body, /<script\b/i);
     assert.match(markdownUpdated.body, /&lt;script data-action=&quot;code&quot;&gt;/);
     assert.match(contentToMarkdown(markdownUpdated), /<script data-action="code">alert\("literal"\)<\/script>/);
@@ -2167,7 +2360,7 @@ test('content update endpoint and bootstrap normalize unsafe canonical bodies', 
     const updateResponse = await workbenchFetch(`http://127.0.0.1:${port}/api/content/${content.id}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ body: unsafeBody }),
+      body: JSON.stringify({ body: unsafeBody, expectedUpdatedAt: content.updated_at }),
     });
     const updateResult = await updateResponse.json();
     assert.equal(updateResponse.status, 200);
@@ -2184,6 +2377,61 @@ test('content update endpoint and bootstrap normalize unsafe canonical bodies', 
   } finally {
     await closeServer(testServer);
     cleanupImportedContent(content);
+  }
+});
+
+test('content update endpoint returns 409 for a stale revision without overwriting newer content', async () => {
+  let content;
+  let testServer;
+  try {
+    content = importContent({ filename: 'endpoint-lock.md', body: '# Endpoint original\n\nOriginal body.' });
+    testServer = createDashboardServer();
+    const port = await listenOnRandomPort(testServer);
+    const endpoint = `http://127.0.0.1:${port}/api/content/${content.id}`;
+    const originalPayload = canonicalRevisionPayload(content);
+
+    const firstResponse = await workbenchFetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...originalPayload, title: 'Endpoint newer title' }),
+    });
+    const firstResult = await firstResponse.json();
+    assert.equal(firstResponse.status, 200);
+
+    const staleResponse = await workbenchFetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...originalPayload, title: 'Endpoint stale title' }),
+    });
+    const staleResult = await staleResponse.json();
+    assert.equal(staleResponse.status, 409);
+    assert.equal(staleResult.ok, false);
+    assert.match(staleResult.error, /更新|版本|冲突/);
+
+    const stored = db.prepare('SELECT title, updated_at FROM contents WHERE id = ?').get(content.id);
+    assert.equal(stored.title, 'Endpoint newer title');
+    assert.equal(stored.updated_at, firstResult.content.updated_at);
+  } finally {
+    await closeServer(testServer);
+    cleanupImportedContent(content);
+  }
+});
+
+test('default JSON request bodies are limited to 8 MiB', async () => {
+  let testServer;
+  try {
+    testServer = createDashboardServer();
+    const port = await listenOnRandomPort(testServer);
+    const response = await workbenchFetch(`http://127.0.0.1:${port}/api/topics/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date: '2099-01-01', padding: 'a'.repeat(8 * 1024 * 1024) }),
+    });
+
+    assert.equal(response.status, 413);
+    assert.match((await response.json()).error, /请求内容过大/);
+  } finally {
+    await closeServer(testServer);
   }
 });
 
@@ -2658,7 +2906,7 @@ test('mature GFM conversion preserves structure exactly through import edit and 
 
     content = importContent({ filename: 'format-parity.md', body: source });
     assert.equal(content.body, expectedHtml);
-    const edited = updateContent(content.id, {
+    const edited = updateCurrentContent(content.id, {
       title: content.title,
       summary: content.summary,
       body: content.body,

@@ -171,6 +171,11 @@ const RETIRED_PLATFORM_IDS = ['cnaiplus', 'zhike', 'cechina', 'sensorexpert'];
 
 const CONTENT_TYPES = ['行业分析', '案例复盘', '方法论', '清单指南', '热点解读'];
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+const MAX_CONTENT_TITLE_CHARACTERS = 200;
+const MAX_CONTENT_SUMMARY_CHARACTERS = 1000;
+const MAX_CONTENT_TYPE_CHARACTERS = 100;
+const MAX_CONTENT_BODY_BYTES = 5 * 1024 * 1024;
+const DEFAULT_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_IMPORTED_BODY_BYTES = 5 * 1024 * 1024;
 const MAX_IMPORT_REQUEST_BYTES = 32 * 1024 * 1024;
 const PUBLISH_EXECUTION_META = Symbol('publisher-dashboard.publish-execution');
@@ -202,6 +207,15 @@ db.exec('PRAGMA foreign_keys = ON');
 
 function now() {
   return new Date().toISOString();
+}
+
+function timestampAfter(previousTimestamp) {
+  const currentMs = Date.now();
+  const previousMs = Date.parse(previousTimestamp);
+  const nextMs = Number.isFinite(previousMs) && currentMs <= previousMs
+    ? previousMs + 1
+    : currentMs;
+  return new Date(nextMs).toISOString();
 }
 
 function statusError(message, statusCode) {
@@ -2117,21 +2131,83 @@ function importContent(payload) {
   });
 }
 
+function validateContentUpdatePayload(payload) {
+  const prototype = payload && typeof payload === 'object' ? Object.getPrototypeOf(payload) : null;
+  if (payload === null
+    || typeof payload !== 'object'
+    || Array.isArray(payload)
+    || (prototype !== Object.prototype && prototype !== null)) {
+    throw statusError('内容更新请求必须是 JSON 对象', 400);
+  }
+  for (const field of ['title', 'summary', 'body', 'type', 'expectedUpdatedAt']) {
+    if (Object.prototype.hasOwnProperty.call(payload, field) && typeof payload[field] !== 'string') {
+      throw statusError(`内容更新字段 ${field} 必须是字符串`, 400);
+    }
+  }
+  if (!Object.prototype.hasOwnProperty.call(payload, 'expectedUpdatedAt') || !payload.expectedUpdatedAt) {
+    throw statusError('expectedUpdatedAt 必须是非空字符串', 400);
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, 'title')
+    && Array.from(payload.title).length > MAX_CONTENT_TITLE_CHARACTERS) {
+    throw statusError(`标题不能超过 ${MAX_CONTENT_TITLE_CHARACTERS} 个 Unicode 字符`, 400);
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, 'summary')
+    && Array.from(payload.summary).length > MAX_CONTENT_SUMMARY_CHARACTERS) {
+    throw statusError(`摘要不能超过 ${MAX_CONTENT_SUMMARY_CHARACTERS} 个 Unicode 字符`, 400);
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, 'type')
+    && Array.from(payload.type).length > MAX_CONTENT_TYPE_CHARACTERS) {
+    throw statusError(`类型不能超过 ${MAX_CONTENT_TYPE_CHARACTERS} 个 Unicode 字符`, 400);
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, 'body')
+    && Buffer.byteLength(payload.body, 'utf8') > MAX_CONTENT_BODY_BYTES) {
+    throw statusError('正文不能超过 5 MiB', 400);
+  }
+  return payload;
+}
+
 function updateContent(contentId, payload = {}) {
-  const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
+  const input = validateContentUpdatePayload(payload);
+  const storedContent = one('SELECT * FROM contents WHERE id = ?', contentId);
+  const content = normalizeContent(storedContent);
   if (!content) throw new Error('内容不存在');
-  const body = normalizeCanonicalBody(payload.body ?? content.body ?? '');
-  const title = String(payload.title || '').trim() || titleFromMarkdown(body, content.title);
-  const summary = String(payload.summary ?? content.summary ?? '').trim();
-  const type = String(payload.type ?? content.type ?? '').trim();
-  db.prepare(`
+  const body = normalizeCanonicalBody(input.body ?? content.body ?? '');
+  const title = (input.title || '').trim() || titleFromMarkdown(body, content.title);
+  const summary = (input.summary ?? content.summary ?? '').trim();
+  const type = (input.type ?? content.type ?? '').trim();
+  const canonicalChanged = title !== storedContent.title
+    || summary !== (storedContent.summary ?? '')
+    || body !== storedContent.body
+    || type !== (storedContent.type ?? '');
+  const status = canonicalChanged ? (content.plan_date ? '正文已生成' : '已导入') : content.status;
+  const layoutHtml = canonicalChanged ? '' : (content.layout_html ?? '');
+  const updatedAt = timestampAfter(storedContent.updated_at);
+  const result = db.prepare(`
     UPDATE contents
-    SET title = ?, summary = ?, body = ?, type = ?, updated_at = ?
-    WHERE id = ?
-  `).run(title, summary, body, type, now(), contentId);
+    SET title = ?, summary = ?, body = ?, type = ?, status = ?, layout_html = ?, updated_at = ?
+    WHERE id = ? AND updated_at = ?
+  `).run(
+    title,
+    summary,
+    body,
+    type,
+    status,
+    layoutHtml,
+    updatedAt,
+    contentId,
+    input.expectedUpdatedAt
+  );
+  if (result.changes === 0) {
+    throw statusError('文章已在其他位置更新，请重新加载最新版本', 409);
+  }
   if (content.plan_date) {
-    db.prepare('UPDATE weekly_plans SET topic = ?, type = ?, updated_at = ? WHERE date = ?')
-      .run(title, type, now(), content.plan_date);
+    if (canonicalChanged) {
+      db.prepare("UPDATE weekly_plans SET topic = ?, type = ?, status = '正文已生成', updated_at = ? WHERE date = ?")
+        .run(title, type, updatedAt, content.plan_date);
+    } else {
+      db.prepare('UPDATE weekly_plans SET topic = ?, type = ?, updated_at = ? WHERE date = ?')
+        .run(title, type, updatedAt, content.plan_date);
+    }
   }
   addActivity(`更新正文《${title}》`, 'content', contentId, '用户');
   return normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
@@ -2713,7 +2789,7 @@ function runFakeAiCommand(payload) {
 
 function readBody(req, options = {}) {
   return new Promise((resolve, reject) => {
-    const maxBytes = Number.isFinite(options.maxBytes) ? options.maxBytes : Infinity;
+    const maxBytes = Number.isFinite(options.maxBytes) ? options.maxBytes : DEFAULT_REQUEST_BODY_BYTES;
     const declaredBytes = Number(req.headers['content-length']);
     let settled = false;
     let byteLength = 0;
