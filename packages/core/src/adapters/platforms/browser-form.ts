@@ -3,6 +3,8 @@ import type { Article, AuthResult, Cookie, PlatformMeta, SyncResult } from '../.
 import type { PublishOptions } from '../types'
 import { connectCdpPage, delay, resolveEnvPort, type CdpClient } from '../../lib/cdp'
 import { buildAccountIdentityScript, type AccountIdentity } from '../../lib/account-identity'
+import { parseHTML } from 'linkedom'
+import { markdownToHtml } from '../../lib/turndown'
 
 interface CdpCookie {
   name: string
@@ -114,7 +116,7 @@ abstract class BrowserFormAdapter extends CodeAdapter {
       name: config.name,
       icon: config.icon,
       homepage: config.homepage,
-      capabilities: ['article', 'draft'],
+      capabilities: config.id === 'qiehao' ? ['article', 'draft'] : ['article'],
     }
   }
 
@@ -160,6 +162,19 @@ abstract class BrowserFormAdapter extends CodeAdapter {
   }
 
   async publish(article: Article, options?: PublishOptions): Promise<SyncResult> {
+    const directMode = options?.publishMode === 'direct' || options?.draftOnly === false
+    if (this.config.id === 'qiehao' && directMode) {
+      return this.createResult(false, { error: '企鹅号暂未实现直接发布接口；当前只支持保存草稿。' })
+    }
+    // Preparation may produce plain markdown while retaining images in HTML.
+    // Until uploads are verified, reject the whole image-bearing article before CDP.
+    if (this.config.id === 'qiehao' && (article.cover
+      || [article.html || '', markdownToHtml(article.markdown || '')]
+        .some(html => parseHTML(html).document.querySelector('img, picture')))) {
+      return this.createResult(false, {
+        error: '企鹅号当前只支持纯文字草稿，图片和封面上传尚未验证；已阻止带图内容提交，请先准备独立的纯文字版本。',
+      })
+    }
     if (this.runtime.type !== 'node') {
       return this.createResult(false, {
         error: `${this.config.name} 独立发布需要 Node runtime 和网页登录会话。`,
@@ -180,10 +195,11 @@ abstract class BrowserFormAdapter extends CodeAdapter {
     }
 
     let client: CdpClient | null = null
+    let remoteTouched = false
     try {
       client = await connectCdpPage(port, this.config.publishUrl, this.config.preferredHost)
       await this.hydrateRuntimeCookies(client)
-      await client.navigate(this.config.publishUrl, 30000).catch(() => undefined)
+      await client.navigate(this.config.publishUrl, 30000)
       await delay(1200)
 
       if (this.config.id === 'huangye88') {
@@ -193,29 +209,20 @@ abstract class BrowserFormAdapter extends CodeAdapter {
         }
       }
 
-      let result = await this.fillPublishPage(client, title, body)
-      if (!result.ok && ['标题输入框', '正文编辑器'].some(text => (result.error || '').includes(text))) {
-        await delay(2500)
-        result = await this.fillPublishPage(client, title, body)
-      }
+      // Editors may auto-save during input; a disconnect must never trigger an
+      // automatic second fill or be interpreted as a clean, retryable failure.
+      remoteTouched = true
+      const result = await this.fillPublishPage(client, title, body)
       if (!result.ok) throw new Error(result.error || `${this.config.name} 发布页填充失败`)
 
-      const directMode = options?.publishMode === 'direct'
-
       if (this.config.id === 'qiehao') {
-        if (directMode) {
-          return this.createResult(false, {
-            error: '企鹅号暂未实现直接发布接口；当前只支持保存草稿。',
-          })
-        }
-
         const draft = await this.saveQiehaoDraftDirect(client, title, body)
-        if (!draft.ok) {
+        if (!draft.ok || !draft.postId) {
           throw new Error(draft.error || `${this.config.name} draft save failed`)
         }
 
         return this.createResult(true, {
-          postId: draft.postId || title,
+          postId: draft.postId,
           postUrl: draft.url || this.config.publishUrl,
           draftOnly: true,
           message: draft.message || `已保存到 ${this.config.name} 草稿箱`,
@@ -226,22 +233,26 @@ abstract class BrowserFormAdapter extends CodeAdapter {
         const submit = await this.clickDirectSubmit(client)
         if (!submit.ok) throw new Error(submit.error || `${this.config.name} 未找到直接发布按钮`)
 
-        return this.createResult(true, {
-          postId: title,
+        return this.createResult(false, {
+          uncertain: true,
           postUrl: submit.url || result.url || this.config.publishUrl,
-          draftOnly: false,
-          message: `已自动点击 ${this.config.name} 的“${submit.submitHint || '发布'}”按钮；如平台还需要分类、验证码或二次确认，请检查已打开的发布页面。`,
+          error: `${this.config.name} 未获得可验证的公开发布回执。`,
+          message: '已尝试点击提交，请先检查平台发布页及内容管理中的结果；可能需要分类、验证码或二次确认，核查前不要重复提交。',
         })
       }
 
-      return this.createResult(true, {
-        postId: title,
+      return this.createResult(false, {
+        uncertain: true,
         postUrl: result.url || this.config.publishUrl,
-        draftOnly: true,
-        message: `已在 ${this.config.name} 发布页填入标题和正文，请在浏览器中人工选择分类并确认发布。`,
+        error: `${this.config.name} 仅填入发布页，尚未确认平台草稿保存。`,
+        message: '请在平台发布页检查内容并人工保存或发布；编辑器可能已自动保存，核查前不要重复提交。',
       })
     } catch (error) {
-      return this.createResult(false, { error: (error as Error).message })
+      return this.createResult(false, {
+        error: `${this.config.name} 操作未完成，请检查平台页面。`,
+        postUrl: this.config.publishUrl,
+        ...(remoteTouched ? { uncertain: true, message: '页面输入或提交已开始，但结果未获确认；请先检查平台草稿箱和内容管理，核查前不要重复提交。' } : {}),
+      })
     } finally {
       client?.close()
     }
@@ -629,21 +640,20 @@ abstract class BrowserFormAdapter extends CodeAdapter {
       let json = null;
       try { json = JSON.parse(text); } catch {}
       const code = json?.response?.code ?? json?.code;
-      const message = json?.response?.msg || json?.msg || json?.message || text;
       const articleId = json?.data?.articleId || json?.data?.article_id || '';
-      if (response.ok && String(code) === '0') {
-        fetch('/editorCache/delete?mediaid=' + encodeURIComponent(mediaId), { credentials: 'include' }).catch(() => undefined);
+      const validId = (typeof articleId === 'string' || typeof articleId === 'number') && /^[A-Za-z0-9_-]+$/.test(String(articleId)) && String(articleId) !== '0';
+      if (response.ok && String(code) === '0' && validId) {
         return {
           ok: true,
-          url: articleId ? 'https://om.qq.com/main/management/articleManage' : location.href,
-          postId: articleId || title,
-          message: articleId ? 'Saved to Qiehao draft box' : (message || 'Saved to Qiehao draft box'),
+          url: 'https://om.qq.com/main/management/articleManage',
+          postId: String(articleId),
+          message: '已收到企鹅号草稿保存回执，请到内容管理核对。',
         };
       }
       return {
         ok: false,
         url: location.href,
-        error: message || ('Qiehao draft API returned HTTP ' + response.status),
+        error: '企鹅号未返回有效草稿保存回执，请先检查内容管理，避免重复提交。',
       };
     })()`, 30000)
   }

@@ -10,6 +10,10 @@ dist
 coverage
 *.zip
 publisher-dashboard/data/
+publisher-dashboard/downloads/
+playwright-report/
+test-results/
+docs/qa/evidence/
 .superpowers/
 .worktrees/
 

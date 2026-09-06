@@ -17,6 +17,10 @@ const INTERACTIVE_AUTH_PLATFORMS = new Set([
   '51sole',
 ]);
 const PLATFORM_NAMES = {
+  jianshu: '简书',
+  netease: '网易号',
+  uisdc: '优设',
+  sspai: '少数派',
   weixin: '微信公众号',
   zhihu: '知乎',
   juejin: '掘金',
@@ -37,6 +41,10 @@ const PLATFORM_NAMES = {
 };
 
 const PLATFORM_ICON_FILES = {
+  jianshu: '/assets/platform-icons/jianshu.png',
+  netease: '/assets/platform-icons/netease.png',
+  uisdc: '/assets/platform-icons/uisdc.ico',
+  sspai: '/assets/platform-icons/sspai.ico',
   zhihu: '/assets/platform-icons/zhihu.ico',
   juejin: '/assets/platform-icons/juejin.png',
   douyin: '/assets/platform-icons/douyin.ico',
@@ -74,11 +82,13 @@ const PLATFORM_ICON_FILES = {
 
 const LOGIN_PLATFORM_PRIORITY = [
   'weixin',
-  'douyin',
-  'toutiao',
+  'woshipm',
+  'sspai',
   'xiaohongshu',
-  'qiehao',
+  'uisdc',
+  'douyin',
   'zhihu',
+  'toutiao',
   'juejin',
   'csdn',
   'weibo',
@@ -88,7 +98,7 @@ const LOGIN_PLATFORM_PRIORITY = [
   'douban',
   'sohu',
   'xueqiu',
-  'woshipm',
+  'qiehao',
   '51cto',
   'imooc',
   'oschina',
@@ -120,17 +130,12 @@ const HISTORY_STATUSES = [
   ['local_draft', '本地草稿'],
   ['running', '发布中'],
 ];
-const EMPLOYEES = [
-  { id: 'content-editor', name: '内容编辑员', role: '正文与配图整理', avatar: '编' },
-  { id: 'layout-agent', name: '排版整理员', role: '模板排版适配', avatar: '排' },
-  { id: 'publisher-agent', name: '发布协同员', role: '草稿同步发布', avatar: '发' },
-];
 const SIDEBAR_COLLAPSED_KEY = 'content-workbench.sidebarCollapsed';
-const ACTIVE_EMPLOYEE_KEY = 'content-workbench.activeEmployeeId';
 const MAX_IMPORT_FILE_BYTES = 5 * 1024 * 1024;
 const CONTENT_CHANGED_DURING_SAVE_MESSAGE = '正文在保存期间又有修改，请先保存后重试';
 const IMPORT_FILE_EXTENSION = /\.(?:md|markdown|html|htm|txt)$/i;
-const FEATURED_PREVIEW_PLATFORMS = ['weixin', 'zhihu', 'juejin', 'xiaohongshu', 'toutiao'];
+const FEATURED_PREVIEW_PLATFORMS = ['weixin', 'woshipm', 'sspai', 'xiaohongshu', 'uisdc', 'douyin'];
+const UISDC_SUBMISSION_URL = 'https://www.uisdc.com/contribution?type=post';
 const PREVIEW_FORMAT_LABELS = {
   html: 'HTML',
   markdown: 'Markdown',
@@ -138,17 +143,22 @@ const PREVIEW_FORMAT_LABELS = {
 };
 
 const state = {
-  activeView: 'dashboard',
+  activeView: 'content',
   data: null,
   workbenchCsrfToken: '',
-  activeEmployeeId: getStoredEmployeeId(),
-  employeeMenuOpen: false,
+  recoveryContext: null,
+  recoveryRequestVersion: 0,
+  recoveryBusy: false,
+  publishRecoveryError: null,
   selectedDate: '',
   planStartDate: '',
   planEndDate: '',
   selectedContentId: '',
   contentPage: 1,
   contentPageSize: 8,
+  contentMode: 'edit',
+  libraryVisibility: 'auto',
+  templateCatalogNamed: false,
   dirtyContentIds: new Set(),
   contentEditRevisions: new Map(),
   contentOperationLocks: new Map(),
@@ -163,6 +173,8 @@ const state = {
   previewLoading: new Set(),
   previewErrors: new Map(),
   previewDevice: 'desktop',
+  draftPreviewTimer: null,
+  wechatTemplateChoices: new Map(),
   selectedWechatTemplate: '',
   pendingSinglePublish: null,
   singlePublishSubmitting: false,
@@ -176,6 +188,10 @@ const state = {
   importReadToken: 0,
   importReader: null,
   importSubmitting: false,
+  topicRun: null,
+  topicLoading: false,
+  topicPollTimer: null,
+  topicRequestVersion: 0,
   selectedPlatforms: new Set(),
   loginSessions: {},
   loginStarting: new Set(),
@@ -216,89 +232,17 @@ function setStoredSidebarCollapsed(collapsed) {
   }
 }
 
-function getStoredEmployeeId() {
-  try {
-    const stored = localStorage.getItem(ACTIVE_EMPLOYEE_KEY);
-    return EMPLOYEES.some(employee => employee.id === stored) ? stored : EMPLOYEES[0].id;
-  } catch {
-    return EMPLOYEES[0].id;
-  }
-}
-
-function setStoredEmployeeId(id) {
-  try {
-    localStorage.setItem(ACTIVE_EMPLOYEE_KEY, id);
-  } catch {
-    // Ignore storage errors in restricted browser modes.
-  }
-}
-
-function getActiveEmployee() {
-  return EMPLOYEES.find(employee => employee.id === state.activeEmployeeId) || EMPLOYEES[0];
-}
-
-function renderEmployeeSelector() {
-  const active = getActiveEmployee();
-  const card = $('[data-action="toggle-employee-menu"]');
-  if (card) {
-    card.dataset.employeeId = active.id;
-    card.setAttribute('aria-expanded', state.employeeMenuOpen ? 'true' : 'false');
-    card.setAttribute('aria-label', `当前操控员工：${active.name}，点击选择员工`);
-    card.setAttribute('title', `当前：${active.name}，点击选择员工`);
-  }
-  const picker = $('[data-employee-picker]');
-  if (picker) picker.classList.toggle('open', state.employeeMenuOpen);
-  const menu = $('[data-employee-menu]');
-  if (menu) {
-    menu.innerHTML = EMPLOYEES.map(employee => `
-      <button
-        class="employee-menu-item ${employee.id === active.id ? 'active' : ''}"
-        type="button"
-        data-action="select-employee"
-        data-id="${escapeHtml(employee.id)}"
-        role="menuitem"
-      >
-        <span class="employee-menu-avatar">${escapeHtml(employee.avatar)}</span>
-        <span>
-          <strong>${escapeHtml(employee.name)}</strong>
-          <em>${escapeHtml(employee.role)}</em>
-        </span>
-      </button>
-    `).join('');
-  }
-  const avatar = $('[data-employee-avatar]');
-  const name = $('[data-employee-name]');
-  const role = $('[data-employee-role]');
-  if (avatar) avatar.textContent = active.avatar;
-  if (name) name.textContent = active.name;
-  if (role) role.textContent = active.role;
-}
-
-function setEmployeeMenuOpen(open) {
-  state.employeeMenuOpen = Boolean(open);
-  renderEmployeeSelector();
-}
-
-function selectEmployee(id) {
-  const next = EMPLOYEES.find(employee => employee.id === id);
-  if (!next) return;
-  state.activeEmployeeId = next.id;
-  setStoredEmployeeId(next.id);
-  setEmployeeMenuOpen(false);
-  toast(`已切换为 ${next.name}`);
-}
 
 function applySidebarCollapsed(collapsed) {
   document.body.classList.toggle('sidebar-collapsed', collapsed);
   const button = $('[data-action="toggle-sidebar"]');
   if (!button) return;
   button.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-  button.setAttribute('aria-label', collapsed ? '展开工作台' : '折叠工作台');
-  button.setAttribute('title', collapsed ? '展开工作台' : '折叠工作台');
+  button.setAttribute('aria-label', collapsed ? '展开菜单' : '折叠菜单');
+  button.setAttribute('title', collapsed ? '展开菜单' : '折叠菜单');
 }
 
 applySidebarCollapsed(getStoredSidebarCollapsed());
-renderEmployeeSelector();
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -348,8 +292,8 @@ function sortLoginPlatforms(platforms) {
   return [...platforms].sort((a, b) => {
     const aPriority = LOGIN_PLATFORM_PRIORITY.indexOf(a.id);
     const bPriority = LOGIN_PLATFORM_PRIORITY.indexOf(b.id);
-    const aRank = aPriority >= 0 ? aPriority : FORUM_PLATFORM_IDS.has(a.id) ? 1000 : 500;
-    const bRank = bPriority >= 0 ? bPriority : FORUM_PLATFORM_IDS.has(b.id) ? 1000 : 500;
+    const aRank = Number.isInteger(a.catalog_order) ? a.catalog_order : aPriority >= 0 ? aPriority : FORUM_PLATFORM_IDS.has(a.id) ? 1000 : 500;
+    const bRank = Number.isInteger(b.catalog_order) ? b.catalog_order : bPriority >= 0 ? bPriority : FORUM_PLATFORM_IDS.has(b.id) ? 1000 : 500;
     if (aRank !== bRank) return aRank - bRank;
     return String(a.name || a.id).localeCompare(String(b.name || b.id), 'zh-CN');
   });
@@ -357,7 +301,7 @@ function sortLoginPlatforms(platforms) {
 
 function platformName(id) {
   const platform = state.data?.platforms?.find(item => item.id === id);
-  return platform?.name || PLATFORM_NAMES[id] || id;
+  return platform?.name || state.data?.platformLabels?.[id] || PLATFORM_NAMES[id] || id;
 }
 
 function planStatusOptions(status) {
@@ -383,8 +327,10 @@ function statusLabel(status) {
     success: '发布成功',
     draft_saved: '草稿已保存',
     platform_draft: '平台草稿已保存',
+    exported: '本地导出已完成',
     partial_failed: '部分失败',
     uncertain: '结果待核对',
+    retry_allowed: '人工确认可重新准备',
     failed: '发布失败',
     local_draft: '本地草稿',
     running: '发布中',
@@ -428,6 +374,7 @@ async function loadLayoutTemplates() {
   state.layoutTemplatesError = '';
   layoutTemplatesRequest = request('/api/layout-templates')
     .then(result => {
+      state.templateCatalogNamed = result.catalogVersion === 1;
       state.layoutTemplates = Array.isArray(result.templates)
         ? result.templates.filter(template => (
           template
@@ -500,7 +447,8 @@ function syncContentPageToSelected() {
 }
 
 function applyContentPlatforms(content) {
-  state.selectedPlatforms = new Set(Array.isArray(content?.selected_platforms) ? content.selected_platforms : []);
+  const active=new Set((state.data?.platforms || []).map(p=>p.id));
+  state.selectedPlatforms = new Set((Array.isArray(content?.selected_platforms) ? content.selected_platforms : []).filter(id=>active.has(id)));
 }
 
 function switchView(view) {
@@ -659,6 +607,7 @@ function render() {
   renderPublish();
   renderPlatformLogin();
   renderHistory();
+  renderRecoveryBanners();
 }
 
 function renderDashboard() {
@@ -735,6 +684,7 @@ function platformAccountLabel(platform) {
 }
 
 function platformCard(platform) {
+  const manualAuth=platform.auto_check_auth===false && platform.id!=='zip-download';
   const checking = state.authChecking.has(platform.id);
   const loggedIn = platform.auth_status === 'logged_in';
   const loggedOut = platform.auth_status === 'logged_out';
@@ -742,15 +692,15 @@ function platformCard(platform) {
   const starting = state.loginStarting.has(platform.id);
   const finishing = state.loginFinishing.has(platform.id);
   const loginLabel = pendingSession
-    ? (finishing ? '导出中' : '完成登录')
-    : (starting ? '打开中' : (loggedIn ? '重新登录' : '去登录'));
+    ? (finishing ? '保存连接中' : manualAuth ? '完成连接' : '完成登录')
+    : (starting ? '打开中' : manualAuth ? '连接登录窗口' : (loggedIn ? '重新登录' : '去登录'));
   const accountLabel = platformAccountLabel(platform);
-  const statusClass = loggedIn ? 'logged-in' : loggedOut ? 'logged-out' : 'unknown';
+  const statusClass = manualAuth ? 'unknown' : loggedIn ? 'logged-in' : loggedOut ? 'logged-out' : 'unknown';
   const cardClass = [
     checking ? 'checking' : '',
     statusClass,
   ].filter(Boolean).join(' ');
-  const metaText = checking
+  const metaText = manualAuth ? '手工写作入口，登录情况以官网显示为准' : checking
     ? '正在检查登录状态...'
     : loggedIn
       ? accountLabel
@@ -762,7 +712,7 @@ function platformCard(platform) {
     : checking
       ? '<span class="checking-badge">检查中</span>'
       : loggedIn
-      ? ''
+      ? platform.id === 'zip-download' ? '<span class="field-note">无需登录</span>' : `<button class="mini-btn login-mini" data-action="start-login" data-platform="${platform.id}" title="重新连接登录浏览器">重新连接</button>`
       : `<button class="mini-btn login-mini needs-login" data-action="start-login" data-platform="${platform.id}" ${starting || checking ? 'disabled' : ''} title="${escapeHtml(loginLabel)}">${escapeHtml(loginLabel)}</button>`;
   return `
     <div class="platform-card ${cardClass}" data-platform-card="${platform.id}">
@@ -770,10 +720,11 @@ function platformCard(platform) {
         ${platformAvatar(platform)}
         <div class="platform-copy">
           <strong>${escapeHtml(platform.name)}</strong>
-          <span class="platform-meta">${escapeHtml(metaText)}</span>
+          <span class="platform-meta">${platform.id === 'uisdc' ? '手工投稿 · ' : ''}${escapeHtml(metaText)}</span>
         </div>
       </div>
       <div class="platform-actions">
+        ${platform.manual_url || platform.id==='uisdc' ? `<button class="mini-btn" data-action="open-platform-session" data-platform="${escapeHtml(platform.id)}" data-url="${escapeHtml(platform.manual_url || UISDC_SUBMISSION_URL)}">${platform.id==='uisdc'?'去投稿':'打开写作后台'}</button>` : ''}
         ${actionHtml}
       </div>
     </div>
@@ -790,13 +741,15 @@ function renderPlans() {
     <div class="section-head plan-page-head">
       <div>
         <h1>选题计划</h1>
-        <p>按日期范围编辑选题方向，支持批量新增多天计划，并直接从表格生成内容。</p>
+        <p>先采集真实线索，再用共用选题 Skill 分析；采用后进入计划，不自动写稿或发布。</p>
       </div>
       <div class="toolbar">
         <button class="secondary" data-action="open-plan-range">新增计划</button>
         <button class="primary" data-action="go-history">发布历史</button>
       </div>
     </div>
+
+    ${topicResearchPanel()}
 
     <div class="panel plan-filter-panel">
       <div class="panel-head plan-card-head">
@@ -859,13 +812,13 @@ function renderPlans() {
 function planActions(plan) {
   const mainAction = plan.content_id
     ? `<button class="row-primary-action" data-action="open-content" data-id="${plan.content_id}">编辑正文</button>`
-    : `<button class="row-primary-action" data-action="generate-content-from-date" data-date="${plan.date}">生成内容</button>`;
+    : `<button class="row-primary-action" data-action="open-import-dialog">导入成稿</button>`;
   const menuActions = [
     `<button data-action="save-plan" data-date="${plan.date}">保存修改</button>`,
     `<button data-action="generate-topics" data-date="${plan.date}">启动选题</button>`,
   ];
   if (plan.content_id) {
-    menuActions.push(`<button data-action="generate-content-from-date" data-date="${plan.date}">重新生成</button>`);
+    menuActions.push(`<button data-action="open-content" data-id="${plan.content_id}">打开关联文章</button>`);
   }
   return `
     ${mainAction}
@@ -899,7 +852,11 @@ function ensureActivePreviewPlatform() {
 }
 
 function platformPreviewKey(content, platform) {
-  return `${content?.id || ''}::${content?.updated_at || content?.created_at || ''}::${platform || ''}`;
+  const revision = typeof state !== 'undefined' && state.dirtyContentIds?.has(String(content?.id))
+    ? `draft-${state.contentEditRevisions?.get(String(content.id)) || 0}` : content?.updated_at || content?.created_at || '';
+  const template = platform === 'weixin' && String(revision).startsWith('draft-')
+    ? `::${state.selectedWechatTemplate || ''}` : '';
+  return `${content?.id || ''}::${revision}::${platform || ''}${template}`;
 }
 
 function clearPlatformPreviews(contentId) {
@@ -921,10 +878,16 @@ async function loadPlatformPreview(content, platform) {
   state.previewLoading.add(key);
   renderPlatformAdaptationPane();
   try {
-    const result = await request(`/api/content/${encodeURIComponent(content.id)}/platform-preview?platform=${encodeURIComponent(platform)}`);
-    state.previewCache.set(key, result.preview);
+    const dirty = state.dirtyContentIds.has(String(content.id));
+    const result = dirty ? await request(`/api/content/${encodeURIComponent(content.id)}/draft-preview`, {
+      method: 'POST', body: JSON.stringify({ platform, template: state.selectedWechatTemplate,
+        title: $(`[data-content-title="${content.id}"]`)?.value ?? content.title,
+        summary: $(`[data-content-summary="${content.id}"]`)?.value ?? content.summary,
+        body: $(`[data-content-body="${content.id}"]`)?.innerHTML ?? content.body }),
+    }) : await request(`/api/content/${encodeURIComponent(content.id)}/platform-preview?platform=${encodeURIComponent(platform)}`);
+    if (key === platformPreviewKey(getSelectedContent(), platform)) state.previewCache.set(key, result.preview);
   } catch (error) {
-    state.previewErrors.set(key, error.message || '平台预览加载失败');
+    if (key === platformPreviewKey(getSelectedContent(), platform)) state.previewErrors.set(key, error.message || '平台预览加载失败');
   } finally {
     state.previewLoading.delete(key);
     renderPlatformAdaptationPane();
@@ -932,6 +895,10 @@ async function loadPlatformPreview(content, platform) {
 }
 
 function selectPreviewPlatform(platform) {
+  if (state.contentOperationLocks.has(String(state.selectedContentId))) {
+    toast('正文操作正在进行，请稍候', 'error');
+    return;
+  }
   if (!state.data?.platforms?.some(item => item.id === platform)) {
     toast('当前平台不可用', 'error');
     return;
@@ -945,7 +912,7 @@ function previewLimitChips(preview) {
   const limits = preview?.limits || {};
   const chips = [
     `<span>${escapeHtml(PREVIEW_FORMAT_LABELS[preview?.format] || preview?.format || '未知格式')}</span>`,
-    `<span>${Number(preview?.imageCount || 0)} 张图片</span>`,
+    `<span>${Number(preview?.imageCount || 0)} 个图片引用</span>`,
   ];
   if (Number.isFinite(limits.maxTitleLength)) {
     chips.push(`<span>标题上限 ${limits.maxTitleLength} 字</span>`);
@@ -958,7 +925,18 @@ function previewLimitChips(preview) {
 
 function platformPreviewDocument(preview, platform) {
   if (preview.format === 'html') {
-    const srcdoc = preview.htmlPreview || preview.content || '';
+    const html = preview.htmlPreview || preview.content || '';
+    // The iframe is its own document: dashboard CSS cannot constrain its images.
+    // Keep WeChat's template HTML untouched; supply a reading canvas for woshipm.
+    const srcdoc = ['woshipm','uisdc','jianshu','netease'].includes(platform) ? `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+      html{background:#fff;color:#252525;}body{margin:0;font:16px/1.85 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;}
+      .workbench-reading-column{box-sizing:border-box;width:100%;max-width:760px;min-width:0;margin:0 auto;padding:32px;overflow-wrap:anywhere;}
+      .workbench-reading-column p,.workbench-reading-column figure{margin:0 0 1.4em;max-width:100%;}
+      .workbench-reading-column img{box-sizing:border-box;display:block;max-width:100%!important;min-width:0!important;height:auto!important;margin-left:auto;margin-right:auto;}
+      .workbench-reading-column h1{font-size:28px;line-height:1.5;margin:0 0 24px;}.workbench-reading-column h2{font-size:22px;line-height:1.5;margin:1.7em 0 .8em;}
+      .workbench-reading-column pre{max-width:100%;overflow:auto;}.workbench-reading-column blockquote{margin:1.4em 0;padding-left:16px;border-left:3px solid #ddd;}
+      @media(max-width:600px){.workbench-reading-column{padding:20px 16px;}.workbench-reading-column h1{font-size:24px;}}
+      </style></head><body><main class="workbench-reading-column">${html}</main></body></html>` : html;
     return `
       <iframe class="platform-preview-iframe" title="${escapeHtml(platformName(platform))}适配预览" sandbox srcdoc="${escapeHtml(srcdoc)}" referrerpolicy="no-referrer"></iframe>
     `;
@@ -967,7 +945,8 @@ function platformPreviewDocument(preview, platform) {
 }
 
 function wechatTemplateControls(content) {
-  const templateOptions = state.layoutTemplates.map(template => `
+  const choices = state.templateCatalogNamed ? distinctWechatTemplates(state.layoutTemplates, state.selectedWechatTemplate) : state.layoutTemplates;
+  const templateOptions = choices.map(template => `
     <option value="${escapeHtml(template.filename)}" ${template.filename === state.selectedWechatTemplate ? 'selected' : ''}>${escapeHtml(template.label)}</option>
   `).join('');
   const unavailableMessage = state.layoutTemplatesError
@@ -982,7 +961,7 @@ function wechatTemplateControls(content) {
   return `
     <div class="wechat-layout-tools">
       <div class="wechat-template-field">
-        <label for="wechat-template-select">公众号排版模板（40 套）</label>
+        <label for="wechat-template-select">公众号排版模板（${choices.length} ${state.templateCatalogNamed ? '种风格' : '个模板文件'}）</label>
         <select id="wechat-template-select" data-wechat-template-select ${templateDisabled ? 'disabled' : ''}>
           ${templateOptions || '<option value="">模板载入后可选择</option>'}
         </select>
@@ -993,6 +972,7 @@ function wechatTemplateControls(content) {
         <a class="secondary link-action" href="${previewUrl}" target="_blank" rel="noopener">打开完整 HTML</a>
       </div>
       ${unavailableMessage}
+      ${state.templateCatalogNamed && choices.length < state.layoutTemplates.length ? '<p class="field-note template-alias-note">同款副本已合并展示，已有文章的模板关联不变。</p>' : ''}
     </div>
   `;
 }
@@ -1025,14 +1005,21 @@ function platformPreviewResult(content, platform) {
     return '<div class="platform-preview-state" role="status" aria-live="polite"><strong>正在准备预览</strong></div>';
   }
 
-  const warnings = preview.warnings?.length
-    ? `<ul>${preview.warnings.map(warning => `<li>${escapeHtml(warning)}</li>`).join('')}</ul>`
-    : '<p class="preview-check-ok">未发现平台限制警告</p>';
+  const notices = [...(preview.warnings || [])];
+  const imageHtml = String(preview.article?.html || preview.htmlPreview || '');
+  const relativeImages = [...imageHtml.matchAll(/<img\b[^>]*\bsrc=["']([^"']*)["']/gi)]
+    .filter(match => !/^(?:https?:|data:image\/|\/uploads\/)/i.test(match[1])).length;
+  if (relativeImages) notices.push(`存在 ${relativeImages} 个本地或相对图片引用，尚不能确认平台可访问。`);
+  if (platform === 'woshipm' && /<table\b/i.test(imageHtml)) {
+    notices.push('当前适配器尚未将表格转成图片，投递前需要处理。');
+  }
+  const warnings = notices.length
+    ? `<ul>${notices.map(warning => `<li>${escapeHtml(warning)}</li>`).join('')}</ul>`
+    : '<p class="preview-check-ok">基础格式已处理。图片可用性与平台最终效果仍需核对。</p>';
   return `
     <div class="platform-preview-summary">
       <div>
-        <strong>${escapeHtml(preview.title || content.title)}</strong>
-        <span>${escapeHtml(platformName(platform))} 平台适配稿</span>
+        <span>${escapeHtml(platformName(platform))} · ${preview.sourceState === 'unsaved' ? '未保存编辑预览，不会自动保存或发布' : '已保存母稿的适配结果'}</span>
       </div>
       <div class="preview-limit-chips">${previewLimitChips(preview)}</div>
     </div>
@@ -1050,14 +1037,17 @@ function platformPreviewResult(content, platform) {
 function platformAdaptationHtml(content) {
   ensureActivePreviewPlatform();
   const platform = state.activePreviewPlatform;
-  const allPlatforms = state.data?.platforms || [];
+  const allPlatforms = sortLoginPlatforms(state.data?.platforms || []);
   const featured = FEATURED_PREVIEW_PLATFORMS.map(id => previewPlatformRecord(id));
   const activeIsFeatured = FEATURED_PREVIEW_PLATFORMS.includes(platform);
   const rovingTabPlatform = activeIsFeatured ? platform : FEATURED_PREVIEW_PLATFORMS[0];
+  const preparation = platformPreparationMode(platform);
+  const manualOnly = preparation === 'manual';
+  const manualUrl = allPlatforms.find(p=>p.id===platform)?.manual_url || (platform==='uisdc' ? UISDC_SUBMISSION_URL : '');
+  const handoff = platformHandoffResult(content.id, platform);
   return `
     <div class="platform-adaptation-head">
       <div>
-        <span class="pane-eyebrow">平台适配</span>
         <h2>${escapeHtml(platformName(platform))} 预览</h2>
       </div>
       <div class="preview-device-control" role="group" aria-label="预览设备">
@@ -1066,6 +1056,7 @@ function platformAdaptationHtml(content) {
       </div>
     </div>
 
+    <div class="platform-selection-row">
     <div class="platform-preview-tabs" role="tablist" aria-label="常用平台">
       ${featured.map(item => `
         <button id="${escapeHtml(platformTabId(item.id))}" type="button" role="tab" aria-controls="platform-preview-panel" aria-selected="${platform === item.id}" tabindex="${rovingTabPlatform === item.id ? '0' : '-1'}" class="platform-preview-tab ${platform === item.id ? 'active' : ''}" data-action="select-preview-platform" data-platform="${escapeHtml(item.id)}" data-platform-focus-key="tab:${escapeHtml(item.id)}">
@@ -1082,16 +1073,20 @@ function platformAdaptationHtml(content) {
       </select>
     </label>
 
+    </div>
     <div id="platform-preview-panel" class="platform-preview-panel" role="tabpanel" ${activeIsFeatured ? `aria-labelledby="${escapeHtml(platformTabId(platform))}"` : `aria-label="${escapeHtml(platformName(platform))} 平台适配预览"`}>
       ${platform === 'weixin' ? wechatTemplateControls(content) : ''}
 
+      <div class="platform-publish-actions">
+        ${manualOnly ? `<button class="primary" type="button" data-action="open-platform-session" data-platform="${escapeHtml(platform)}" data-url="${escapeHtml(manualUrl)}" ${manualUrl?'':'disabled'}>${platform==='uisdc'?'去优设投稿':'打开写作后台'}</button>` : `
+        <button class="primary" type="button" data-action="open-platform-draft" data-id="${escapeHtml(content.id)}" data-platform="${escapeHtml(platform)}">${preparation === 'editor' ? '准备平台编辑器' : preparation === 'draft-text' ? '同步纯文字草稿' : preparation === 'export' ? '导出到本机' : '同步该平台草稿'}</button>
+        ${preparation !== 'export' ? `<button class="secondary" type="button" data-action="open-platform-session" data-platform="${escapeHtml(platform)}" data-url="${escapeHtml(handoff?.url || '')}" ${handoff?.url ? '' : 'disabled'} aria-describedby="platform-delivery-note">${handoff?.status === 'uncertain' ? '去平台核对结果' : '检查草稿并发表'}</button>` : ''}
+        `}
+      </div>
+      <p id="platform-delivery-note" class="field-note platform-delivery-note">${manualOnly ? '此平台需在官方写作入口手工投稿，工作台只提供本地预览。' : preparation === 'export' ? '只导出到本机，不会发表文章。' : `${preparation === 'editor' ? '只准备编辑器内容，不能确认云端草稿已保存。' : preparation === 'draft-text' ? '仅支持纯文字草稿，带图或封面会阻止同步。' : '同步只保存平台草稿，不会公开发表。'}${handoff?.url ? '核对入口打开最近一次同步的稿件；本地后续修改不会自动覆盖它。' : '同步后会提供对应的稿件核对入口。'}最终内容、发表时间和通知方式由你在平台确认。${platform === 'weixin' ? '公众号“不群发通知”仍是公开发表，不是草稿；发表时请单独检查群发通知开关。' : ''}`}</p>
+
       <div class="platform-preview-live" data-platform-preview-live>
         ${platformPreviewResult(content, platform)}
-      </div>
-
-      <div class="platform-publish-actions">
-        <button class="secondary" type="button" data-action="open-platform-draft" data-id="${escapeHtml(content.id)}" data-platform="${escapeHtml(platform)}">保存该平台草稿</button>
-        <button class="primary" type="button" data-action="open-platform-direct" data-id="${escapeHtml(content.id)}" data-platform="${escapeHtml(platform)}">直接发布该平台</button>
       </div>
     </div>
   `;
@@ -1125,24 +1120,31 @@ function renderContent() {
   const start = (state.contentPage - 1) * state.contentPageSize;
   const contents = allContents.slice(start, start + state.contentPageSize);
   const selected = allContents.find(content => content.id === state.selectedContentId) || null;
+  if (selected) {
+    const stored = String(selected.layout_html || '').match(/data-wechat-template="([^"]+)"/);
+    state.selectedWechatTemplate = state.wechatTemplateChoices?.get(selected.id) || stored?.[1] || state.selectedWechatTemplate;
+  }
   ensureActivePreviewPlatform();
   $('#view-content').innerHTML = `
     <div class="section-head">
       <div>
         <h1>内容中心</h1>
-        <p>维护一份标准正文，并按平台查看适配结果、保存草稿或直接发布。</p>
+        <p>写好一篇文章，在这里整理、预览，再交给各个平台。</p>
       </div>
       <div class="toolbar">
+        <span class="workspace-local-note">母稿保存在本机</span>
+        <button class="secondary" type="button" data-action="toggle-content-library" aria-controls="content-library">文章列表（${allContents.length}）</button>
         <button class="primary" type="button" data-action="open-import-dialog">导入文章</button>
       </div>
     </div>
 
-    <div class="content-layout content-layout-stacked">
-      <div class="panel content-list-panel content-list-wide">
+    <div data-publish-recovery-banner></div>
+    <div class="content-layout content-layout-stacked" data-library-visibility="${state.libraryVisibility || 'auto'}">
+      <div id="content-library" class="panel content-list-panel content-list-wide">
         <div class="panel-head compact-head">
           <div>
-            <h2>文章列表</h2>
-            <span>${allContents.length} 篇内容 · 横向滑动浏览</span>
+            <h2>我的文章</h2>
+            <span>${allContents.length} 篇 · 本地内容库</span>
           </div>
         </div>
         <div class="content-list content-strip">
@@ -1153,7 +1155,7 @@ function renderContent() {
               <span class="content-item-summary">${escapeHtml(content.summary || '点击打开正文草稿')}</span>
               <span class="content-item-meta">${formatTime(content.updated_at || content.created_at)} ${statePill(content.status)}</span>
             </button>
-          `).join('') : '<div class="empty">暂无内容，先从选题计划生成正文</div>'}
+          `).join('') : '<div class="empty">还没有文章。导入一篇写好的稿件，开始整理与分发。</div>'}
         </div>
         ${contentPagination(allContents.length, totalPages)}
       </div>
@@ -1166,6 +1168,8 @@ function renderContent() {
     </div>
   `;
   if (selected) bindContentEditorDirtyTracking(selected.id);
+  renderRecoveryBanners();
+  if (typeof syncContentLibraryButton === 'function') syncContentLibraryButton();
   if (selected && state.activeView === 'content') {
     void loadPlatformPreview(selected, state.activePreviewPlatform);
   }
@@ -1177,7 +1181,7 @@ function contentDetail(content) {
     <div class="content-detail-head">
       <div class="content-title-block">
         <h2>${escapeHtml(content.title)}</h2>
-        <p>${escapeHtml(content.summary || '')}</p>
+        <p class="content-detail-description">一份母稿，分别检查各平台的呈现与投递结果。</p>
         <div class="content-status-row">
           ${statePill(content.status)}
           <span>${escapeHtml(content.type || '内容稿')}</span>
@@ -1185,32 +1189,41 @@ function contentDetail(content) {
         </div>
       </div>
       <div class="editor-actions">
-        <button class="secondary compact-action editor-save-action ${isDirty ? '' : 'is-hidden'}" type="button" data-action="save-content" data-id="${escapeHtml(content.id)}" data-save-content-button="${escapeHtml(content.id)}">保存正文</button>
-        <button class="secondary compact-action" type="button" data-action="save-draft" data-id="${escapeHtml(content.id)}">保存到内容中心草稿</button>
+        <button class="primary compact-action editor-save-action ${isDirty ? '' : 'is-hidden'}" type="button" data-action="save-content" data-id="${escapeHtml(content.id)}" data-save-content-button="${escapeHtml(content.id)}">保存正文</button>
+        <button class="secondary compact-action" type="button" data-action="save-draft" data-id="${escapeHtml(content.id)}">保存本地草稿</button>
       </div>
     </div>
-    <div class="content-adaptation-workspace">
-      <section class="canonical-editor-pane" aria-labelledby="canonical-editor-heading">
-        <div class="workspace-pane-head">
+    <div class="content-mode-toolbar">
+      <div class="content-mode-tabs" role="tablist" aria-label="写作与平台预览">
+        <button id="content-mode-edit" type="button" role="tab" data-action="select-content-mode" data-content-mode="edit" aria-controls="content-editor-panel" aria-selected="${state.contentMode !== 'preview'}" tabindex="${state.contentMode !== 'preview' ? '0' : '-1'}">编辑正文</button>
+        <button id="content-mode-preview" type="button" role="tab" data-action="select-content-mode" data-content-mode="preview" aria-controls="content-preview-panel" aria-selected="${state.contentMode === 'preview'}" tabindex="${state.contentMode === 'preview' ? '0' : '-1'}">平台预览</button>
+      </div>
+      <span class="field-note">切换保留当前编辑，不会自动保存</span>
+    </div>
+    <div class="content-adaptation-workspace" data-content-mode="${state.contentMode || 'edit'}">
+      <section id="content-editor-panel" class="canonical-editor-pane" role="tabpanel" aria-labelledby="content-mode-edit" ${state.contentMode === 'preview' ? 'hidden' : ''}>
+        <div class="workspace-pane-head visually-hidden">
           <div>
-            <span class="pane-eyebrow">标准母稿</span>
             <h2 id="canonical-editor-heading">正文编辑</h2>
-            <p>这里的标题、摘要和正文是所有平台适配的唯一母稿。</p>
+            <p>专注正文，切换到平台预览检查格式。</p>
           </div>
         </div>
 
+        <details class="article-metadata">
+          <summary>标题与摘要 <span>展开编辑</span></summary>
         <div class="canonical-editor-fields" data-user-editable>
           <label for="canonical-title-editor"><span>文章标题</span></label>
           <input id="canonical-title-editor" type="text" value="${escapeHtml(content.title)}" data-content-title="${escapeHtml(content.id)}" aria-describedby="canonical-save-hint">
           <label for="canonical-summary-editor"><span>文章摘要</span></label>
           <textarea id="canonical-summary-editor" rows="3" data-content-summary="${escapeHtml(content.id)}" aria-describedby="canonical-save-hint">${escapeHtml(content.summary || '')}</textarea>
         </div>
+        </details>
         <div class="canonical-body-label" id="canonical-body-label">文章正文</div>
         <div class="content-editor rich-content-editor" data-content-body="${escapeHtml(content.id)}" data-user-editable data-imported-article contenteditable="true" role="textbox" aria-multiline="true" aria-labelledby="canonical-body-label" aria-describedby="canonical-save-hint" spellcheck="false">${editableArticleHtml(content)}</div>
-        <p id="canonical-save-hint" class="field-note">修改后点击“保存正文”，平台预览会基于最新母稿重新生成。</p>
+        <p id="canonical-save-hint" class="field-note">切到“平台预览”查看当前编辑的呈现；点击“保存正文”才会保存。摘要可以留空，平台发布仍使用已确认保存的版本。</p>
       </section>
 
-      <section class="platform-adaptation-pane" data-platform-adaptation-pane data-content-id="${escapeHtml(content.id)}" aria-label="平台适配预览">
+      <section id="content-preview-panel" class="platform-adaptation-pane" role="tabpanel" aria-labelledby="content-mode-preview" data-platform-adaptation-pane data-content-id="${escapeHtml(content.id)}" ${state.contentMode === 'preview' ? '' : 'hidden'}>
         ${platformAdaptationHtml(content)}
       </section>
     </div>
@@ -1293,16 +1306,18 @@ function openLayoutDialog(content) {
 
 function renderPublish() {
   const content = getSelectedContent();
-  const platforms = state.data.platforms;
-  const jobs = state.data.jobs;
+  const platforms = sortLoginPlatforms(state.data.platforms);
+  const selectedCount = [...state.selectedPlatforms].filter(id => !batchPlatformRestriction(id)).length;
+  const jobs = state.data.jobs.filter(job => String(job.content_id) === String(content?.id));
   $('#view-publish').innerHTML = `
     <div class="section-head">
       <div>
         <h1>发布中心</h1>
-        <p>选择目标平台后，直接同步发布，并在下方查看各平台结果。</p>
+        <p>准备内容 → 同步平台草稿 → 你检查后发表。工作台不会自动公开文章或通知粉丝。</p>
       </div>
     </div>
 
+    <div data-publish-recovery-banner></div>
     <div class="grid-2">
       <div class="panel">
         <h2>目标内容</h2>
@@ -1313,15 +1328,15 @@ function renderPublish() {
           </div>
           <div style="margin-top:12px;">${statePill(content.status)}</div>
           <div class="publish-preview">
-            <span>即将发布正文预览</span>
-            <div class="publish-rich-preview rich-content-editor" aria-label="即将发布正文预览">
+            <span>待同步正文预览</span>
+            <div class="publish-rich-preview rich-content-editor" aria-label="待同步正文预览">
               ${editableArticleHtml(content)}
             </div>
           </div>
         ` : '<div class="empty">暂无可发布内容</div>'}
       </div>
       <div class="panel">
-        <h2>发布进度反馈</h2>
+        <h2>同步结果与人工核对</h2>
         <div id="publish-progress" class="publish-result">
           ${jobs.length ? jobResult(jobs[0]) : '<div class="empty">暂无发布记录</div>'}
         </div>
@@ -1329,22 +1344,21 @@ function renderPublish() {
     </div>
 
     <div class="panel publish-platform-panel">
-      <h2>平台选择（当前 CLI 支持 ${platforms.length} 个）</h2>
-      <div class="platform-picker">
-        ${platforms.map(platform => `
-          <label class="platform-check">
-            <input type="checkbox" data-platform-choice="${platform.id}" ${state.selectedPlatforms.has(platform.id) ? 'checked' : ''}>
-            ${platformAvatar(platform)}
-            <span class="platform-check-name">${escapeHtml(platform.name)}</span>
-          </label>
-        `).join('')}
-      </div>
+      <h2>文章发布与导出（${platforms.filter(p=>p.id!=='zip-download').length} 个平台）</h2>
+      <p class="field-note">常用文章平台优先；工业与其他垂直入口不再占据列表，历史记录保留。</p>
+      ${platformCatalogGroups(platforms).map(group=>group.id==='technical'
+        ? `<details class="platform-catalog-group" data-platform-group="technical" ${group.platforms.some(p=>state.selectedPlatforms.has(p.id))?'open':''}><summary>${escapeHtml(group.name)}（${group.platforms.length}）</summary>${platformPickerHtml(group.platforms)}</details>`
+        : `<section class="platform-catalog-group" data-platform-group="${group.id}"><h3>${escapeHtml(group.name)}（${group.platforms.length}）</h3>${group.id==='tool'?'<p class="field-note">只导出到本机，不会发布到网站。</p>':''}${platformPickerHtml(group.platforms)}</section>`).join('')}
       <div class="publish-bottom-actions">
-        <span class="tag" data-selected-platform-count>已选择 ${state.selectedPlatforms.size} 个平台</span>
-        <button class="primary publish-bottom-button" data-action="publish-selected" ${!content || state.selectedPlatforms.size === 0 || state.batchPublishSubmitting ? 'disabled' : ''}>${state.batchPublishSubmitting ? '发布中…' : '直接发布'}</button>
+        <span class="tag" data-selected-platform-count>已选择 ${selectedCount} 项</span>
+        <div class="batch-publish-buttons">
+          <button class="primary publish-bottom-button" data-action="publish-selected" aria-describedby="batch-delivery-note" disabled>同步草稿 / 准备内容</button>
+        </div>
       </div>
+      <p id="batch-delivery-note" class="field-note" data-batch-delivery-note aria-live="polite"></p>
     </div>
   `;
+  syncPublishSelectionUi();
 }
 
 function sessionOpenButton(platform, url, label) {
@@ -1353,7 +1367,7 @@ function sessionOpenButton(platform, url, label) {
 
 function resultPlatformNode(result) {
   const name = platformName(result.platform);
-  if ((result.status === 'success' || result.status === 'platform_draft') && result.url) {
+  if (['success', 'platform_draft', 'uncertain'].includes(result.status) && result.url) {
     return `<button class="result-platform-link" data-action="open-platform-session" data-platform="${escapeHtml(result.platform)}" data-url="${escapeHtml(result.url)}" title="使用该平台登录会话打开">${escapeHtml(name)}</button>`;
   }
   return `<span class="result-platform-name">${escapeHtml(name)}</span>`;
@@ -1379,6 +1393,8 @@ function jobResult(job) {
       ${resultPlatformNode(result)}
       <span class="result-status-label">${escapeHtml(statusLabel(result.status))}</span>
       ${resultDetailNode(result)}
+      ${['platform_draft','uncertain'].includes(result.status) && result.url ? sessionOpenButton(result.platform, result.url, result.status === 'platform_draft' ? '检查草稿并发表' : '去平台核对') : ''}
+      ${['uncertain','failed','platform_draft','retry_allowed'].includes(result.status) ? `<button class="mini-btn" data-action="open-publish-recovery" data-id="${escapeHtml(job.content_id || '')}" data-platform="${escapeHtml(result.platform)}">${result.status === 'platform_draft' ? '查看已有草稿' : '恢复 / 核对'}</button>` : ''}
     </div>
   `).join('');
 }
@@ -1421,14 +1437,14 @@ function historyJobResult(job) {
 }
 
 function renderPlatformLogin() {
-  const platforms = state.data.platforms;
+  const platforms = state.data.platforms.filter(p=>p.id!=='zip-download');
   const sortedPlatforms = sortLoginPlatforms(platforms);
-  const loggedIn = platforms.filter(platform => platform.auth_status === 'logged_in').length;
+  const loggedIn = platforms.filter(platform => platform.id !== 'zip-download' && platform.auth_status === 'logged_in').length;
   $('#view-platforms').innerHTML = `
     <div class="section-head">
       <div>
         <h1>平台登录</h1>
-        <p>首次进入会自动做一次无弹窗检查，也可以在这里手动检查、登录或导出 Cookie。</p>
+        <p>在一处连接常用平台。会话失效时重新登录，凭据不会显示在界面中。</p>
       </div>
       <div class="toolbar">
         <button class="secondary" data-action="refresh-platforms">刷新平台</button>
@@ -1439,20 +1455,20 @@ function renderPlatformLogin() {
     </div>
 
     <div class="metrics compact-metrics">
-      <div class="metric split-metric"><span>支持平台</span><strong>${platforms.length}</strong></div>
+      <div class="metric split-metric"><span>文章平台</span><strong>${platforms.length}</strong></div>
       <div class="metric split-metric"><span>已登录</span><strong data-auth-logged>${loggedIn}</strong></div>
-      <div class="metric split-metric"><span>待检查</span><strong data-auth-unknown>${platforms.filter(platform => !platform.auth_status || platform.auth_status === 'unknown').length}</strong></div>
+      <div class="metric split-metric"><span>待检查</span><strong data-auth-unknown>${platforms.filter(platform => platform.auto_check_auth!==false && (!platform.auth_status || platform.auth_status === 'unknown')).length}</strong></div>
       <div class="metric split-metric"><span>检查中</span><strong data-auth-checking>${state.authChecking.size}</strong></div>
     </div>
 
     <div class="panel">
       <div class="panel-head">
-        <h2>登录状态</h2>
-        <span class="tag">常用内容平台优先，论坛类靠后</span>
+        <h2>连接与登录</h2>
+        <span class="tag">通用内容优先，手工入口单独标明</span>
       </div>
-      <div class="platform-grid" data-auth-grid>
-        ${sortedPlatforms.map(platform => platformCard(platform)).join('')}
-      </div>
+      ${platformCatalogGroups(sortedPlatforms).map(group=>group.id==='technical'
+        ? `<details class="platform-catalog-group"><summary>${escapeHtml(group.name)}（${group.platforms.length}）</summary><div class="platform-grid" data-auth-grid data-auth-group="${group.id}">${group.platforms.map(p=>platformCard(p)).join('')}</div></details>`
+        : `<section class="platform-catalog-group"><h3>${escapeHtml(group.name)}（${group.platforms.length}）</h3><div class="platform-grid" data-auth-grid data-auth-group="${group.id}">${group.platforms.map(p=>platformCard(p)).join('')}</div></section>`).join('')}
     </div>
   `;
 }
@@ -1468,7 +1484,7 @@ function renderHistory() {
   const pageJobs = filteredJobs.slice(pageStart, pageStart + state.historyPageSize);
   const platformOptions = [
     ['all', '全部平台'],
-    ...state.data.platforms.map(item => [item.id, item.name]),
+    ...[...new Set([...state.data.platforms.map(p=>p.id),...jobs.flatMap(j=>[...(j.platforms || []),...(j.results || []).map(r=>r.platform)])])].map(id=>[id,platformName(id)]),
   ];
   $('#view-history').innerHTML = `
     <div class="section-head">
@@ -1576,10 +1592,11 @@ function historyMatch(job, filters) {
 
 function renderAuthPanels() {
   const platforms = state.data?.platforms || [];
-  const loggedIn = platforms.filter(platform => platform.auth_status === 'logged_in').length;
-  const unknown = platforms.filter(platform => !platform.auth_status || platform.auth_status === 'unknown').length;
+  const loggedIn = platforms.filter(platform => platform.id !== 'zip-download' && platform.auth_status === 'logged_in').length;
+  const unknown = platforms.filter(platform => platform.auto_check_auth!==false && (!platform.auth_status || platform.auth_status === 'unknown')).length;
   $$('[data-auth-grid]').forEach(grid => {
-    grid.innerHTML = sortLoginPlatforms(platforms).map(platform => platformCard(platform)).join('');
+    const selected=grid.dataset.authGroup ? platformCatalogGroups(platforms).find(group=>group.id===grid.dataset.authGroup)?.platforms || [] : platforms;
+    grid.innerHTML = sortLoginPlatforms(selected).map(platform => platformCard(platform)).join('');
   });
   $$('[data-auth-logged]').forEach(node => { node.textContent = loggedIn; });
   $$('[data-auth-unknown]').forEach(node => { node.textContent = unknown; });
@@ -1590,14 +1607,58 @@ function renderAuthPanels() {
   });
 }
 
+function batchPlatformRestriction(id, publishMode = 'draft') {
+  if (publishMode === 'direct') return '最终发表和通知粉丝请在平台确认，工作台仅准备内容或同步草稿';
+  const platform = state.data?.platforms?.find(item => item.id === id);
+  if (platform?.delivery_mode === 'manual' || ['uisdc','jianshu','netease'].includes(id)) return '仅支持手工写作/投稿，请在内容中心打开平台入口';
+  return '';
+}
+
+function confirmBatchPublish(contentId, platforms, publishMode) {
+  if (publishMode !== 'draft') return false;
+  const content = state.data?.contents?.find(item => String(item.id) === String(contentId));
+  const names = platforms.map(platformName).join('、');
+  const action = publishMode === 'direct' ? '直接发布' : '同步草稿';
+  const note = publishMode === 'direct'
+    ? '这会尝试向所选平台公开发布文章，请确认正文与平台选择。'
+    : '支持保存的平台将保存草稿；仅支持填页的平台会准备编辑器内容，不代表云端草稿保存成功。不会公开发布文章，请在同步后检查各平台结果。';
+  const limits = [
+    platforms.includes('xiaohongshu') && publishMode === 'draft' ? '小红书只填入编辑器，不会报告云端草稿已保存。' : '',
+    platforms.some(id => ['douyin','qiehao'].includes(id)) ? '抖音和企鹅号目前仅支持纯文字草稿，含图片或封面会停止提交。' : '',
+    platforms.includes('weixin') ? '公众号的最终发表及群发通知，需你到公众号后台单独确认。' : '',
+  ].filter(Boolean).join('\n');
+  return window.confirm(`${action}《${content?.title || '当前文章'}》\n平台：${names}\n\n${note}${limits ? '\n' + limits : ''}`);
+}
+
 function syncPublishSelectionUi() {
-  const count = state.selectedPlatforms.size;
+  const selected = [...state.selectedPlatforms];
+  const count = selected.filter(id => !batchPlatformRestriction(id)).length;
+  const draftBlocked = selected.some(id => batchPlatformRestriction(id));
+  const locked = state.batchPublishSubmitting || state.contentOperationLocks?.has(String(state.selectedContentId));
+  const mode = state.batchPublishOperation?.publishMode;
   $$('[data-selected-platform-count]').forEach(node => {
-    node.textContent = `已选择 ${count} 个平台`;
+    node.textContent = `已选择 ${count} 项`;
   });
   $$('[data-action="publish-selected"]').forEach(button => {
-    button.disabled = state.batchPublishSubmitting || count === 0 || !getSelectedContent();
+    button.disabled = Boolean(locked || draftBlocked || count === 0 || !getSelectedContent());
+    button.textContent = state.batchPublishSubmitting && mode === 'draft' ? '同步中…' : '同步草稿 / 准备内容';
   });
+  $$('[data-action="publish-selected-direct"]').forEach(button => {
+    button.disabled = true; // Stale pages must not regain an automatic publication action.
+    button.textContent = state.batchPublishSubmitting && mode === 'direct' ? '发布中…' : '直接发布';
+    button.title = '最终发表请到平台确认';
+  });
+  $$('[data-batch-delivery-note]').forEach(node => {
+    node.textContent = [
+      draftBlocked ? '手工平台请到内容中心打开写作/投稿入口。' : '',
+      '不会公开文章或通知粉丝。同步后，从结果列表打开对应稿件，检查后再发表。',
+      selected.some(id => !['weixin','woshipm','sspai','zip-download'].includes(id)) ? '仅支持填页的平台会准备编辑器内容，不代表云端草稿已保存。' : '',
+      selected.includes('xiaohongshu') ? '小红书只填入编辑器。' : '',
+      selected.some(id => ['douyin','qiehao'].includes(id)) ? '抖音和企鹅号仅支持纯文字草稿。' : '',
+      selected.includes('weixin') ? '公众号发表时请单独确认群发通知开关。' : '',
+    ].filter(Boolean).join('');
+  });
+  if (typeof renderRecoveryBanners === 'function') renderRecoveryBanners();
 }
 
 function readSelectedPlatforms() {
@@ -1605,7 +1666,7 @@ function readSelectedPlatforms() {
   if (choices.length) {
     state.selectedPlatforms = new Set(
       choices
-        .filter(checkbox => checkbox.checked)
+        .filter(checkbox => checkbox.checked && !checkbox.disabled)
         .map(checkbox => checkbox.dataset.platformChoice)
         .filter(Boolean)
     );
@@ -1625,12 +1686,9 @@ function renderProgress(steps = []) {
 }
 
 async function generateTopics(date) {
-  const res = await request('/api/topics/generate', {
-    method: 'POST',
-    body: JSON.stringify({ date }),
-  });
-  openCandidates(date, res.candidates);
-  await loadData();
+  state.selectedDate = date;
+  switchView('plans');
+  $('.topic-research-panel')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
 }
 
 function openCandidates(date, candidates) {
@@ -1757,6 +1815,7 @@ function handleTablistKeydown(event) {
   nextTab.focus();
   if (nextTab.dataset.importTab) setImportTab(nextTab.dataset.importTab);
   if (nextTab.dataset.platform) selectPreviewPlatform(nextTab.dataset.platform);
+  if (nextTab.dataset.contentMode) selectContentMode(nextTab.dataset.contentMode);
   return true;
 }
 
@@ -1768,7 +1827,8 @@ function setImportFeedback(message = '', type = '') {
 }
 
 function setImportTab(tab) {
-  const nextTab = tab === 'file' ? 'file' : 'paste';
+  if (state.importSubmitting) return;
+  const nextTab = ['file', 'feishu'].includes(tab) ? tab : 'paste';
   if (state.importTab !== nextTab) invalidateImportRead(state);
   state.importTab = nextTab;
   $$('[data-import-tab]').forEach(button => {
@@ -1779,6 +1839,7 @@ function setImportTab(tab) {
   });
   $('#import-paste-panel').hidden = nextTab !== 'paste';
   $('#import-file-panel').hidden = nextTab !== 'file';
+  if ($('#import-feishu-panel')) $('#import-feishu-panel').hidden = nextTab !== 'feishu';
   setImportFeedback();
 }
 
@@ -1794,6 +1855,8 @@ function resetImportDialog() {
   if (title) title.value = '';
   if (content) content.value = '';
   if (file) file.value = '';
+  if ($('#import-images-input')) $('#import-images-input').value = '';
+  if ($('#import-feishu-url')) $('#import-feishu-url').value = '';
   if (status) status.textContent = '尚未选择文件';
   if (submit) {
     submit.disabled = false;
@@ -1900,6 +1963,7 @@ function readImportFile(input) {
 
 async function submitImport() {
   if (state.importSubmitting) return;
+  if (state.importTab === 'feishu') return submitFeishuImport();
   const body = $('#import-content-input').value;
   const title = $('#import-title-input').value.trim();
   if (state.importTab === 'file' && !state.importFileName) {
@@ -1928,9 +1992,10 @@ async function submitImport() {
     const transitioned = await runContentTransition(async () => {
       setImportFeedback('正在创建内容记录…');
       try {
-        const result = await request('/api/content/import', {
+        const assets = state.importTab === 'file' ? await readSelectedImportImages() : null;
+        const result = await request(assets ? '/api/content/import-bundle' : '/api/content/import', {
           method: 'POST',
-          body: JSON.stringify({ filename, title, body, format }),
+          body: JSON.stringify({ filename, title, body, format, ...(assets ? { assets, summary: '' } : {}) }),
         });
         state.selectedContentId = result.content.id;
         $('#import-dialog').close();
@@ -1961,12 +2026,16 @@ async function submitImport() {
 
 function chooseRandomWechatTemplate() {
   if (!state.layoutTemplates.length) return;
-  const currentIndex = state.layoutTemplates.findIndex(template => template.filename === state.selectedWechatTemplate);
-  let nextIndex = Math.floor(Math.random() * state.layoutTemplates.length);
-  if (state.layoutTemplates.length > 1 && nextIndex === currentIndex) {
-    nextIndex = (nextIndex + 1) % state.layoutTemplates.length;
+  if (state.contentOperationLocks.has(String(state.selectedContentId))) return;
+  const choices = state.templateCatalogNamed ? distinctWechatTemplates(state.layoutTemplates, state.selectedWechatTemplate) : state.layoutTemplates;
+  const currentIndex = choices.findIndex(template => template.filename === state.selectedWechatTemplate);
+  let nextIndex = Math.floor(Math.random() * choices.length);
+  if (choices.length > 1 && nextIndex === currentIndex) {
+    nextIndex = (nextIndex + 1) % choices.length;
   }
-  state.selectedWechatTemplate = state.layoutTemplates[nextIndex].filename;
+  state.selectedWechatTemplate = choices[nextIndex].filename;
+  state.wechatTemplateChoices.set(state.selectedContentId, state.selectedWechatTemplate);
+  markContentDirty(state.selectedContentId);
   renderPlatformAdaptationPane();
 }
 
@@ -2030,7 +2099,7 @@ function setContentOperationBusy(context, busy) {
     }
     const actions = new Set([
       'save-content', 'layout-selected', 'layout-content', 'generate-wechat-layout',
-      'save-draft', 'publish-content', 'publish-selected', 'open-platform-draft', 'open-platform-direct',
+      'save-draft', 'publish-content', 'publish-selected', 'publish-selected-direct', 'open-platform-draft', 'open-platform-direct',
     ]);
     for (const control of $$('[data-action]')) {
       if (!actions.has(control.dataset.action)) continue;
@@ -2129,10 +2198,7 @@ function finishBatchPublishOperation(publishState, operationId) {
 }
 
 function setBatchPublishBusy(busy) {
-  $$('[data-action="publish-selected"]').forEach(button => {
-    button.disabled = busy || state.selectedPlatforms.size === 0 || !getSelectedContent();
-    button.textContent = busy ? '发布中…' : '直接发布';
-  });
+  syncPublishSelectionUi();
 }
 
 function beginSinglePublishOperation(publishState, pending) {
@@ -2183,13 +2249,20 @@ function setSinglePublishBusy(busy) {
 }
 
 function openSinglePublishConfirmation({ contentId, platform, mode }) {
+  if (['uisdc','jianshu','netease'].includes(platform) || state.data?.platforms?.find(item => item.id === platform)?.delivery_mode === 'manual') { toast('该平台当前为手工操作，请使用官网写作/投稿入口', 'error'); return false; }
   if (!canCancelSinglePublish(state)) {
     toast('已有平台操作正在执行，请等待完成', 'error');
     return false;
   }
+  const recoveryButton = $('#single-publish-recovery-button');
+  if (recoveryButton) recoveryButton.hidden = true;
   const content = state.data?.contents.find(item => item.id === contentId);
   if (!content || !platform || !['draft', 'direct'].includes(mode)) {
     toast('缺少平台发布信息', 'error');
+    return false;
+  }
+  if (mode !== 'draft') {
+    toast('最终发表和通知粉丝请在平台确认，工作台仅同步草稿或准备内容', 'error');
     return false;
   }
   state.pendingSinglePublish = Object.freeze({
@@ -2201,8 +2274,9 @@ function openSinglePublishConfirmation({ contentId, platform, mode }) {
   });
   $('#single-publish-article').textContent = content.title;
   $('#single-publish-platform').textContent = platformName(platform);
-  $('#single-publish-mode').textContent = mode === 'draft' ? '保存平台草稿' : '直接发布';
-  setSinglePublishFeedback(mode === 'draft' ? '确认后会写入该平台草稿箱。' : '直接发布会立即执行，请确认账号与正文。');
+  const fillOnly = ['xiaohongshu','toutiao','douban'].includes(platform);
+  $('#single-publish-mode').textContent = fillOnly ? '填入平台编辑器（非云端草稿）' : mode === 'draft' ? '保存平台草稿' : '提交发布并核对回执';
+  setSinglePublishFeedback((fillOnly ? '只准备平台编辑器，无法确认云端草稿保存，请在平台检查，勿重复提交。' : '仅同步平台草稿，不会自动发表。') + (platform === 'weixin' ? '最终发表时，请自行确认群发通知开关；不通知也属于公开发表。' : '请在平台确认最终内容与发表时间。'));
   $('#platform-publish-dialog').showModal();
   return true;
 }
@@ -2216,6 +2290,10 @@ function cancelSinglePublish() {
 }
 
 async function confirmSinglePlatformPublish() {
+  if (state.pendingSinglePublish?.mode !== 'draft') {
+    toast('工作台不自动发表，请到平台确认', 'error');
+    return false;
+  }
   const operation = beginSinglePublishOperation(state, state.pendingSinglePublish);
   if (!operation) return false;
   let operationFinished = false;
@@ -2236,6 +2314,7 @@ async function confirmSinglePlatformPublish() {
         operationContext,
       });
       if (!saveResult.stable) {
+        if (saveResult.conflict) { setSinglePublishFeedback('本地稿件需要恢复最新版本，当前编辑已保留。请点击“恢复 / 核对”。', 'error'); return false; }
         setSinglePublishFeedback(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
         toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
         return false;
@@ -2278,7 +2357,7 @@ async function confirmSinglePlatformPublish() {
     state.pendingSinglePublish = null;
     operationFinished = finishSinglePublishOperation(state, operation.token);
     if (operationFinished) setSinglePublishBusy(false);
-    if (platformResult?.status === 'success' || platformResult?.status === 'platform_draft') {
+    if (['success','platform_draft','exported'].includes(platformResult?.status)) {
       const fallback = operation.mode === 'draft' ? '平台草稿已保存' : '平台发布成功';
       toast(`${platformName(operation.platform)}：${platformResult.message || fallback}`);
     } else {
@@ -2292,15 +2371,16 @@ async function confirmSinglePlatformPublish() {
         return false;
       }
     } catch {
-      toast('发布成功，但列表刷新失败', 'error');
+      toast('平台操作已返回，但列表刷新失败；请在发布历史核对结果', 'error');
     }
     return true;
   } catch (error) {
     if (state.singlePublishOperationToken === operation.token) {
-      if (error?.statusCode === 409) {
+      if (error?.apiCode === 'CONTENT_REVISION_CONFLICT' || (error?.statusCode === 409 && /文章.*更新|正文.*版本|重新加载最新版本/.test(error.message || ''))) {
         markContentCanonicalConflict(operation.contentId);
         return false;
       }
+      showPublishRecoveryError(error, operation.contentId, operation.platform);
       setSinglePublishFeedback(error.message || '平台操作失败', 'error');
       toast(error.message || '平台操作失败', 'error');
     }
@@ -2337,6 +2417,7 @@ async function runContentTransition(transition) {
         operationContext,
       });
       if (!saveResult.stable) {
+        if (saveResult.conflict) return false;
         toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
         return false;
       }
@@ -2392,6 +2473,9 @@ function markContentCanonicalConflict(
     saveState.classList.add('is-dirty');
   }
   toast(message, 'error');
+  if (typeof renderRecoveryBanners === 'function') renderRecoveryBanners();
+  const recoveryButton = $('#single-publish-recovery-button');
+  if (recoveryButton) recoveryButton.hidden = false;
   return true;
 }
 
@@ -2437,6 +2521,9 @@ async function saveContent(id, options = {}) {
     const body = editor ? (editor.innerHTML ?? editor.value) : undefined;
     const current = state.data.contents.find(content => content.id === target);
     const expectedUpdatedAt = current?.updated_at;
+    const templateToSave = state.wechatTemplateChoices?.get(target)
+      || (state.activePreviewPlatform === 'weixin' ? state.selectedWechatTemplate : null)
+      || String(current?.layout_html || '').match(/data-wechat-template="([^"]+)"/)?.[1];
     const res = await request(`/api/content/${encodeURIComponent(target)}`, {
       method: 'POST',
       body: JSON.stringify({
@@ -2445,6 +2532,7 @@ async function saveContent(id, options = {}) {
         type: current?.type,
         body: body ?? current?.body ?? '',
         expectedUpdatedAt,
+        ...(templateToSave ? { template: templateToSave } : {}),
       }),
     });
     state.selectedContentId = res.content.id;
@@ -2529,6 +2617,7 @@ function markContentDirty(id) {
     saveState.textContent = '有未保存更改';
     saveState.classList.add('is-dirty');
   }
+  if (typeof scheduleDraftPreview === 'function') scheduleDraftPreview(id);
   return true;
 }
 
@@ -2681,15 +2770,20 @@ async function saveDraft(id) {
   }
 }
 
-async function publishContent(id) {
+async function publishContent(id, publishMode = 'draft') {
+  if (state.batchPublishSubmitting) return false;
   const target = id || state.selectedContentId;
   const selectedPlatforms = readSelectedPlatforms();
   if (!target) return toast('请选择内容', 'error');
-  if (!state.selectedPlatforms.size) return toast('请选择至少一个发布平台', 'error');
+  if (!selectedPlatforms.length) return toast('请选择至少一个发布平台', 'error');
+  if (!['draft', 'direct'].includes(publishMode)) return false;
+  const blocked = selectedPlatforms.find(platform => batchPlatformRestriction(platform, publishMode));
+  if (blocked) return toast(`${platformName(blocked)}：${batchPlatformRestriction(blocked, publishMode)}`, 'error');
+  if (!confirmBatchPublish(target, selectedPlatforms, publishMode)) return false;
   const operation = beginBatchPublishOperation(state, {
     contentId: target,
     platforms: selectedPlatforms,
-    publishMode: 'direct',
+    publishMode,
   });
   if (!operation) return false;
   const operationContext = beginContentOperation(target);
@@ -2703,12 +2797,15 @@ async function publishContent(id) {
     if ($(`[data-content-body="${target}"]`)) {
       const saveResult = await saveContent(target, { silent: true, skipReload: true, operationContext });
       if (!saveResult.stable) {
+        if (saveResult.conflict) return false;
         toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
         return false;
       }
     }
     state.selectedPlatforms = new Set(operation.platforms);
-    state.lastProgress = [`正在直接发布到 ${operation.platforms.length} 个平台`, '进入多平台直发流程'];
+    state.lastProgress = operation.publishMode === 'draft'
+      ? [`正在同步到 ${operation.platforms.length} 个平台`, '准备平台草稿或编辑器内容，不公开发布']
+      : [`正在直接发布到 ${operation.platforms.length} 个平台`, '进入多平台直发流程'];
     renderProgress(state.lastProgress);
     const expectedUpdatedAt = state.data?.contents
       ?.find(content => String(content.id) === String(target))?.updated_at || '';
@@ -2744,7 +2841,7 @@ async function publishContent(id) {
         toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
         return false;
       }
-      toast('发布成功，但列表刷新失败', 'error');
+      toast('同步结果已返回，但列表刷新失败；请恢复并核对结果，不要重复提交', 'error');
       return true;
     }
     if (!loaded.applied) {
@@ -2752,14 +2849,16 @@ async function publishContent(id) {
       toast(CONTENT_CHANGED_DURING_SAVE_MESSAGE, 'error');
       return false;
     }
-    toast('发布流程完成，请查看平台结果');
+    toast(operation.publishMode === 'draft' ? '同步流程完成，请检查各平台的草稿或待核对结果' : '发布流程完成，请查看平台结果');
     switchView('publish');
     return true;
   } catch (error) {
-    if (error?.statusCode === 409) {
+    if (error?.apiCode === 'CONTENT_REVISION_CONFLICT' || (error?.statusCode === 409 && /文章.*更新|正文.*版本|重新加载最新版本/.test(error.message || ''))) {
       markContentCanonicalConflict(target);
       return false;
     }
+    showPublishRecoveryError(error, target, operation.platforms[0]);
+    if (error?.statusCode === 409) return false;
     toast(error.message, 'error');
     try {
       const loaded = await loadData({ operationContext });
@@ -2791,7 +2890,7 @@ async function checkAuth(platform) {
     toast(`${platform}: ${res.platform.message}`);
     mergePlatformAuth(res.platform);
   } catch (error) {
-    if (error.message.includes('重新点击登录') || error.message.includes('会话不存在') || error.message.includes('已过期')) {
+    if (error.apiCode === 'LOGIN_SESSION_INVALID' || error.message.includes('重新点击登录') || error.message.includes('会话不存在') || error.message.includes('已过期')) {
       delete state.loginSessions[platform];
     }
     toast(error.message, 'error');
@@ -2811,7 +2910,7 @@ function mergePlatformAuth(platform) {
 async function checkAllAuth(options = {}) {
   if (state.authCheckingAll || !state.data?.platforms?.length) return;
   state.authCheckingAll = true;
-  const platformIds = state.data.platforms.map(platform => platform.id);
+  const platformIds = state.data.platforms.filter(platform=>platform.auto_check_auth!==false).map(platform => platform.id);
   state.lastProgress = [`正在检查 ${platformIds.length} 个平台登录状态`, '每次最多并发检查 4 个平台'];
   renderAuthPanels();
   renderProgress(state.lastProgress);
@@ -2847,7 +2946,7 @@ async function checkAllAuth(options = {}) {
 
   await Promise.all(workers);
   state.authCheckingAll = false;
-  const loggedIn = state.data.platforms.filter(platform => platform.auth_status === 'logged_in').length;
+  const loggedIn = state.data.platforms.filter(platform => platform.id !== 'zip-download' && platform.auth_status === 'logged_in').length;
   state.lastProgress = [`平台登录状态检查完成：${loggedIn}/${platformIds.length} 已登录`];
   renderAuthPanels();
   renderProgress(state.lastProgress);
@@ -2891,8 +2990,10 @@ async function finishLogin(platform) {
     toast(`${platform}: ${res.platform.message}`);
     await loadData();
   } catch (error) {
-    if (error.message.includes('重新点击登录') || error.message.includes('会话不存在') || error.message.includes('已过期')) {
+    if (error.apiCode === 'LOGIN_SESSION_INVALID' || error.message.includes('重新点击登录') || error.message.includes('会话不存在') || error.message.includes('已过期')) {
       delete state.loginSessions[platform];
+      const record = state.data?.platforms?.find(item => item.id === platform);
+      if (record) { record.auth_status = 'unknown'; record.message = '登录会话已失效，请重新连接'; }
     }
     toast(error.message, 'error');
   } finally {
@@ -2939,29 +3040,23 @@ document.addEventListener('click', event => {
   }
 
   const action = event.target.closest('[data-action]');
-  if (!action) {
-    if (!event.target.closest('[data-employee-picker]') && state.employeeMenuOpen) {
-      setEmployeeMenuOpen(false);
-    }
-    return;
-  }
+  if (!action) return;
 
   const { action: name, date, id, platform, url } = action.dataset;
-  if (!action.closest('[data-employee-picker]') && state.employeeMenuOpen) {
-    setEmployeeMenuOpen(false);
-  }
+  if (name === 'select-content-mode') { selectContentMode(action.dataset.contentMode); return; }
+  if (name === 'toggle-content-library') { toggleContentLibrary(); return; }
+  if (name === 'open-publish-recovery') { void openPublishRecovery({contentId:id,platform}); return; }
+  if (name === 'close-publish-recovery') { closePublishRecovery(); return; }
+  if (name === 'reload-recovery') { void loadPublishRecovery(); return; }
+  if (name === 'restore-working-copy') { void restoreWorkingCopy(); return; }
+  if (name === 'reopen-recovery-window') { void reopenRecoveryWindow(); return; }
+  if (name === 'confirm-recovery-not-submitted') { void confirmRecoveryNotSubmitted(); return; }
+  if (name === 'prepare-after-recovery') { prepareAfterRecovery(); return; }
+  if (name === 'recovery-platform-login') { void goToRecoveryLogin(); return; }
   if (name === 'toggle-sidebar') {
     const collapsed = !document.body.classList.contains('sidebar-collapsed');
     applySidebarCollapsed(collapsed);
     setStoredSidebarCollapsed(collapsed);
-    return;
-  }
-  if (name === 'toggle-employee-menu') {
-    setEmployeeMenuOpen(!state.employeeMenuOpen);
-    return;
-  }
-  if (name === 'select-employee') {
-    selectEmployee(id);
     return;
   }
   if (name === 'reload') loadData();
@@ -2976,6 +3071,9 @@ document.addEventListener('click', event => {
   if (name === 'choose-import-file') $('#import-file-input').click();
   if (name === 'select-import-tab') setImportTab(action.dataset.importTab);
   if (name === 'submit-import') submitImport();
+  if (name === 'start-topic-research') void startTopicResearch();
+  if (name === 'refresh-topic-research') void loadTopicResearch();
+  if (name === 'adopt-topic') void adoptTopic(action.dataset.cardId);
   if (name === 'shift-plan-range') shiftPlanRange(Number(action.dataset.days || 0));
   if (name === 'save-plan') savePlan(date);
   if (name === 'generate-topics') generateTopics(date || state.selectedDate);
@@ -3004,6 +3102,7 @@ document.addEventListener('click', event => {
   if (name === 'save-content') void saveContent(id, { userInitiated: true });
   if (name === 'save-draft') saveDraft(id);
   if (name === 'publish-content' || name === 'publish-selected') publishContent(id);
+  if (name === 'publish-selected-direct') publishContent(id, 'direct');
   if (name === 'select-preview-platform') selectPreviewPlatform(platform);
   if (name === 'retry-platform-preview') retryPlatformPreview(platform);
   if (name === 'select-preview-device') selectPreviewDevice(action.dataset.previewDevice);
@@ -3049,7 +3148,13 @@ document.addEventListener('change', event => {
 
   const wechatTemplate = event.target.closest('[data-wechat-template-select]');
   if (wechatTemplate) {
+    if (state.contentOperationLocks.has(String(state.selectedContentId))) {
+      wechatTemplate.value = state.selectedWechatTemplate;
+      return;
+    }
     state.selectedWechatTemplate = wechatTemplate.value;
+    state.wechatTemplateChoices.set(state.selectedContentId, wechatTemplate.value);
+    markContentDirty(state.selectedContentId);
     return;
   }
 
@@ -3136,3 +3241,362 @@ window.addEventListener('beforeunload', handleBeforeUnload);
 loadData().catch(error => {
   document.body.innerHTML = `<div class="empty" style="margin:40px;">启动失败：${escapeHtml(error.message)}</div>`;
 });
+
+function scheduleDraftPreview(id) {
+  clearTimeout(state.draftPreviewTimer);
+  clearPlatformPreviews(String(id));
+  state.draftPreviewTimer = setTimeout(() => {
+    if (String(state.selectedContentId) !== String(id) || !state.dirtyContentIds.has(String(id))) return;
+    void loadPlatformPreview(getSelectedContent(), state.activePreviewPlatform);
+  }, 450);
+}
+
+async function readSelectedImportImages() {
+  const files = [...($('#import-images-input')?.files || [])];
+  if (files.length > 40 || files.reduce((n,f) => n + f.size, 0) > 24 * 1024 * 1024) throw new Error('最多40张配图、合计24 MiB');
+  return Promise.all(files.map(file => {
+    if (file.size > 8 * 1024 * 1024) throw new Error('单张配图不能超过8 MiB');
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve({ name: file.name, relativePath: file.webkitRelativePath || file.name,
+        dataBase64: String(reader.result).split(',')[1] || '' });
+      reader.onerror = () => reject(new Error(`配图读取失败：${file.name}`));
+      reader.readAsDataURL(file);
+    });
+  }));
+}
+
+async function submitFeishuImport() {
+  const url = $('#import-feishu-url').value.trim();
+  if (!url) return setImportFeedback('请粘贴飞书文档链接', 'error');
+  state.importSubmitting = true;
+  const submit = $('[data-action="submit-import"]'); submit.disabled = true; submit.textContent = '正在导出图文…';
+  try {
+    await runContentTransition(async () => {
+      setImportFeedback('正在读取飞书文档、下载配图并导入本地，请稍候…');
+      try {
+        const result = await request('/api/content/import-feishu', { method: 'POST', body: JSON.stringify({ url }) });
+        state.selectedContentId = result.content.id;
+        $('#import-dialog').close(); resetImportDialog(); await loadData(); switchView('content');
+        toast(`已导入《${result.content.title}》，${result.assetCount} 张配图`);
+        if (result.warnings?.length) toast(result.warnings.join('；'), 'error');
+      } catch (error) { setImportFeedback(error.message || '飞书导入失败', 'error'); }
+    });
+  } catch (error) { setImportFeedback(error.message || '飞书导入失败，未伪造内容', 'error'); }
+  finally { state.importSubmitting = false; submit.disabled = false; submit.textContent = '导入并打开'; }
+}
+
+const TOPIC_PLATFORMS = ['weixin','woshipm','sspai','xiaohongshu','uisdc','douyin','zhihu','toutiao'];
+function topicPlatformName(id) { return id === 'woshipm' ? '人人都是产品经理' : platformName(id); }
+function topicResearchPanel() {
+  if (!state.topicLoaded && !state.topicLoading) { state.topicLoaded = true; setTimeout(() => void loadTopicResearch(), 0); }
+  const run = state.topicRun;
+  const busy = state.topicLoading || ['collecting','analyzing'].includes(run?.status);
+  const labels = { collecting:'采集来源中', analyzing:'共用 Skill 分析中', ready:'选题可供选择', blocked:'来源受限',
+    failed:'采集失败', analysis_failed:'分析未完成，来源已保留', interrupted:'上次任务中断', insufficient_evidence:'证据不足，暂不出题' };
+  const collection = run?.collection?.platforms || [];
+  const statusNames = { ok:'已采集', ready:'已采集', success:'已采集', partial:'部分可用', needs_login:'需要登录',
+    source_unavailable:'来源暂不可用', needs_sources:'缺少来源', blocked:'访问受限', unavailable:'暂不可用', error:'采集失败' };
+  const selected = state.topicPlatforms || TOPIC_PLATFORMS;
+  return `<section class="panel topic-research-panel" aria-label="常用平台选题雷达">
+    <div class="panel-head"><div><h2>常用平台选题雷达</h2><p class="field-note">公众号沿用小普多源选题逻辑；少数派观察首页与精选内容信号，其他平台保留各自来源。指标不混算，标题线索不冒充全文分析。</p></div>
+    <span role="status">${escapeHtml(run ? labels[run.status] || run.status : '尚未采集')}</span></div>
+    <label for="topic-keyword">关注领域</label><input id="topic-keyword" data-user-editable value="${escapeHtml(state.topicKeyword || 'AI工具、产品、效率工作流和职业实践')}" maxlength="200" ${busy?'disabled':''}>
+    <div class="topic-platform-choices">${TOPIC_PLATFORMS.map(id=>`<label><input type="checkbox" data-topic-platform="${id}" ${selected.includes(id)?'checked':''} ${busy?'disabled':''}>${escapeHtml(topicPlatformName(id))}</label>`).join('')}</div>
+    <details><summary>补充参考链接（可选）</summary><p class="field-note">每个平台一行一个链接。仅接受对应来源，不抓取任意网址或本机地址。</p>${TOPIC_PLATFORMS.map(id=>`<label>${escapeHtml(topicPlatformName(id))}<textarea data-topic-source="${id}" rows="2" data-user-editable ${busy?'disabled':''}>${escapeHtml(state.topicSourceUrls?.[id] || '')}</textarea></label>`).join('')}</details>
+    <div class="toolbar"><button class="primary" data-action="start-topic-research" ${busy?'disabled':''}>${busy?'处理中…':'采集并分析选题'}</button><button class="secondary" data-action="refresh-topic-research">刷新状态</button></div>
+    <p class="field-note">分析调用本机 Codex，会使用账号额度；不会改写原稿。网站需要登录时不会绕过限制。</p>
+    ${run?.error?`<div class="preview-warning-box" role="alert">${escapeHtml(run.error)}</div>`:''}
+    ${collection.length?`<div class="topic-source-status">${collection.map(p=>`<div><strong>${escapeHtml(topicPlatformName(p.id))}</strong> · ${escapeHtml(statusNames[p.status]||p.status)} · ${(p.items||[]).length} 条${p.reason?`<p>${escapeHtml(p.reason)}</p>`:''}</div>`).join('')}</div>`:''}
+    ${run?.analysis?`<p>${escapeHtml(run.analysis.summary)}</p>`:''}
+    <div class="topic-cards">${(run?.analysis?.cards||[]).map(card=>`<article class="topic-card"><h3>${escapeHtml(card.topic)}</h3><p><strong>读者问题：</strong>${escapeHtml(card.reader_problem)}</p><p><strong>切入点：</strong>${escapeHtml(card.angle)}</p><p><strong>为什么现在：</strong>${escapeHtml(card.why_now)}</p><p><strong>读者带走：</strong>${escapeHtml(card.reader_payoff)}</p><p class="field-note">适合 ${card.platforms.map(topicPlatformName).map(escapeHtml).join('、')} · 事实风险 ${escapeHtml(card.risk)}</p><ul>${card.missing_evidence.map(e=>`<li>${escapeHtml(e)}</li>`).join('')}</ul><div>${(run.signals||[]).filter(s=>card.evidence_ids.includes(s.id)).map(s=>`<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(s.title)}</a>`).join('<br>')}</div><div class="toolbar"><input type="date" data-topic-adopt-date="${escapeHtml(card.id)}" value="${escapeHtml(state.data?.today||'')}"><button class="secondary" data-action="adopt-topic" data-card-id="${escapeHtml(card.id)}">采用到计划</button></div></article>`).join('')}</div>
+    ${(run?.signals||[]).length?`<details><summary>查看本次 ${run.signals.length} 条来源线索</summary><ul>${run.signals.map(s=>`<li><a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(s.title)}</a><span class="field-note"> · ${escapeHtml(s.sourceKind)} · ${escapeHtml(s.publishedAt||'发布日期未确认')}</span></li>`).join('')}</ul></details>`:''}
+    </section>`;
+}
+async function loadTopicResearch() {
+  if (state.topicLoading) return;
+  const requestVersion = ++state.topicRequestVersion;
+  state.topicLoading = true;
+  try { const result = await request('/api/topics/research'); if(requestVersion===state.topicRequestVersion) state.topicRun = result.run; }
+  catch (error) { if(requestVersion===state.topicRequestVersion) toast(error.message || '选题状态读取失败', 'error'); }
+  finally { if(requestVersion===state.topicRequestVersion){state.topicLoading = false; if (state.activeView==='plans') renderPlans();} }
+  if(requestVersion!==state.topicRequestVersion) return;
+  clearTimeout(state.topicPollTimer);
+  if (['collecting','analyzing'].includes(state.topicRun?.status)) state.topicPollTimer=setTimeout(()=>void loadTopicResearch(),2500);
+}
+async function startTopicResearch() {
+  if(state.topicLoading || ['collecting','analyzing'].includes(state.topicRun?.status)) return;
+  const requestVersion=++state.topicRequestVersion;
+  state.topicKeyword = $('#topic-keyword').value;
+  state.topicPlatforms = $$('[data-topic-platform]:checked').map(el=>el.dataset.topicPlatform);
+  state.topicSourceUrls = Object.fromEntries($$('[data-topic-source]').map(el=>[el.dataset.topicSource,el.value]));
+  const sourceUrlsByPlatform=Object.fromEntries(Object.entries(state.topicSourceUrls).map(([id,text])=>[id,text.split(/\n/).map(s=>s.trim()).filter(Boolean)]).filter(([,urls])=>urls.length));
+  state.topicLoading=true; renderPlans();
+  try { const result=await request('/api/topics/research',{method:'POST',body:JSON.stringify({keyword:state.topicKeyword,platforms:state.topicPlatforms,sourceUrlsByPlatform})}); if(requestVersion===state.topicRequestVersion)state.topicRun=result.run; }
+  catch(error){if(requestVersion===state.topicRequestVersion)toast(error.message||'选题任务启动失败','error');}
+  finally {if(requestVersion===state.topicRequestVersion){state.topicLoading=false;renderPlans();void loadTopicResearch();}}
+}
+async function adoptTopic(cardId) {
+  const date=$(`[data-topic-adopt-date="${CSS.escape(cardId)}"]`)?.value;
+  try {await request('/api/topics/adopt',{method:'POST',body:JSON.stringify({runId:state.topicRun.id,cardId,date})});state.planStartDate=date;state.planEndDate=date;await loadData();toast('选题已加入计划，未生成或发布正文');}
+  catch(error){toast(error.message||'采用失败','error');}
+}
+
+function distinctWechatTemplates(templates, selectedFilename) {
+  const groups = new Map();
+  for (const template of templates) {
+    const key = template.label || template.filename;
+    if (!groups.has(key) || template.filename === selectedFilename) groups.set(key, template);
+  }
+  return [...groups.values()];
+}
+
+function selectContentMode(mode) {
+  if (!['edit', 'preview'].includes(mode)) return false;
+  state.contentMode = mode;
+  for (const tab of $$('[data-content-mode][role="tab"]')) {
+    const active = tab.dataset.contentMode === mode;
+    tab.setAttribute('aria-selected', active ? 'true' : 'false');
+    tab.setAttribute('tabindex', active ? '0' : '-1');
+  }
+  const editor = $('#content-editor-panel');
+  const preview = $('#content-preview-panel');
+  if (editor) editor.hidden = mode !== 'edit';
+  if (preview) preview.hidden = mode !== 'preview';
+  const workspace = $('#view-content .content-adaptation-workspace');
+  if (workspace) workspace.dataset.contentMode = mode;
+  if (mode === 'preview') void loadPlatformPreview(getSelectedContent(), state.activePreviewPlatform);
+  return true;
+}
+
+function syncContentLibraryButton() {
+  const library = $('#content-library');
+  const button = $('#view-content [data-action="toggle-content-library"]');
+  if (!library || !button) return;
+  const shown = getComputedStyle(library).display !== 'none';
+  button.setAttribute('aria-expanded', shown ? 'true' : 'false');
+  button.textContent = `${shown ? '收起' : '展开'}文章列表（${state.data?.contents?.length || 0}）`;
+}
+
+function toggleContentLibrary() {
+  const library = $('#content-library');
+  const layout = $('#view-content .content-layout');
+  if (!library || !layout) return;
+  state.libraryVisibility = getComputedStyle(library).display === 'none' ? 'shown' : 'hidden';
+  layout.dataset.libraryVisibility = state.libraryVisibility;
+  syncContentLibraryButton();
+}
+
+window.addEventListener('resize', syncContentLibraryButton);
+
+function recoveryTargetPlatform() {
+  const selected=state.activeView==='publish' ? [...state.selectedPlatforms] : [];
+  return (selected.length ? selected.includes(state.publishRecoveryError?.platform) ? state.publishRecoveryError.platform : selected[0] : null)
+    || (state.activeView==='content' ? state.activePreviewPlatform : state.publishRecoveryError?.platform) || state.activePreviewPlatform || 'xiaohongshu';
+}
+
+function showPublishRecoveryError(error, contentId, platform) {
+  state.publishRecoveryError = {contentId:String(contentId),platform:platform || recoveryTargetPlatform(),code:error?.apiCode || '',message:error?.message || '同步未完成'};
+  renderRecoveryBanners();
+  const button=$('#single-publish-recovery-button');if(button)button.hidden=false;
+}
+
+function renderRecoveryBanners() {
+  if(!state.data)return;
+  const id=String(state.selectedContentId || '');
+  const platform=recoveryTargetPlatform();
+  const job=state.data.jobs?.find(j=>String(j.content_id)===id && j.results?.some(r=>r.platform===platform));
+  const result=job?.results?.find(r=>r.platform===platform);
+  const conflict=state.contentCanonicalConflicts?.has(id);
+  const error=state.publishRecoveryError?.contentId===id && state.publishRecoveryError.platform===platform ? state.publishRecoveryError : null;
+  const needsRecovery=conflict || error || ['uncertain','failed','retry_allowed'].includes(result?.status);
+  for(const host of $$('[data-publish-recovery-banner]')) {
+    host.innerHTML=needsRecovery ? `<div class="recovery-banner" role="status"><div><strong>${conflict?'本地稿件需要恢复最新版本':escapeHtml(platformName(platform))+'：'+(result?.status==='retry_allowed'?'已人工确认可重新准备':'同步需要恢复或核对')}</strong><p>${conflict?'本页编辑仍保留。先保留副本并读取最新稿，不会直接覆盖任一版本。':'关闭窗口不等于没有保存或发布。可以恢复原窗口、查看已有草稿；结果未确认时不自动重发。'}</p></div><button class="secondary" data-action="open-publish-recovery" data-id="${escapeHtml(id)}" data-platform="${escapeHtml(platform)}">恢复工作</button></div>` : '';
+  }
+}
+
+function currentDraftSnapshot(contentId) {
+  const content=state.data?.contents?.find(c=>String(c.id)===String(contentId));
+  if(!content)throw new Error('未找到当前稿件，请刷新工作台');
+  return {title:$(`[data-content-title="${contentId}"]`)?.value ?? content.title,
+    summary:$(`[data-content-summary="${contentId}"]`)?.value ?? content.summary ?? '',
+    body:$(`[data-content-body="${contentId}"]`)?.innerHTML ?? content.body ?? '',
+    template:state.wechatTemplateChoices?.get(contentId)
+      || String(content.layout_html || '').match(/data-wechat-template="([^"]+)"/)?.[1] || '',
+    updated_at:content.updated_at};
+}
+
+function recoveryDraftDiffers(local, saved) {
+  const canonicalBody=html=>sanitizeClientCanonicalHtml(String(html || '')).trim();
+  const savedTemplate=String(saved.layout_html || '').match(/data-wechat-template="([^"]+)"/)?.[1] || '';
+  return local.title!==saved.title || String(local.summary || '')!==String(saved.summary || '')
+    || canonicalBody(local.body)!==canonicalBody(saved.body)
+    || Boolean(local.template && local.template!==savedTemplate);
+}
+
+async function openPublishRecovery({contentId,platform}={}) {
+  if(state.recoveryBusy)return;
+  const id=String(contentId || state.pendingSinglePublish?.contentId || state.selectedContentId || '');
+  if(!id)return;
+  if(state.singlePublishSubmitting || state.batchPublishSubmitting){toast('同步仍在执行，请等待当前操作返回','error');return;}
+  const targetPlatform=platform || state.pendingSinglePublish?.platform || recoveryTargetPlatform();
+  if($('#platform-publish-dialog')?.open)cancelSinglePublish();
+  state.recoveryContext={contentId:id,platform:targetPlatform,data:null,feedback:'',backupId:null};
+  const dialog=$('#publish-recovery-dialog');if(!dialog.open)dialog.showModal();
+  await loadPublishRecovery();
+}
+
+function closePublishRecovery() {
+  if(state.recoveryBusy)return false;
+  state.recoveryRequestVersion++;state.recoveryContext=null;
+  $('#publish-recovery-dialog')?.close();return true;
+}
+
+async function loadPublishRecovery() {
+  const context=state.recoveryContext;if(!context)return;
+  const version=++state.recoveryRequestVersion;context.loading=true;renderPublishRecovery();
+  try {
+    const response=await request(`/api/content/${encodeURIComponent(context.contentId)}/recovery?platform=${encodeURIComponent(context.platform)}`);
+    if(state.recoveryContext!==context || version!==state.recoveryRequestVersion)return;
+    context.data=response.recovery;context.loading=false;renderPublishRecovery();
+  } catch(error) {
+    if(state.recoveryContext!==context || version!==state.recoveryRequestVersion)return;
+    context.loading=false;context.data=null;context.feedback=error.message;context.feedbackError=true;renderPublishRecovery();
+  }
+}
+
+function renderPublishRecovery() {
+  const context=state.recoveryContext,host=$('#publish-recovery-body');if(!context || !host)return;
+  const data=context.data,job=data?.latestJob,result=job?.results?.find(r=>r.platform===context.platform);
+  const local=state.data?.contents?.find(c=>String(c.id)===context.contentId);
+  const needsRefresh=state.contentCanonicalConflicts?.has(context.contentId) || (data?.content && local?.updated_at!==data.content.updated_at);
+  const session=context.sessionProblem || data?.session || {},sessionLabels={open:'原登录会话仍可连接，可找回标签页或重新打开窗口',closed:'平台浏览器已关闭，可沿原登录目录重新打开',missing:'未找到可恢复的登录会话，请先重新登录',mismatch:'浏览器身份不匹配，已停止连接，请重新登录',not_required:'此平台通过已保存的凭据连接；查看草稿仍需打开平台后台'};
+  const definitive=['success','platform_draft'].includes(result?.status);
+  const canPrepare=data && state.data.platforms.some(p=>p.id===context.platform) && !['uisdc','jianshu','netease'].includes(context.platform) && !needsRefresh && !['closed','missing','mismatch'].includes(session.state) && !definitive
+    && !data.canConfirmNotSubmitted && (!result || ['failed','retry_allowed'].includes(result.status));
+  const recoveryPlatforms=[...(state.data?.platforms || [])];if(!recoveryPlatforms.some(p=>p.id===context.platform))recoveryPlatforms.push({id:context.platform,name:platformName(context.platform)});
+  host.innerHTML=`<label for="recovery-platform">需要恢复的平台</label><select id="recovery-platform" class="recovery-platform-select" data-recovery-platform>${sortLoginPlatforms(recoveryPlatforms).map(p=>`<option value="${escapeHtml(p.id)}" ${p.id===context.platform?'selected':''}>${escapeHtml(platformName(p.id))}${state.data.platforms.some(active=>active.id===p.id)?'':'（历史）'}</option>`).join('')}</select>
+    ${!data ? `<p class="recovery-feedback">${context.loading?'正在读取稿件、窗口与上次同步状态…':escapeHtml(context.feedback || '读取未完成')}</p><button class="secondary" data-action="reload-recovery">重新读取状态</button>` : `
+    <section class="recovery-section"><h3>1. 本地稿件</h3><p>${needsRefresh?'本页与工作台保存的版本不同，或之前被误标为冲突。若编辑内容不同，恢复时会先另存“恢复副本”，再读取最新稿。':'原稿保存在工作台；恢复平台窗口不会清空本页编辑。'}</p><button class="secondary" data-action="restore-working-copy">保留编辑并读取最新稿</button></section>
+    <section class="recovery-section"><h3>2. 恢复平台窗口</h3><p>${escapeHtml(sessionLabels[session.state] || session.message || '窗口状态待确认')}</p><div class="recovery-actions">${['missing','mismatch'].includes(session.state)?'<button class="secondary" data-action="recovery-platform-login">前往平台登录</button>':`<button class="primary" data-action="reopen-recovery-window">${definitive?'查看已保存草稿 / 平台结果':session.state==='closed'?'重新打开平台窗口':'打开原窗口核对'}</button>`}</div><p>只打开或恢复窗口，不重新填稿、不点击发布。</p></section>
+    <section class="recovery-section"><h3>3. 核对上次同步</h3><p>${result?escapeHtml(statusLabel(result.status)+'：'+(result.message || result.error || '请到平台核对')):'没有找到该稿件在此平台的同步记录。'}</p>
+      ${data.canConfirmNotSubmitted?`<label class="recovery-confirm"><input type="checkbox" data-confirm-not-submitted><span>我已检查平台的草稿、审核中和已发布列表，确认这次内容未保存、未提交审核，也未发布。</span></label><button class="secondary" data-action="confirm-recovery-not-submitted" disabled>确认后允许重新准备</button><p>如果仍在处理中或无法判断，请不要勾选。这是人工核对声明，只解除本平台的重试限制，不会自动再次投递。</p>`:''}
+      ${canPrepare?'<button class="secondary" data-action="prepare-after-recovery">重新准备（不发布）</button><p>进入草稿/编辑页准备流程，仍需你确认；不会直接公开发布。</p>':''}
+      ${needsRefresh?'<p>请先恢复本地稿件版本，再决定是否重新准备。</p>':''}
+      ${definitive?'<p>已有明确保存/发布结果，不再新建同一份内容。请使用上面的入口查看。</p>':''}
+    </section><p class="recovery-feedback ${context.feedbackError?'error':''}" role="status">${escapeHtml(context.feedback || '')}</p>`}`;
+  if(state.recoveryBusy || context.loading)host.querySelectorAll('button,input,select').forEach(el=>el.disabled=true);
+}
+
+async function restoreWorkingCopy() {
+  const context=state.recoveryContext;if(!context || state.recoveryBusy)return;
+  const operation=beginContentOperation(context.contentId);if(!operation){toast('稿件操作尚未结束，请稍候','error');return;}
+  state.recoveryBusy=true;context.feedback='正在核对并保留本页编辑…';context.feedbackError=false;renderPublishRecovery();
+  let createdBackup=false;
+  try {
+    const snapshot=currentDraftSnapshot(context.contentId);
+    const response=await request(`/api/content/${encodeURIComponent(context.contentId)}/recovery?platform=${encodeURIComponent(context.platform)}`);
+    if(!contentOperationIsStable(operation))throw new Error('本页编辑又发生变化，已保留原页面，请重新恢复');
+    if(recoveryDraftDiffers(snapshot,response.recovery.content)) {
+      const title=Array.from(snapshot.title || '').length<=192 ? snapshot.title+'（恢复副本）' : snapshot.title;
+      const copy=await request('/api/content/import',{method:'POST',body:JSON.stringify({title,summary:snapshot.summary,body:snapshot.body,type:'恢复副本',filename:'recovery.html',format:'html'})});
+      if(!copy.content?.id)throw new Error('恢复副本未确认保存，未载入新版本，本页编辑仍保留');
+      context.backupId=copy.content.id;
+      createdBackup=true;
+      if(snapshot.template) {
+        try {await request(`/api/content/${encodeURIComponent(copy.content.id)}/layout`,{method:'POST',body:JSON.stringify({template:snapshot.template,expectedUpdatedAt:copy.content.updated_at})});}
+        catch{context.feedback='恢复副本正文已保存，模板需重新选择。';}
+      }
+    }
+    const fresh=await request('/api/bootstrap');
+    if(!contentOperationIsStable(operation))throw new Error('本页编辑又发生变化；已保存的恢复副本保留，请重新检查');
+    if(!fresh.data?.contents?.some(c=>String(c.id)===context.contentId))throw new Error('原稿已不存在；本页和恢复副本均保留');
+    state.workbenchCsrfToken=fresh.data.csrfToken || state.workbenchCsrfToken;
+    state.data=fresh.data;state.contentCanonicalConflicts.delete(context.contentId);state.dirtyContentIds.delete(context.contentId);
+    state.wechatTemplateChoices.delete(context.contentId);clearPlatformPreviews(context.contentId);state.publishRecoveryError=null;
+    state.selectedContentId=context.contentId;syncContentPageToSelected();render();
+    context.feedback=createdBackup?'已保留恢复副本并载入最新稿。原稿没有被覆盖。':'本页内容与保存稿一致，已同步最新版本，无需创建副本。';
+    context.feedbackError=false;
+  } catch(error){context.feedback=error.message;context.feedbackError=true;}
+  finally {endContentOperation(operation);state.recoveryBusy=false;await loadPublishRecovery();}
+}
+
+async function reopenRecoveryWindow() {
+  const context=state.recoveryContext;if(!context || state.recoveryBusy)return;
+  const result=context.data?.latestJob?.results?.find(r=>r.platform===context.platform);
+  state.recoveryBusy=true;context.feedback='正在恢复原平台窗口，不会重新投递…';context.feedbackError=false;renderPublishRecovery();
+  try {const response=await request('/api/platform-open',{method:'POST',body:JSON.stringify({platform:context.platform,...(result?.url?{url:result.url}:{})})});context.sessionProblem=null;context.feedback=response.opened?.recoveryType==='reused'?'已回到原标签页，没有清空或重新填写内容。请核对草稿和发布结果。':response.opened?.recoveryType==='reopened'?'已沿原登录目录重开浏览器。未保存的页内编辑不保证恢复，请核对草稿/作品；没有重新投递。':'已在原会话打开核对页面，没有重新填稿或发布。';}
+  catch(error){context.feedback=error.message;context.feedbackError=true;if(['SESSION_MISSING','SESSION_MISMATCH'].includes(error.apiCode))context.sessionProblem={state:error.apiCode==='SESSION_MISSING'?'missing':'mismatch'};}
+  finally{state.recoveryBusy=false;await loadPublishRecovery();}
+}
+
+async function confirmRecoveryNotSubmitted() {
+  const context=state.recoveryContext,checked=$('[data-confirm-not-submitted]')?.checked;
+  if(!context?.data?.canConfirmNotSubmitted || !checked || state.recoveryBusy)return;
+  const job=context.data.latestJob;state.recoveryBusy=true;context.feedback='正在记录人工核对声明…';context.feedbackError=false;renderPublishRecovery();
+  try {
+    await request(`/api/publish-jobs/${encodeURIComponent(job.id)}/recovery`,{method:'POST',body:JSON.stringify({platform:context.platform,decision:'confirmed_not_submitted',confirmation:true,expectedJobUpdatedAt:job.updated_at})});
+    context.feedback='已记录你的确认，只解除该平台的重试限制，尚未重新准备或发布。';
+    const history=await request('/api/history');state.data.jobs=history.jobs;state.publishRecoveryError=null;renderRecoveryBanners();renderPublish();renderHistory();renderRecoveryBanners();
+  }catch(error){context.feedback=error.message;context.feedbackError=true;}
+  finally{state.recoveryBusy=false;await loadPublishRecovery();}
+}
+
+function prepareAfterRecovery() {
+  const context=state.recoveryContext;if(!context?.data || state.recoveryBusy)return;
+  const result=context.data.latestJob?.results?.find(r=>r.platform===context.platform);
+  const local=state.data?.contents?.find(c=>String(c.id)===context.contentId);
+  if(!state.data.platforms.some(p=>p.id===context.platform) || ['uisdc','jianshu','netease'].includes(context.platform) || state.contentCanonicalConflicts?.has(context.contentId) || local?.updated_at!==context.data.content.updated_at
+    || ['closed','missing','mismatch'].includes((context.sessionProblem || context.data.session)?.state)
+    || context.data.canConfirmNotSubmitted || ['success','platform_draft','uncertain'].includes(result?.status))return;
+  const {contentId,platform}=context;if(!closePublishRecovery())return;
+  openSinglePublishConfirmation({contentId,platform,mode:'draft'});
+}
+
+async function goToRecoveryLogin() {
+  const context=state.recoveryContext;if(!context || state.recoveryBusy)return;
+  if(state.dirtyContentIds.has(context.contentId) || state.contentCanonicalConflicts.has(context.contentId)) {
+    await restoreWorkingCopy();
+    if(state.recoveryContext!==context || context.feedbackError)return;
+  }
+  if(closePublishRecovery())switchView('platforms');
+}
+
+document.addEventListener('change',event=>{
+  if(event.target.matches('[data-recovery-platform]') && state.recoveryContext && !state.recoveryBusy){state.recoveryContext.platform=event.target.value;state.recoveryContext.data=null;state.recoveryContext.sessionProblem=null;state.recoveryContext.feedback='';void loadPublishRecovery();}
+  if(event.target.matches('[data-confirm-not-submitted]')){const button=$('[data-action="confirm-recovery-not-submitted"]');if(button)button.disabled=!event.target.checked || state.recoveryBusy;}
+});
+$('#publish-recovery-dialog')?.addEventListener('cancel',event=>{event.preventDefault();closePublishRecovery();});
+
+function platformCatalogGroups(platforms) {
+  const groups=[{id:'general',name:'通用内容平台',platforms:[]},{id:'technical',name:'技术与知识平台',platforms:[]},{id:'tool',name:'本地工具',platforms:[]}];
+  for(const platform of sortLoginPlatforms(platforms)) {
+    const id=platform.catalog_group || (platform.id==='zip-download'?'tool':['juejin','csdn','yuque','cnblogs'].includes(platform.id)?'technical':'general');
+    (groups.find(group=>group.id===id) || groups[0]).platforms.push(platform);
+  }
+  return groups.filter(group=>group.platforms.length);
+}
+
+function platformPickerHtml(platforms) {
+  return `<div class="platform-picker">${platforms.map(platform=>{
+    const manual=platform.delivery_mode==='manual' || ['uisdc','jianshu','netease'].includes(platform.id);
+    const labels={manual:'手工写作 / 投稿',editor:'仅准备编辑器','draft-text':'仅纯文字草稿',draft:'同步平台草稿',export:'仅本地导出'};
+    const label=platform.preparation_label || labels[platformPreparationMode(platform.id)];
+    return `<label class="platform-check"><input type="checkbox" data-platform-choice="${escapeHtml(platform.id)}" ${!manual && state.selectedPlatforms.has(platform.id)?'checked':''} ${manual?'disabled title="请在内容中心打开该平台的手工写作/投稿入口"':''}>${platformAvatar(platform)}<span class="platform-check-copy"><span class="platform-check-name">${escapeHtml(platform.name)}</span><small>${escapeHtml(label)}</small></span></label>`;
+  }).join('')}</div>`;
+}
+
+function platformPreparationMode(platform) {
+  const record = state.data?.platforms?.find(item => item.id === platform);
+  return record?.preparation_mode || (['uisdc','jianshu','netease'].includes(platform) ? 'manual'
+    : ['xiaohongshu','toutiao','douban'].includes(platform) ? 'editor'
+    : ['douyin','qiehao'].includes(platform) ? 'draft-text'
+    : platform === 'zip-download' ? 'export' : 'draft');
+}
+
+function platformHandoffResult(contentId, platform) {
+  const job = state.data?.jobs?.find(item => String(item.content_id) === String(contentId)
+    && item.results?.some(result => result.platform === platform));
+  const result = job?.results?.find(item => item.platform === platform);
+  return result?.url && ['platform_draft','uncertain','success'].includes(result.status) ? result : null;
+}

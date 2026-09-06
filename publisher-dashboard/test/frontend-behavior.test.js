@@ -19,6 +19,62 @@ const { parseHTML } = (() => {
   }
 })();
 
+test('random template records the per-article choice and refreshes the unsaved preview', () => {
+  const state={layoutTemplates:[{filename:'style_10.html'},{filename:'style_11.html'}],selectedWechatTemplate:'style_10.html',
+    selectedContentId:'article',wechatTemplateChoices:new Map(),contentOperationLocks:new Map(),dirtyContentIds:new Set()};
+  let renders=0;
+  const choose=vm.runInNewContext(`(${extractFunctionSource('chooseRandomWechatTemplate','generateWechatLayout')})`,{
+    state,Math:{random:()=>0.75,floor:Math.floor},markContentDirty:id=>state.dirtyContentIds.add(id),renderPlatformAdaptationPane:()=>renders++,
+  });
+  choose();assert.equal(state.selectedWechatTemplate,'style_11.html');assert.equal(state.wechatTemplateChoices.get('article'),'style_11.html');
+  assert.ok(state.dirtyContentIds.has('article'));assert.equal(renders,1);
+  state.contentOperationLocks.set('article',{});choose();assert.equal(renders,1);
+});
+
+test('save after switching platforms retains the latest per-article WeChat template', async () => {
+  const state={selectedContentId:'article',activePreviewPlatform:'zhihu',selectedWechatTemplate:'style_11.html',
+    wechatTemplateChoices:new Map([['article','style_11.html']]),contentCanonicalConflicts:new Set(),dirtyContentIds:new Set(['article']),
+    data:{contents:[{id:'article',title:'标题',summary:'',body:'<p>正文</p>',updated_at:'version',layout_html:'<body data-wechat-template="style_10.html"></body>'}]}};
+  let payload;
+  const save=vm.runInNewContext(`(${extractFunctionSource('saveContent','markContentDirty')})`,{
+    state,$:()=>null,request:async(_url,options)=>{payload=JSON.parse(options.body);throw new Error('stop-after-request');},
+    toast:()=>{},markContentCanonicalConflict:()=>{},
+  });
+  await assert.rejects(()=>save('article',{silent:true,operationContext:{}}),/stop-after-request/);
+  assert.equal(payload.template,'style_11.html');
+});
+
+test('recovery ignores a merely preselected default template but preserves an explicit article choice',()=>{
+  const state={data:{contents:[{id:'article',title:'标题',body:'<p>正文</p>',summary:'',layout_html:'',updated_at:'v1'}]},
+    activePreviewPlatform:'weixin',selectedWechatTemplate:'style_10.html',wechatTemplateChoices:new Map()};
+  const snapshot=vm.runInNewContext(`(${extractFunctionSource('currentDraftSnapshot','recoveryDraftDiffers')})`,{state,$:()=>null});
+  assert.equal(snapshot('article').template,'');
+  state.wechatTemplateChoices.set('article','chosen.html');assert.equal(snapshot('article').template,'chosen.html');
+});
+
+test('named template groups preserve the selected legacy filename and random picks a different style', () => {
+  const distinct = vm.runInNewContext(`(${extractFunctionSource('distinctWechatTemplates','selectContentMode')})`);
+  const templates = [{filename:'a.html',label:'蓝线白底'}, {filename:'alias.html',label:'蓝线白底'}, {filename:'b.html',label:'暖橙杂志'}];
+  assert.deepEqual(Array.from(distinct(templates,'alias.html'), item=>item.filename), ['alias.html','b.html']);
+  const state={templateCatalogNamed:true,layoutTemplates:templates,selectedWechatTemplate:'alias.html',selectedContentId:'article',
+    wechatTemplateChoices:new Map(),contentOperationLocks:new Map()};
+  const choose=vm.runInNewContext(`(${extractFunctionSource('chooseRandomWechatTemplate','generateWechatLayout')})`, {
+    state,distinctWechatTemplates:distinct,Math:{random:()=>0,floor:Math.floor},markContentDirty:()=>{},renderPlatformAdaptationPane:()=>{},
+  });
+  choose();assert.equal(state.selectedWechatTemplate,'b.html');
+});
+
+test('switching content modes only hides panels and keeps the unsaved editor node', () => {
+  const {document}=parseHTML('<main id="view-content"><button role="tab" data-content-mode="edit"></button><button role="tab" data-content-mode="preview"></button><div class="content-adaptation-workspace"><section id="content-editor-panel"><div contenteditable>未保存的正文</div></section><section id="content-preview-panel" hidden></section></div></main>');
+  const editor=document.querySelector('[contenteditable]');const state={contentMode:'edit',activePreviewPlatform:'weixin'};let previews=0;
+  const select=vm.runInNewContext(`(${extractFunctionSource('selectContentMode','syncContentLibraryButton')})`, {
+    state,$:s=>document.querySelector(s),$$:s=>[...document.querySelectorAll(s)],getSelectedContent:()=>({id:'article'}),loadPlatformPreview:()=>previews++,
+  });
+  select('preview');assert.equal(document.querySelector('#content-editor-panel').hidden,true);assert.equal(document.querySelector('#content-preview-panel').hidden,false);
+  select('edit');assert.equal(document.querySelector('[contenteditable]'),editor);assert.equal(editor.textContent,'未保存的正文');assert.equal(previews,1);
+  assert.equal(select('invalid'),false);assert.equal(state.contentMode,'edit');
+});
+
 function extractFunctionSource(name, nextName) {
   const starts = [
     appSource.indexOf(`function ${name}(`),
@@ -49,6 +105,14 @@ function evaluateContentRevisionMerger(state) {
 function evaluateCanonicalConflictMarker(state, $, toast) {
   const source = extractFunctionSource('markContentCanonicalConflict', 'mergeContentRevisionMetadata');
   return source ? vm.runInNewContext(`(${source})`, { state, $, toast }) : () => false;
+}
+
+function evaluateBatchPublishGuards(state) {
+  const context = { state, window: { confirm: () => true }, platformName: platform => platform };
+  return {
+    batchPlatformRestriction: vm.runInNewContext(`(${extractFunctionSource('batchPlatformRestriction', 'confirmBatchPublish')})`, context),
+    confirmBatchPublish: vm.runInNewContext(`(${extractFunctionSource('confirmBatchPublish', 'syncPublishSelectionUi')})`, context),
+  };
 }
 
 test('client format inference treats .txt as authoritative', () => {
@@ -174,7 +238,7 @@ test('opening publish confirmation creates an immutable operationId', () => {
     platformName: platform => platform,
     setSinglePublishFeedback: () => {},
   });
-  assert.equal(openSinglePublishConfirmation({ contentId: 'c1', platform: 'zhihu', mode: 'direct' }), true);
+  assert.equal(openSinglePublishConfirmation({ contentId: 'c1', platform: 'zhihu', mode: 'draft' }), true);
   assert.equal(state.pendingSinglePublish.operationId, '12345678-1234-4123-8123-123456789abc');
   assert.equal(Object.isFrozen(state.pendingSinglePublish), true);
 });
@@ -205,6 +269,7 @@ test('batch double-click keeps one immutable operationId and sends one publish r
   const busyStates = [];
   const publishContent = vm.runInNewContext(`(${publishSource})`, {
     state,
+    ...evaluateBatchPublishGuards(state),
     $: () => null,
     readSelectedPlatforms: () => ['zhihu'],
     beginBatchPublishOperation,
@@ -259,7 +324,7 @@ test('full publish confirmation stays successful when post-success refresh fails
     pendingSinglePublish: Object.freeze({
       contentId: 'c1',
       platform: 'zhihu',
-      mode: 'direct',
+      mode: 'draft',
       operationId: 'full-confirm-operation-0001',
     }),
     singlePublishSubmitting: false,
@@ -308,7 +373,7 @@ test('full publish confirmation stays successful when post-success refresh fails
   assert.equal(state.pendingSinglePublish, null);
   assert.equal(state.singlePublishSubmitting, false);
   assert.ok(events.indexOf('close') < events.indexOf('refresh-failed'));
-  assert.ok(events.some(event => event.includes('发布成功，但列表刷新失败')));
+  assert.ok(events.some(event => event.includes('平台操作已返回，但列表刷新失败')));
   assert.equal(events.some(event => event.includes('平台操作失败')), false);
 });
 
@@ -1152,7 +1217,7 @@ for (const mode of ['single', 'batch']) {
       pendingSinglePublish: mode === 'single' ? Object.freeze({
         contentId,
         platform: 'zhihu',
-        mode: 'direct',
+        mode: 'draft',
         operationId: 'frontend-single-conflict-0001',
       }) : null,
       singlePublishSubmitting: false,
@@ -1245,6 +1310,7 @@ for (const mode of ['single', 'batch']) {
       result = await vm.runInNewContext(`(${source})`, {
         ...common,
         readSelectedPlatforms: () => ['zhihu'],
+        ...evaluateBatchPublishGuards(state),
         beginBatchPublishOperation: vm.runInNewContext(`(${beginSource})`, { createPublishOperationId }),
         finishBatchPublishOperation: vm.runInNewContext(`(${finishSource})`),
         setBatchPublishBusy: () => {},
@@ -2020,6 +2086,7 @@ test('batch publish aborts when the canonical body changes during its deferred s
   const busyStates = [];
   const publishContent = vm.runInNewContext(`(${source})`, {
     state: harness.state,
+    ...evaluateBatchPublishGuards(harness.state),
     $: harness.$,
     readSelectedPlatforms: () => ['zhihu'],
     beginBatchPublishOperation,
@@ -2054,7 +2121,7 @@ test('single publish aborts when the canonical body changes during its deferred 
   harness.state.pendingSinglePublish = Object.freeze({
     contentId: harness.contentId,
     platform: 'zhihu',
-    mode: 'direct',
+    mode: 'draft',
     operationId: 'single-save-race-operation-0001',
   });
   harness.state.singlePublishSubmitting = false;

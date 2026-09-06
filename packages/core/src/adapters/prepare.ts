@@ -498,6 +498,21 @@ function resolveFormat(platform: PlatformMeta, config: PreprocessConfig): Prepar
   return config.outputFormat
 }
 
+// Keep original image bytes and source order; only constrain display geometry.
+// This is part of the adapter-ready HTML, not just a dashboard clipping rule.
+function fitArticleImageLayout(html: string): string {
+  const { root } = parseFragment(html)
+  for (const image of Array.from(root.querySelectorAll('img'))) {
+    image.style.setProperty('max-width', '100%')
+    image.style.setProperty('min-width', '0')
+    image.style.setProperty('height', 'auto')
+    image.style.setProperty('display', 'block')
+    image.style.setProperty('margin-left', 'auto')
+    image.style.setProperty('margin-right', 'auto')
+  }
+  return root.innerHTML
+}
+
 export function prepareArticleForPlatform(
   article: Article,
   platformId: string
@@ -513,7 +528,8 @@ export function prepareArticleForPlatform(
   const canonicalHtml = article.html?.trim()
     ? article.html
     : markdownToHtml(article.markdown || '')
-  const html = sanitizeHtml(canonicalHtml, config)
+  const sanitizedHtml = sanitizeHtml(canonicalHtml, config)
+  const html = ['woshipm', 'uisdc', 'jianshu', 'netease'].includes(platformId) ? fitArticleImageLayout(sanitizedHtml) : sanitizedHtml
   const markdown = htmlToMarkdown(html)
   const content = format === 'html'
     ? html

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { Article } from '../../types'
 import { prepareArticleForPlatform } from '../prepare'
+import { parseHTML } from 'linkedom'
 
 const article: Article = {
   title: '验收常见误区',
@@ -25,6 +26,21 @@ const article: Article = {
 }
 
 describe('prepareArticleForPlatform', () => {
+  it('fits woshipm images in preview and delivery HTML without changing source pixels or order', () => {
+    const input:Article={title:'图文',markdown:'',html:'<p>前文</p><p><img src="https://example.com/large.png" alt="原图" width="1672" height="941" style="max-width:none!important;min-width:1672px;height:941px"></p><p>中间正文</p><img src="https://example.com/small.png" width="160"><p>后文</p>'}
+    const before=input.html
+    const result=prepareArticleForPlatform(input,'woshipm')
+    expect(result.article.html).toBe(result.content)
+    expect(result.htmlPreview).toBe(result.content)
+    const imgs=[...parseHTML(result.content).document.querySelectorAll('img')]
+    expect(imgs.map(i=>i.getAttribute('src'))).toEqual(['https://example.com/large.png','https://example.com/small.png'])
+    for(const img of imgs){expect(img.style.getPropertyValue('max-width')).toBe('100%');expect(img.style.getPropertyValue('height')).toBe('auto');expect(img.style.getPropertyValue('min-width')).toBe('0')}
+    expect(imgs[1].getAttribute('width')).toBe('160')
+    expect(imgs[0].getAttribute('alt')).toBe('原图')
+    expect(input.html).toBe(before)
+    expect(result.content).toContain('中间正文')
+    expect(prepareArticleForPlatform(article,'weixin').content).not.toContain('margin-left:auto')
+  })
   it('keeps HTML but removes external hrefs for WeChat', () => {
     const result = prepareArticleForPlatform(article, 'weixin')
 

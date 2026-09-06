@@ -12,6 +12,10 @@ const { DatabaseSync } = require('node:sqlite');
 const { marked, Parser, Renderer } = require('marked');
 const TurndownService = require('turndown');
 const { gfm: turndownGfm } = require('turndown-plugin-gfm');
+const { storeAssets, replaceBundleImages, inlineUploadedAssets, importedAssetsFromBundle, validateAssetImages } = require('./content-assets');
+const { browserIdentity, BROWSER_PLATFORMS: TOPIC_BROWSER_PLATFORMS } = require('./topic-browser-source');
+const { recoveryError, retryResolution, projectRecoveryJob, canResolveJobPlatform, createSessionRecovery } = require('./publish-recovery');
+const { GROUPS: PLATFORM_CATALOG_GROUPS, isActivePlatform, preparationMode, catalogPlatforms } = require('./platform-catalog');
 const {
   canonicalContentHash,
   inspectLayoutMetadata,
@@ -23,7 +27,7 @@ const {
 const ROOT = __dirname;
 const REPO_ROOT = path.resolve(ROOT, '..');
 const PUBLIC_DIR = path.join(ROOT, 'public');
-const DATA_DIR = path.join(ROOT, 'data');
+const DATA_DIR = process.env.PUBLISHER_DATA_DIR || path.join(ROOT, 'data');
 const DRAFTS_DIR = path.join(DATA_DIR, 'drafts');
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 const DB_PATH = process.env.PUBLISHER_DB || path.join(DATA_DIR, 'publisher.sqlite');
@@ -43,14 +47,37 @@ const { parseHTML } = (() => {
   }
 })();
 const loginSessions = new Map();
+const derivedPlatformSources = new Map();
+const pendingPlatformSources = new Map();
+const contentAssetRoots = new Map();
+
+async function preparePlatformAssets(content, platforms, options = {}) {
+  if (!platforms.includes('woshipm') || !/<table\b/i.test(String(content.body))) return;
+  const assetsRoot = path.resolve(options.uploadsDir || contentAssetRoots.get(content.id) || UPLOADS_DIR);
+  contentAssetRoots.set(content.id, assetsRoot);
+  const key = `${canonicalContentHash(content)}::${assetsRoot}`;
+  if (derivedPlatformSources.has(key)) return;
+  if (pendingPlatformSources.has(key)) return pendingPlatformSources.get(key);
+  const task = (async () => {
+    const transform = options.transformTables || require('./table-images').transformTables;
+    const result = await transform(content.body, { assetsRoot });
+    derivedPlatformSources.set(key, { ...result, uploadsDir: assetsRoot });
+    if (derivedPlatformSources.size > 100) derivedPlatformSources.delete(derivedPlatformSources.keys().next().value);
+  })();
+  pendingPlatformSources.set(key, task);
+  try { await task; } finally { pendingPlatformSources.delete(key); }
+}
 const DEFAULT_SELECTED_PLATFORMS = [];
 const DASHBOARD_DISTRIBUTION_PLATFORMS = [
   'weixin',
-  'douyin',
+  'woshipm',
+  'sspai',
   'xiaohongshu',
+  'uisdc',
+  'douyin',
+  'zhihu',
   'toutiao',
   'qiehao',
-  'zhihu',
   'weibo',
   'bilibili',
   'baijiahao',
@@ -80,6 +107,10 @@ const DASHBOARD_PLATFORM_LABELS = {
 };
 
 const FALLBACK_PLATFORMS = [
+  ['jianshu', '简书'],
+  ['netease', '网易号'],
+  ['uisdc', '优设'],
+  ['sspai', '少数派'],
   ['zhihu', '知乎'],
   ['juejin', '掘金'],
   ['douyin', '抖音文章'],
@@ -116,6 +147,10 @@ const FALLBACK_PLATFORMS = [
 ];
 
 const LOGIN_PLATFORMS = {
+  jianshu: {name:'简书',loginUrl:'https://www.jianshu.com/sign_in',domains:['.jianshu.com']},
+  netease: {name:'网易号',loginUrl:'https://mp.163.com/login.html',domains:['.mp.163.com']},
+  uisdc: { name: '优设', loginUrl: 'https://www.uisdc.com/#login', domains: ['.uisdc.com'] },
+  sspai: { name: '少数派', loginUrl: 'https://sspai.com/login', domains: ['.sspai.com'] },
   zhihu: { name: '知乎', loginUrl: 'https://www.zhihu.com/signin', domains: ['.zhihu.com'] },
   juejin: { name: '掘金', loginUrl: 'https://juejin.cn', domains: ['.juejin.cn'] },
   weibo: { name: '微博', loginUrl: 'https://weibo.com', domains: ['.weibo.com', '.sina.com.cn'] },
@@ -254,10 +289,20 @@ function updateContentRowWithMonotonicTimestamp(contentId, assignments, values =
   throw statusError('内容状态更新冲突，请重试', 409);
 }
 
-function statusError(message, statusCode) {
+function statusError(message, statusCode, apiCode) {
   const error = new Error(message);
   error.statusCode = statusCode;
+  if (apiCode) error.apiCode = apiCode;
   return error;
+}
+
+function dashboardPublishMode(mode = 'draft') {
+  if (mode === 'direct') {
+    throw statusError('工作台仅支持准备草稿或编辑器；请到平台人工确认公开发表及是否群发通知。',
+      400, 'MANUAL_PUBLICATION_REQUIRED');
+  }
+  if (mode !== 'draft') throw statusError('publishMode 仅支持 draft；最终发表需要人工在平台确认', 400);
+  return mode;
 }
 
 function operationTimestamp(nowMs) {
@@ -403,7 +448,7 @@ function createOperationJournal(options = {}) {
     if (!record || record.state !== 'running') return record || null;
     const timestamp = operationTimestamp(nowMs);
     record.state = state;
-    record.result = normalizeJournalResult(result);
+    record.result = normalizeJournalResult(result) || record.result || null;
     record.updatedAt = timestamp;
     if (state === 'completed') record.completedAt = timestamp;
     if (state === 'failed') record.failedAt = timestamp;
@@ -416,6 +461,52 @@ function createOperationJournal(options = {}) {
 
   return {
     filePath,
+    findForJob(jobId) {
+      // Recovery GET must not prune, rewrite, or expire an operation record.
+      reload();
+      return records.find(record => record.result?.jobId === jobId && !record.aliasOf) || null;
+    },
+    attachJob(operationId, jobId) {
+      reload();
+      const record = records.find(item => item.operationId === operationId);
+      if (!record || record.state !== 'running') throw statusError('发布操作不在运行状态', 409, 'PUBLISH_IN_PROGRESS');
+      record.result = { ...(record.result || {}), jobId, jobStatus: 'running' };
+      persist();
+    },
+    confirmNotSubmitted(job, platform, expectedJobUpdatedAt) {
+      reload();
+      const record = records.find(item => item.result?.jobId === job.id && !item.aliasOf);
+      if (!record || record.signature?.contentId !== job.content_id
+        || !job.platforms.includes(platform) || !record.signature.platforms.includes(platform)) {
+        throw recoveryError('任务与平台没有可恢复的发布操作记录', 'RECOVERY_TARGET_INVALID');
+      }
+      if ([job.status, record.result.jobStatus].some(status => ['published', 'draft_saved', 'success', 'platform_draft'].includes(status))
+        || [...job.results, ...(record.result.platformResults || [])].some(item => item.platform === platform
+          && ['success', 'platform_draft'].includes(item.status))) {
+        throw recoveryError('该平台已成功发布或保存草稿，不能声明未保存且未发布', 'RECOVERY_NOT_ALLOWED');
+      }
+      const current = projectRecoveryJob(job, record);
+      const prior = retryResolution(record, platform);
+      if (prior && (expectedJobUpdatedAt === prior.expectedJobUpdatedAt || expectedJobUpdatedAt === current.updated_at)) {
+        return { record, resolution: prior, cached: true };
+      }
+      if (expectedJobUpdatedAt !== current.updated_at) {
+        throw recoveryError('发布任务已更新，请重新核对任务后确认', 'RECOVERY_VERSION_CONFLICT');
+      }
+      if (!canResolveJobPlatform(job, record, platform)) {
+        throw recoveryError('该任务平台当前不允许解除不确定限制', record.state === 'running' ? 'PUBLISH_IN_PROGRESS' : 'RECOVERY_NOT_ALLOWED');
+      }
+      const confirmedAt = new Date(Math.max(nowMs(), (Date.parse(current.updated_at) || 0) + 1)).toISOString();
+      const resolution = { state: 'retry_allowed', decision: 'confirmed_not_submitted', confirmation: true,
+        actor: 'user', statement: '用户声明已检查平台，确认未保存且未发布；此声明未经平台验证',
+        jobId: job.id, platform, expectedJobUpdatedAt, confirmedAt };
+      record.resolutions = { ...(record.resolutions || {}), [platform]: resolution };
+      record.updatedAt = confirmedAt;
+      // Keep the original uncertain record and operationId permanently protected.
+      // Only this platform's lock is released; the original result is not rewritten.
+      persist();
+      return { record, resolution, cached: false };
+    },
     get(operationId) {
       if (reloadAndPrune()) persist();
       return records.find(record => record.operationId === operationId) || null;
@@ -445,22 +536,31 @@ function createOperationJournal(options = {}) {
         }
         if (existing.state === 'completed') return { kind: 'replay', record: existing };
         if (existing.state === 'uncertain') {
-          throw statusError('该发布操作结果不确定，禁止自动重试；请人工核对平台结果', 409);
+          throw statusError('该发布操作结果不确定，禁止自动重试；请人工核对平台结果', 409, 'PUBLISH_UNCERTAIN');
         }
         if (existing.state === 'failed') {
           throw statusError('该发布操作已失败，禁止用相同 operationId 自动重试', 409);
         }
-        throw statusError('相同 operationId 的发布正在进行，请勿重复提交', 409);
+        throw statusError('相同 operationId 的发布正在进行，请勿重复提交', 409, 'PUBLISH_IN_PROGRESS');
+      }
+      // A no-op local save changes updated_at, not the remote side effect.
+      // Also protect overlapping platforms in a retried subset of a batch.
+      const unresolved = records.filter(record => {
+        if (!['running','uncertain'].includes(record.state)) return false;
+        const previous = normalizeOperationSignature(record.signature);
+        return previous.contentId === canonicalSignature.contentId
+          && previous.platforms.some(platform => canonicalSignature.platforms.includes(platform)
+            && (record.state === 'running' || !retryResolution(record, platform)));
+      });
+      const uncertain = unresolved.find(record => record.state === 'uncertain');
+      if (uncertain) {
+        throw statusError('相同内容与平台的发布结果不确定，禁止自动重试；请人工核对平台结果', 409, 'PUBLISH_UNCERTAIN');
+      }
+      const running = unresolved.find(record => record.state === 'running');
+      if (running) {
+        throw statusError('相同内容与平台的发布正在进行，请勿重复提交', 409, 'PUBLISH_IN_PROGRESS');
       }
       const matchingSignature = records.filter(record => operationSignaturesMatch(record.signature, canonicalSignature));
-      const uncertain = matchingSignature.find(record => record.state === 'uncertain');
-      if (uncertain) {
-        throw statusError('相同内容与平台的发布结果不确定，禁止自动重试；请人工核对平台结果', 409);
-      }
-      const running = matchingSignature.find(record => record.state === 'running');
-      if (running) {
-        throw statusError('相同内容与平台的发布正在进行，请勿重复提交', 409);
-      }
       const completed = matchingSignature.find(record => record.state === 'completed');
       if (completed) {
         const timestamp = operationTimestamp(nowMs);
@@ -1105,7 +1205,8 @@ function normalizeJob(row) {
 }
 
 function getDashboardData() {
-  const platforms = platformRows();
+  const allPlatformRows = platformRows();
+  const platforms = catalogPlatforms(allPlatformRows);
   const plans = rows('SELECT * FROM weekly_plans ORDER BY date');
   const contents = rows('SELECT * FROM contents ORDER BY updated_at DESC').map(normalizeContent);
   const jobs = rows('SELECT * FROM publish_jobs ORDER BY created_at DESC LIMIT 50').map(normalizeJob);
@@ -1155,6 +1256,8 @@ function getDashboardData() {
       platformCount: platforms.length,
     },
     platforms,
+    platformLabels: Object.fromEntries(allPlatformRows.map(p=>[p.id,p.name])),
+    platformCatalogGroups: PLATFORM_CATALOG_GROUPS,
     platformDistribution,
     plans,
     contents,
@@ -1233,23 +1336,24 @@ function parseSyncResults(output) {
     const clean = stripAnsi(lines[i]).trim();
     const success = clean.match(/^(?:✓|✔|\[OK\])\s+(.+?)\s*$/u);
     const failed = clean.match(/^(?:✗|✘|×|\[FAIL\])\s+(.+?)\s*$/u);
-    if (!success && !failed) continue;
+    const uncertain = clean.match(/^\[UNCERTAIN\]\s+(.+?)\s*$/u);
+    if (!success && !failed && !uncertain) continue;
 
-    const platform = (success?.[1] || failed?.[1]).replace(/\s+\(.+?\)$/, '').trim();
+    const platform = (success?.[1] || failed?.[1] || uncertain?.[1]).replace(/\s+\(.+?\)$/, '').trim();
     const details = [];
     let url = null;
     for (let j = i + 1; j < lines.length; j++) {
       const raw = lines[j];
       const detail = stripAnsi(raw).trim();
       if (!detail) break;
-      if (/^(?:✓|✔|✗|✘|×|\[OK\]|\[FAIL\])\s+/.test(detail)) break;
+      if (/^(?:✓|✔|✗|✘|×|\[OK\]|\[FAIL\]|\[UNCERTAIN\])\s+/.test(detail)) break;
       if (!/^\s/.test(raw)) break;
       const urlMatch = detail.match(/https?:\/\/\S+/);
       if (urlMatch && !url) url = urlMatch[0].replace(/[),\]}]+$/, '');
       if (!/^https?:\/\/\S+$/.test(detail)) details.push(detail);
       i = j;
     }
-    results[platform] = success
+    results[platform] = uncertain ? { status: 'uncertain', url, error: details.join(' ') || '结果待人工核对，请勿重复提交' } : success
       ? { status: 'success', url, message: details.join(' ') }
       : { status: 'failed', error: details.join(' ') || '未知错误' };
   }
@@ -1550,15 +1654,18 @@ async function closeLoginBrowser(port, loginUrl) {
 
 function writePlatformSession(session) {
   const stableDir = path.join(LOGIN_DIR, session.platform);
-  fs.mkdirSync(stableDir, { recursive: true });
-  fs.writeFileSync(path.join(stableDir, 'session.json'), `${JSON.stringify({
+  fs.mkdirSync(stableDir, { recursive: true, mode: 0o700 });
+  const temporary = path.join(stableDir, `session-${randomBytes(8).toString('hex')}.tmp`);
+  fs.writeFileSync(temporary, `${JSON.stringify({
     platform: session.platform,
     browserPath: session.browserPath,
     port: session.port,
     userDataDir: session.userDataDir,
     loginUrl: session.loginUrl,
+    webSocketDebuggerUrl: session.webSocketDebuggerUrl,
     updatedAt: now(),
-  }, null, 2)}\n`, 'utf8');
+  }, null, 2)}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+  fs.renameSync(temporary, path.join(stableDir, 'session.json'));
 }
 
 async function startLoginSession(platform) {
@@ -1609,7 +1716,8 @@ async function startLoginSession(platform) {
   child.unref();
 
   try {
-    await waitForJson(`http://127.0.0.1:${port}/json/version`);
+    const version = await waitForJson(`http://127.0.0.1:${port}/json/version`);
+    session.webSocketDebuggerUrl = browserIdentity(version, port);
   } catch (error) {
     session.done = true;
     session.error = `无法连接登录浏览器调试端口。请关闭刚才打开的 ${config.name} 登录窗口后重试。${error.message}`;
@@ -1630,10 +1738,14 @@ async function finishLoginSession(session) {
   if (session.exporting) throw new Error(`${session.name || session.platform} 正在导出 Cookie，请不要重复点击`);
   session.exporting = true;
   try {
-    await waitForJson(`http://127.0.0.1:${session.port}/json/version`, 5000)
-      .catch(() => {
-        throw new Error('登录浏览器已经关闭，请重新点击登录并在新窗口完成登录');
-      });
+    try {
+      const version = await waitForJson(`http://127.0.0.1:${session.port}/json/version`, 5000);
+      if (!session.webSocketDebuggerUrl || browserIdentity(version, session.port) !== session.webSocketDebuggerUrl) throw new Error('identity mismatch');
+    } catch {
+      const invalid = statusError('登录会话已失效，请关闭旧登录窗口并重新点击登录；未导出账号凭据', 409);
+      invalid.apiCode = 'LOGIN_SESSION_INVALID';
+      throw invalid;
+    }
     const allCookies = await collectBrowserCookies(session.port, session.loginUrl);
     const exported = allCookies.filter(cookie => session.domains.some(domain => domainMatches(cookie.domain, domain)));
     if (!exported.length) {
@@ -1646,7 +1758,7 @@ async function finishLoginSession(session) {
     session.exportedDomains = [...new Set(exported.map(cookie => cookie.domain))].sort();
     session.output += `Exported ${exported.length} cookies to ${session.cookieFile}\n`;
     writePlatformSession(session);
-    if (!INTERACTIVE_AUTH_PLATFORMS.has(session.platform)) {
+    if (!INTERACTIVE_AUTH_PLATFORMS.has(session.platform) && !TOPIC_BROWSER_PLATFORMS.includes(session.platform)) {
       await closeLoginBrowser(session.port, session.loginUrl).catch(() => undefined);
     }
     session.done = true;
@@ -1655,9 +1767,11 @@ async function finishLoginSession(session) {
     return session;
   } catch (error) {
     session.error = error.message;
-    if (/登录浏览器已经关闭|等待 Chrome DevTools/.test(error.message)) {
+    if (error.apiCode === 'LOGIN_SESSION_INVALID' || /登录浏览器已经关闭|等待 Chrome DevTools/.test(error.message)) {
       session.done = true;
+      session.exitCode = 1;
       loginSessions.delete(session.id);
+      setPlatformAuthStatus(session.platform, 'unknown');
     }
     throw error;
   } finally {
@@ -1690,13 +1804,13 @@ async function refreshPlatformsFromCli() {
       throw new Error(stripAnsi(result.output).trim() || '未读取到平台列表');
     }
     for (const platform of parsed) upsertPlatform(platform.id, platform.name);
-    addActivity(`刷新平台列表：${parsed.length} 个平台`, 'platforms', null, '系统');
-    return { platforms: platformRows() };
+    addActivity(`刷新常用文章入口：${catalogPlatforms(platformRows()).length} 项，历史兼容入口保留`, 'platforms', null, '系统');
+    return { platforms: catalogPlatforms(platformRows()) };
   } catch (error) {
     const message = stripAnsi(error?.message || String(error)).trim() || '未知错误';
     addActivity(`刷新平台列表失败，已使用本地平台列表：${message}`, 'platforms', null, '系统');
     return {
-      platforms: platformRows(),
+      platforms: catalogPlatforms(platformRows()),
       warning: `CLI 刷新平台列表失败，已使用本地平台列表（${message}）`,
     };
   }
@@ -2173,7 +2287,7 @@ function validateImportPayload(payload) {
   return payload;
 }
 
-function importContent(payload) {
+function importContent(payload, options = {}) {
   const input = validateImportPayload(payload);
   const rawBody = input.body ?? '';
   if (!rawBody.trim()) throw statusError('导入正文不能为空', 400);
@@ -2197,8 +2311,9 @@ function importContent(payload) {
     body = sanitizeImportedHtml(textToImportedHtml(trimmedBody)).trim();
   }
   if (!body.trim()) throw statusError('导入正文不能为空', 400);
-  const summary = (input.summary ?? '').trim()
-    || Array.from(readableImportedText(body)).slice(0, 120).join('');
+  const summary = Object.prototype.hasOwnProperty.call(input, 'summary')
+    ? input.summary.trim()
+    : Array.from(readableImportedText(body)).slice(0, 120).join('');
   const type = (input.type ?? '').trim() || '导入文章';
   const contentId = makeId('content');
   const timestamp = now();
@@ -2213,7 +2328,7 @@ function importContent(payload) {
       summary,
       body,
       type,
-      encodeJson([]),
+      encodeJson(options.images || []),
       encodeJson([]),
       timestamp,
       timestamp
@@ -2225,6 +2340,24 @@ function importContent(payload) {
   });
 }
 
+async function importContentBundle(payload, options = {}) {
+  const input = validateImportPayload(payload);
+  const rawBody = input.body ?? '';
+  if (!rawBody.trim()) throw statusError('导入正文不能为空', 400);
+  if (Buffer.byteLength(rawBody, 'utf8') > MAX_IMPORTED_BODY_BYTES) throw statusError('导入正文不能超过5 MiB', 413);
+  const format = importedContentFormat(input.filename || '', rawBody, input.format);
+  const html = sanitizeImportedHtml(format === 'html' ? rawBody : format === 'text' ? textToImportedHtml(rawBody) : markdownToHtml(rawBody, { imported: true }));
+  await validateAssetImages(input.assets || [], options.imageValidation || {});
+  const images = storeAssets(input.assets || [], options.uploadsDir || UPLOADS_DIR);
+  const prepared = replaceBundleImages(html, images);
+  const title = input.title || titleFromImportedBody(rawBody, input.filename || '', format);
+  const content = importContent({ title, body: prepared.html, filename: 'imported-article.html', format: 'html',
+    summary: input.summary ?? '', type: input.type || '图文导入' },
+    { images: images.map(i => ({ ...i, status: '已导入', usage: '正文配图' })) });
+  contentAssetRoots.set(content.id, options.uploadsDir || UPLOADS_DIR);
+  return { content, warnings: prepared.warnings, assetCount: images.length };
+}
+
 function validateContentUpdatePayload(payload) {
   const prototype = payload && typeof payload === 'object' ? Object.getPrototypeOf(payload) : null;
   if (payload === null
@@ -2233,7 +2366,7 @@ function validateContentUpdatePayload(payload) {
     || (prototype !== Object.prototype && prototype !== null)) {
     throw statusError('内容更新请求必须是 JSON 对象', 400);
   }
-  for (const field of ['title', 'summary', 'body', 'type', 'expectedUpdatedAt']) {
+  for (const field of ['title', 'summary', 'body', 'type', 'expectedUpdatedAt', 'template']) {
     if (Object.prototype.hasOwnProperty.call(payload, field) && typeof payload[field] !== 'string') {
       throw statusError(`内容更新字段 ${field} 必须是字符串`, 400);
     }
@@ -2286,8 +2419,10 @@ function updateContent(contentId, payload = {}) {
       || summary !== (storedContent.summary ?? '')
       || body !== storedContent.body
       || type !== (storedContent.type ?? '');
-    const status = canonicalChanged ? (content.plan_date ? '正文已生成' : '已导入') : content.status;
-    const layoutHtml = canonicalChanged ? '' : (content.layout_html ?? '');
+    const hasTemplate = Object.prototype.hasOwnProperty.call(input, 'template');
+    const layoutHtml = hasTemplate ? renderLayoutTemplate(input.template, { title, summary, body })
+      : canonicalChanged ? '' : (content.layout_html ?? '');
+    const status = hasTemplate ? '已排版' : canonicalChanged ? (content.plan_date ? '正文已生成' : '已导入') : content.status;
     const mutation = updateContentRowWithMonotonicTimestamp(
       contentId,
       'title = ?, summary = ?, body = ?, type = ?, status = ?, layout_html = ?',
@@ -2295,12 +2430,12 @@ function updateContent(contentId, payload = {}) {
       { expectedUpdatedAt: input.expectedUpdatedAt }
     );
     if (mutation.changes === 0) {
-      throw statusError('文章已在其他位置更新，请重新加载最新版本', 409);
+      throw statusError('文章已在其他位置更新，请重新加载最新版本', 409, 'CONTENT_REVISION_CONFLICT');
     }
     if (content.plan_date) {
       if (canonicalChanged) {
-        db.prepare("UPDATE weekly_plans SET topic = ?, type = ?, status = '正文已生成', updated_at = ? WHERE date = ?")
-          .run(title, type, mutation.updatedAt, content.plan_date);
+        db.prepare('UPDATE weekly_plans SET topic = ?, type = ?, status = ?, updated_at = ? WHERE date = ?')
+          .run(title, type, status, mutation.updatedAt, content.plan_date);
       } else {
         db.prepare('UPDATE weekly_plans SET topic = ?, type = ?, updated_at = ? WHERE date = ?')
           .run(title, type, mutation.updatedAt, content.plan_date);
@@ -2355,7 +2490,7 @@ function layoutContent(contentId, template, expectedUpdatedAt) {
     const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
     if (!content) throw new Error('内容不存在');
     if (content.updated_at !== expectedRevision) {
-      throw statusError('文章已在其他标签页更新，请重新加载最新版本', 409);
+      throw statusError('文章已在其他标签页更新，请重新加载最新版本', 409, 'CONTENT_REVISION_CONFLICT');
     }
     const html = templateProvided
       ? renderLayoutTemplate(template, {
@@ -2370,7 +2505,7 @@ function layoutContent(contentId, template, expectedUpdatedAt) {
       [html],
       { expectedUpdatedAt: expectedRevision }
     );
-    if (mutation.changes === 0) throw statusError('文章已被更新，请重新生成排版', 409);
+    if (mutation.changes === 0) throw statusError('文章已被更新，请重新生成排版', 409, 'CONTENT_REVISION_CONFLICT');
     if (content.plan_date) {
       db.prepare("UPDATE weekly_plans SET status = '已排版', updated_at = ? WHERE date = ?")
         .run(mutation.updatedAt, content.plan_date);
@@ -2388,7 +2523,7 @@ function saveLocalDraft(contentId, platforms = [], expectedUpdatedAt) {
     const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
     if (!content) throw new Error('内容不存在');
     if (content.updated_at !== expectedRevision) {
-      throw statusError('文章已在其他标签页更新，请重新加载最新版本', 409);
+      throw statusError('文章已在其他标签页更新，请重新加载最新版本', 409, 'CONTENT_REVISION_CONFLICT');
     }
     const selected = (Array.isArray(platforms) ? platforms : content.selected_platforms)
       .map(platform => String(platform || '').trim().toLowerCase())
@@ -2399,7 +2534,7 @@ function saveLocalDraft(contentId, platforms = [], expectedUpdatedAt) {
       [encodeJson(selected)],
       { expectedUpdatedAt: expectedRevision }
     );
-    if (mutation.changes === 0) throw statusError('文章已被更新，请重新保存草稿', 409);
+    if (mutation.changes === 0) throw statusError('文章已被更新，请重新保存草稿', 409, 'CONTENT_REVISION_CONFLICT');
     if (content.plan_date) {
       db.prepare("UPDATE weekly_plans SET status = '草稿已保存', updated_at = ? WHERE date = ?")
         .run(mutation.updatedAt, content.plan_date);
@@ -2467,11 +2602,15 @@ function selectPlatformSourcePayload(content, platform) {
   if (!platformId) throw new Error('平台源缺少平台 ID');
   const canonical = normalizeCanonicalContent(content);
   const canonicalContent = { ...content, ...canonical };
-  const canonicalMarkdown = contentToMarkdown(canonicalContent);
+  const assetRoot = contentAssetRoots.get(content.id) || UPLOADS_DIR;
+  const embeddedBody = inlineUploadedAssets(canonical.body, assetRoot);
+  const canonicalMarkdown = contentToMarkdown({ ...canonicalContent, body: embeddedBody });
   const useLayout = platformId === 'weixin'
     && Boolean(verifiedLayoutMetadata(canonicalContent));
-  const sourceContent = useLayout ? String(content.layout_html) : canonicalMarkdown;
-  const format = useLayout ? 'html' : 'markdown';
+  const derived = platformId === 'woshipm' ? derivedPlatformSources.get(`${canonicalContentHash(content)}::${path.resolve(assetRoot)}`) : null;
+  const sourceContent = derived ? inlineUploadedAssets(derived.html, derived.uploadsDir)
+    : useLayout ? inlineUploadedAssets(String(content.layout_html), assetRoot) : canonicalMarkdown;
+  const format = useLayout || derived ? 'html' : 'markdown';
   return {
     platform: platformId,
     format,
@@ -2479,7 +2618,7 @@ function selectPlatformSourcePayload(content, platform) {
     content: sourceContent,
     contentHash: hashSource(sourceContent),
     templated: useLayout,
-    warnings: platformId === 'weixin' && !useLayout ? ['尚未使用公众号模板'] : [],
+    warnings: [...(platformId === 'weixin' && !useLayout ? ['尚未使用公众号模板'] : []), ...(derived?.warnings || [])],
   };
 }
 
@@ -2657,8 +2796,9 @@ function validatePlatformPreviewResult(preview, platformId) {
 }
 
 async function previewContentForPlatform(contentId, platform, options = {}) {
-  const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
+  const content = options.contentOverride || normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
   if (!content) throw statusError('内容不存在', 404);
+  if (options.uploadsDir) contentAssetRoots.set(content.id, options.uploadsDir);
 
   const platformId = String(platform || '').trim().toLowerCase();
   if (!platformId) throw statusError('缺少平台参数', 400);
@@ -2666,6 +2806,7 @@ async function previewContentForPlatform(contentId, platform, options = {}) {
   if (!knownPlatform || RETIRED_PLATFORM_IDS.includes(platformId)) {
     throw statusError(`平台不存在: ${platformId}`, 400);
   }
+  await preparePlatformAssets(content, [platformId], options);
 
   const tempRoot = path.resolve(options.tempRoot || os.tmpdir());
   const previewDir = fs.mkdtempSync(path.join(tempRoot, 'publisher-dashboard-preview-'));
@@ -2737,6 +2878,8 @@ function readPlatformSessionFile(platform) {
 }
 
 function defaultPlatformOpenUrl(platform) {
+  if (platform === 'jianshu') return 'https://www.jianshu.com/writer#/';
+  if (platform === 'netease') return 'https://mp.163.com/index.html';
   if (platform === 'douyin') return 'https://creator.douyin.com/creator-micro/content/manage';
   if (platform === 'toutiao') return 'https://mp.toutiao.com/profile_v4/manage/content/all';
   if (platform === 'xiaohongshu') return 'https://creator.xiaohongshu.com/publish/publish?source=official';
@@ -2759,53 +2902,15 @@ function assertPlatformUrl(platform, targetUrl) {
   if (!allowed) throw new Error(`链接域名不属于 ${config.name}: ${parsed.hostname}`);
 }
 
-async function isCdpAlive(port) {
-  try {
-    const response = await fetch(`http://127.0.0.1:${port}/json/version`);
-    return response.ok;
-  } catch {
-    return false;
-  }
-}
-
-async function openInPlatformSession(platform, targetUrl) {
+async function openInPlatformSession(platform, targetUrl, sessionRecovery) {
   const platformId = String(platform || '').trim().toLowerCase();
-  const session = readPlatformSessionFile(platformId);
+  if (targetUrl !== undefined && (typeof targetUrl !== 'string' || targetUrl.length > 8192)) {
+    throw statusError('平台链接必须是有效 URL 字符串', 400);
+  }
   const url = targetUrl || defaultPlatformOpenUrl(platformId);
   if (!url) throw new Error('缺少要打开的链接');
   assertPlatformUrl(platformId, url);
-  if (!session?.browserPath || !session?.port || !session?.userDataDir) {
-    throw new Error(`请先在“平台登录”里登录 ${LOGIN_PLATFORMS[platformId]?.name || platformId}`);
-  }
-  if (!fs.existsSync(session.userDataDir)) {
-    throw new Error(`平台登录目录不存在，请重新登录 ${LOGIN_PLATFORMS[platformId]?.name || platformId}`);
-  }
-
-  if (await isCdpAlive(session.port)) {
-    const created = await fetch(`http://127.0.0.1:${session.port}/json/new?${encodeURIComponent(url)}`, { method: 'PUT' });
-    if (!created.ok) throw new Error(`无法在平台会话里打开链接: HTTP ${created.status}`);
-  } else {
-    const child = spawn(session.browserPath, [
-      `--remote-debugging-port=${session.port}`,
-      `--user-data-dir=${session.userDataDir}`,
-      '--no-first-run',
-      '--no-default-browser-check',
-      '--new-window',
-      url,
-    ], {
-      detached: true,
-      stdio: 'ignore',
-    });
-    child.unref();
-    await waitForJson(`http://127.0.0.1:${session.port}/json/version`, 20000);
-  }
-
-  return {
-    platform: platformId,
-    url,
-    port: session.port,
-    userDataDir: session.userDataDir,
-  };
+  return sessionRecovery.open(platformId, url);
 }
 
 async function browserSessionFailureForPublish(platform) {
@@ -2836,9 +2941,10 @@ async function browserSessionFailureForPublish(platform) {
   return null;
 }
 
-async function publishOnePlatform(markdownFile, platform, title, publishMode = 'direct') {
+async function publishOnePlatform(markdownFile, platform, title, publishMode = 'draft') {
+  dashboardPublishMode(publishMode);
+  if (platform === 'uisdc') return { output: '', info: { status: 'failed', error: '优设仅支持手工投稿，请使用官方文章投稿入口' } };
   const args = ['sync', markdownFile, '-p', platform, '-t', title];
-  if (publishMode === 'direct') args.push('--direct');
   const result = await runWeibotCli(args, 180000);
   const parsed = parseSyncResults(result.output);
   const parsedKeys = Object.keys(parsed);
@@ -2853,6 +2959,15 @@ async function publishOnePlatform(markdownFile, platform, title, publishMode = '
 }
 
 function normalizeStoredPublishResult(platform, info) {
+  const mode = preparationMode(platform);
+  if (mode === 'editor' && ['success', 'platform_draft'].includes(info.status)) {
+    return { ...info, status: 'uncertain',
+      message: '内容已填入编辑器，尚未确认保存为平台草稿，请保留当前页面并人工核对；公开发表及是否群发通知由你在平台确认。' };
+  }
+  if (mode === 'export' && ['success', 'platform_draft', 'exported'].includes(info.status)) {
+    return { ...info, status: 'exported',
+      message: `已完成本地导出；导出文件未写入平台草稿或公开发表。${info.message ? ` ${info.message}` : ''}` };
+  }
   if (platform === 'weixin' && info.status === 'success') {
     return {
       ...info,
@@ -2867,6 +2982,7 @@ function persistPublishResult(jobId, platform, status, info = {}) {
   const fallbackMessage = {
     success: '发布成功',
     platform_draft: '平台草稿已保存',
+    exported: '本地导出已完成',
     failed: '发布失败',
     uncertain: '发布结果不确定，请到平台后台人工核对',
   };
@@ -2885,9 +3001,9 @@ function persistPublishResult(jobId, platform, status, info = {}) {
   );
 }
 
-function storedPublisherResultStatus(publishMode, info) {
-  if (info?.status === 'platform_draft') return 'platform_draft';
-  if (info?.status === 'success') return publishMode === 'draft' ? 'platform_draft' : 'success';
+function storedPublisherResultStatus(info) {
+  if (info?.status === 'platform_draft' || info?.status === 'success') return 'platform_draft';
+  if (info?.status === 'exported') return 'exported';
   if (info?.status === 'failed') return 'failed';
   return 'uncertain';
 }
@@ -3085,6 +3201,7 @@ function replayedPublishResult(record) {
 }
 
 async function publishContent(contentId, platforms = [], options = {}) {
+  const publishMode = dashboardPublishMode(options.publishMode);
   const loadedContent = options.contentSnapshot
     || normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
   if (!loadedContent) throw new Error('内容不存在');
@@ -3092,7 +3209,7 @@ async function publishContent(contentId, platforms = [], options = {}) {
     options.expectedUpdatedAt || loadedContent.updated_at
   );
   if (loadedContent.updated_at !== expectedUpdatedAt) {
-    throw statusError('文章已在其他标签页更新，请重新加载最新版本', 409);
+    throw statusError('文章已在其他标签页更新，请重新加载最新版本', 409, 'CONTENT_REVISION_CONFLICT');
   }
   const content = immutableSnapshot({
     ...loadedContent,
@@ -3100,7 +3217,7 @@ async function publishContent(contentId, platforms = [], options = {}) {
   });
   const selected = normalizePublishPlatforms(content, platforms);
   if (!selected.length) throw new Error('请选择至少一个平台');
-  const publishMode = options.publishMode === 'draft' ? 'draft' : 'direct';
+  await preparePlatformAssets(content, selected, options);
 
   const jobId = makeId('job');
   const staged = stagePublishSources(content, selected, jobId, contentId, options);
@@ -3113,6 +3230,7 @@ async function publishContent(contentId, platforms = [], options = {}) {
     cleanupStagedPublishFiles(staged.filePaths);
     throw error;
   }
+  if (typeof options.onJobCreated === 'function') options.onJobCreated(jobId);
   const platformSources = staged.platformSources;
 
   const finalResults = {};
@@ -3121,7 +3239,7 @@ async function publishContent(contentId, platforms = [], options = {}) {
   const preflight = options.preflight || browserSessionFailureForPublish;
   const platformPublisher = options.platformPublisher || publishOnePlatform;
   for (const platform of selected) {
-    const preflightFailure = await preflight(platform);
+    const preflightFailure = preparationMode(platform) === 'export' ? null : await preflight(platform);
     if (preflightFailure) {
       finalResults[platform] = { status: 'failed', error: preflightFailure };
       rawOutputs.push(`[${platform}] ${preflightFailure}`);
@@ -3188,7 +3306,7 @@ async function publishContent(contentId, platforms = [], options = {}) {
       throw publisherError;
     }
     const info = normalizeStoredPublishResult(platform, single?.info || {});
-    const status = storedPublisherResultStatus(publishMode, info);
+    const status = storedPublisherResultStatus(info);
     finalResults[platform] = { ...info, status };
     rawOutputs.push(single?.output || '');
     persistPublishResult(jobId, platform, status, info);
@@ -3202,13 +3320,15 @@ async function publishContent(contentId, platforms = [], options = {}) {
 
   const storedResults = rows('SELECT status FROM publish_results WHERE job_id = ?', jobId);
   const successCount = storedResults.filter(result => result.status === 'success' || result.status === 'platform_draft').length;
+  const exportCount = storedResults.filter(result => result.status === 'exported').length;
+  const completedCount = successCount + exportCount;
   const uncertainCount = storedResults.filter(result => result.status === 'uncertain').length;
 
   const jobStatus = uncertainCount > 0
     ? 'uncertain'
-    : successCount === selected.length
-      ? (publishMode === 'draft' ? 'draft_saved' : 'published')
-      : (successCount > 0 ? 'partial_failed' : 'failed');
+    : completedCount === selected.length
+      ? (exportCount === selected.length ? 'exported' : 'draft_saved')
+      : (completedCount > 0 ? 'partial_failed' : 'failed');
   db.prepare('UPDATE publish_jobs SET status = ?, updated_at = ? WHERE id = ?').run(jobStatus, now(), jobId);
   const contentAssignments = [];
   const contentValues = [];
@@ -3218,9 +3338,9 @@ async function publishContent(contentId, platforms = [], options = {}) {
   }
   let aggregateStatus = '';
   if (options.updateAggregateStatus !== false) {
-    aggregateStatus = jobStatus === 'published'
-      ? '已发布'
-      : jobStatus === 'draft_saved' ? '草稿已保存' : '发布失败';
+    aggregateStatus = jobStatus === 'exported'
+      ? '已导出'
+      : jobStatus === 'draft_saved' ? '草稿已保存' : jobStatus === 'uncertain' ? '结果待核对' : '发布失败';
     contentAssignments.push('status = ?');
     contentValues.push(aggregateStatus);
   }
@@ -3251,8 +3371,7 @@ async function publishContent(contentId, platforms = [], options = {}) {
     else canonicalConflict = true;
   }
 
-  const activityVerb = publishMode === 'draft' ? '保存平台草稿' : '一键发布';
-  addActivity(`${activityVerb}《${content.title}》到 ${selected.length} 个平台，成功 ${successCount} 个`, 'publish_job', jobId, '运营');
+  addActivity(`准备《${content.title}》到 ${selected.length} 项，平台草稿 ${successCount} 个，本地导出 ${exportCount} 个，待人工核对 ${uncertainCount} 个`, 'publish_job', jobId, '运营');
   const result = {
     job: normalizeJob(one('SELECT * FROM publish_jobs WHERE id = ?', jobId)),
     rawOutput: rawOutputs.join('\n\n'),
@@ -3532,6 +3651,11 @@ function sendLayoutPreview(res, contentId) {
 }
 
 function createDashboardServer(options = {}) {
+  const topicService = options.topicService || require('./topic-research').createTopicResearchService({
+    root: options.topicRoot || path.join(path.dirname(DB_PATH), 'topic-research'),
+    ...(options.topicCollector ? { collector: options.topicCollector } : {}),
+    ...(options.topicAnalyzer ? { analyzer: options.topicAnalyzer } : {}),
+  });
   const previewOptions = {
     ...(options.previewRunner ? { runner: options.previewRunner } : {}),
     ...(options.previewTimeout ? { timeout: options.previewTimeout } : {}),
@@ -3556,6 +3680,20 @@ function createDashboardServer(options = {}) {
   });
   const workbenchCsrfToken = randomBytes(32).toString('base64url');
   const uploadsDir = path.resolve(options.uploadsDir || UPLOADS_DIR);
+  const sessionRecovery = createSessionRecovery({
+    readSession: readPlatformSessionFile,
+    writeSession: writePlatformSession,
+    requiresSession: platform => INTERACTIVE_AUTH_PLATFORMS.has(platform),
+    ...(options.recoveryDependencies || {}),
+  });
+  const recoveryJob = job => projectRecoveryJob(job, job ? operationJournal.findForJob(job.id) : null);
+  const validateRecoveryPlatform = platform => {
+    if (typeof platform !== 'string' || !/^[a-z0-9-]+$/.test(platform)
+      || !one('SELECT id FROM platforms WHERE id = ?', platform) || RETIRED_PLATFORM_IDS.includes(platform)) {
+      throw statusError('请选择一个有效平台', 400, 'RECOVERY_TARGET_INVALID');
+    }
+    return platform;
+  };
 
   const executePublishOperation = async ({
     operationId,
@@ -3566,11 +3704,9 @@ function createDashboardServer(options = {}) {
     persistSelection = true,
     updateAggregateStatus = true,
   }) => {
+    publishMode = dashboardPublishMode(publishMode);
     validatePublishOperationId(operationId);
     const expectedRevision = validateExpectedUpdatedAt(expectedUpdatedAt);
-    if (publishMode !== 'draft' && publishMode !== 'direct') {
-      throw statusError('publishMode 必须是 draft 或 direct', 400);
-    }
     const requestedPlatforms = normalizePublishPlatforms(null, platforms);
     const existingOperation = operationJournal.get(operationId);
     const matchingSourceOperation = existingOperation || operationJournal.findBySourceRevision({
@@ -3579,7 +3715,7 @@ function createDashboardServer(options = {}) {
       publishMode,
       expectedUpdatedAt: expectedRevision,
     });
-    if (existingOperation || (matchingSourceOperation && matchingSourceOperation.state !== 'failed')) {
+    if (existingOperation || matchingSourceOperation?.state === 'completed') {
       const priorSignature = normalizeOperationSignature(matchingSourceOperation.signature);
       const replaySignature = {
         ...priorSignature,
@@ -3598,7 +3734,7 @@ function createDashboardServer(options = {}) {
       const current = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
       if (!current) throw statusError('内容不存在', 404);
       if (current.updated_at !== expectedRevision) {
-        throw statusError('文章已在其他标签页更新，请重新加载最新版本', 409);
+        throw statusError('文章已在其他标签页更新，请重新加载最新版本', 409, 'CONTENT_REVISION_CONFLICT');
       }
       return immutableSnapshot(current);
     });
@@ -3610,6 +3746,10 @@ function createDashboardServer(options = {}) {
       }
     }
 
+    if(selected.some(id=>!isActivePlatform(id))) throw statusError('所选平台已退出常用文章平台列表；历史记录保留，请选择当前通用平台',400,'PLATFORM_NOT_ACTIVE');
+    if (selected.includes('uisdc')) throw statusError('优设仅支持手工投稿，请使用 https://www.uisdc.com/contribution?type=post；不会自动保存草稿或发布', 400);
+    if(selected.some(id=>preparationMode(id)==='manual')) throw statusError('所选平台当前仅提供手工写作入口，不自动保存或发布',400,'MANUAL_PLATFORM_ONLY');
+    await preparePlatformAssets(content, selected, { uploadsDir, ...options });
     const signature = buildPublishOperationSignature(content, selected, publishMode, expectedRevision);
     const admission = operationJournal.begin(operationId, signature);
     if (admission.kind === 'replay') {
@@ -3625,6 +3765,7 @@ function createDashboardServer(options = {}) {
         contentSnapshot: content,
         persistSelection,
         updateAggregateStatus,
+        onJobCreated: jobId => operationJournal.attachJob(operationId, jobId),
         onPublisherStart: () => { publisherStarted = true; },
       });
       const execution = result[PUBLISH_EXECUTION_META] || {};
@@ -3687,12 +3828,13 @@ function createDashboardServer(options = {}) {
     }
 
     if (url.pathname === '/api/bootstrap' && req.method === 'GET') {
-      sendJson(res, { ok: true, data: { ...getDashboardData(), csrfToken: workbenchCsrfToken } });
+      const data = getDashboardData();
+      sendJson(res, { ok: true, data: { ...data, jobs: data.jobs.map(recoveryJob), csrfToken: workbenchCsrfToken } });
       return;
     }
 
     if (url.pathname === '/api/layout-templates' && req.method === 'GET') {
-      sendJson(res, { ok: true, templates: listLayoutTemplates() });
+      sendJson(res, { ok: true, catalogVersion: 1, templates: listLayoutTemplates() });
       return;
     }
 
@@ -3701,7 +3843,7 @@ function createDashboardServer(options = {}) {
       if (refresh) {
         sendJson(res, { ok: true, ...(await refreshPlatformsFromCli()) });
       } else {
-        sendJson(res, { ok: true, platforms: platformRows() });
+        sendJson(res, { ok: true, platforms: catalogPlatforms(platformRows()) });
       }
       return;
     }
@@ -3711,6 +3853,10 @@ function createDashboardServer(options = {}) {
       const platform = String(body.platform || '').trim().toLowerCase();
       const interactive = body.interactive === true;
       if (!platform) throw new Error('缺少平台 ID');
+      if (!isActivePlatform(platform)) {
+        const existing=one('SELECT * FROM platforms WHERE id=?',platform);
+        sendJson(res,{ok:true,skippedInactive:true,platform:{id:platform,auth_status:existing?.auth_status || 'unknown',message:'历史兼容平台已退出常用列表，不自动检查登录'}});return;
+      }
       if (INTERACTIVE_AUTH_PLATFORMS.has(platform) && !interactive) {
         const existing = db.prepare('SELECT * FROM platforms WHERE id = ?').get(platform);
         const name = LOGIN_PLATFORMS[platform]?.name || platform;
@@ -3819,9 +3965,47 @@ function createDashboardServer(options = {}) {
     }
 
     if (url.pathname === '/api/platform-open' && req.method === 'POST') {
-      const body = await readBody(req);
-      const opened = await openInPlatformSession(body.platform, body.url);
+      const body = await readBody(req, { invalidJsonStatusCode: 400 });
+      validateRecoveryPlatform(body?.platform);
+      const opened = await openInPlatformSession(body.platform, body.url, sessionRecovery);
       sendJson(res, { ok: true, opened });
+      return;
+    }
+
+    const contentRecoveryMatch = url.pathname.match(/^\/api\/content\/([^/]+)\/recovery$/);
+    if (contentRecoveryMatch && req.method === 'GET') {
+      const platform = validateRecoveryPlatform(url.searchParams.get('platform'));
+      const contentId = decodeURIComponent(contentRecoveryMatch[1]);
+      if (!one('SELECT id FROM contents WHERE id = ?', contentId)) throw statusError('内容不存在', 404);
+      const session = await sessionRecovery.inspect(platform);
+      // Read after the bounded probe so job/content versions reflect concurrent saves.
+      const content = normalizeContent(one('SELECT * FROM contents WHERE id = ?', contentId));
+      if (!content) throw statusError('内容不存在', 404);
+      const latest = rows('SELECT * FROM publish_jobs WHERE content_id = ? ORDER BY created_at DESC, rowid DESC', contentId)
+        .find(job => jsonValue(job.platforms, []).includes(platform));
+      const job = normalizeJob(latest);
+      const record = job ? operationJournal.findForJob(job.id) : null;
+      sendJson(res, { ok: true, recovery: { content, platform, session,
+        latestJob: projectRecoveryJob(job, record), canConfirmNotSubmitted: canResolveJobPlatform(job, record, platform) } });
+      return;
+    }
+
+    const jobRecoveryMatch = url.pathname.match(/^\/api\/publish-jobs\/([^/]+)\/recovery$/);
+    if (jobRecoveryMatch && req.method === 'POST') {
+      const body = await readBody(req, { maxBytes: 8192, invalidJsonStatusCode: 400 });
+      const platform = validateRecoveryPlatform(body?.platform);
+      if (body.decision !== 'confirmed_not_submitted' || body.confirmation !== true) {
+        throw statusError('需明确确认已检查平台，且未保存草稿、未发布', 400, 'RECOVERY_CONFIRMATION_REQUIRED');
+      }
+      if (typeof body.expectedJobUpdatedAt !== 'string' || !body.expectedJobUpdatedAt.trim()) {
+        throw statusError('expectedJobUpdatedAt 必须是非空字符串', 400, 'RECOVERY_VERSION_REQUIRED');
+      }
+      const job = normalizeJob(one('SELECT * FROM publish_jobs WHERE id = ?', decodeURIComponent(jobRecoveryMatch[1])));
+      if (!job) throw statusError('发布任务不存在', 404);
+      if (!one('SELECT id FROM contents WHERE id = ?', job.content_id)) throw statusError('内容不存在', 404);
+      const result = operationJournal.confirmNotSubmitted(job, platform, body.expectedJobUpdatedAt);
+      sendJson(res, { ok: true, job: projectRecoveryJob(job, result.record), platform,
+        resolution: result.resolution, cached: result.cached });
       return;
     }
 
@@ -3840,9 +4024,7 @@ function createDashboardServer(options = {}) {
     }
 
     if (url.pathname === '/api/topics/generate' && req.method === 'POST') {
-      const body = await readBody(req);
-      sendJson(res, { ok: true, candidates: generateCandidates(body.date || toDateKey()) });
-      return;
+      throw statusError('旧示例选题接口已停用，请使用常用平台选题雷达', 410);
     }
 
     if (url.pathname === '/api/topics/confirm' && req.method === 'POST') {
@@ -3852,9 +4034,7 @@ function createDashboardServer(options = {}) {
     }
 
     if (url.pathname === '/api/content/generate' && req.method === 'POST') {
-      const body = await readBody(req);
-      sendJson(res, { ok: true, content: generateContent(body.date, body.topic) });
-      return;
+      throw statusError('工作台不提供示例正文生成，请导入已准备好的文章', 410);
     }
 
     if (url.pathname === '/api/content/import' && req.method === 'POST') {
@@ -3863,6 +4043,69 @@ function createDashboardServer(options = {}) {
         invalidJsonStatusCode: 400,
       });
       sendJson(res, { ok: true, content: importContent(body) });
+      return;
+    }
+
+    if (url.pathname === '/api/content/import-bundle' && req.method === 'POST') {
+      const body = await readBody(req, { maxBytes: 40 * 1024 * 1024, invalidJsonStatusCode: 400 });
+      sendJson(res, { ok: true, ...await importContentBundle(body, { uploadsDir }) });
+      return;
+    }
+
+    if (url.pathname === '/api/content/import-feishu' && req.method === 'POST') {
+      const body = await readBody(req, { maxBytes: 8192, invalidJsonStatusCode: 400 });
+      if (!body || typeof body.url !== 'string') throw statusError('请提供飞书文档链接', 400);
+      const exportRoot = options.feishuExportRoot || path.join(path.dirname(DB_PATH), 'feishu-imports');
+      const exporter = options.feishuExporter || require('./feishu-import').exportFeishuDocument;
+      const bundle = await exporter({ url: body.url, profile: body.profile || process.env.PUBLISHER_FEISHU_PROFILE || 'misshe-personal', outputRoot: exportRoot });
+      const assets = importedAssetsFromBundle(bundle, exportRoot);
+      const imported = await importContentBundle({ title: bundle.title, body: bundle.markdown, filename: 'feishu.md',
+        format: 'markdown', summary: '', type: '飞书导入', assets }, { uploadsDir });
+      sendJson(res, { ok: true, ...imported, warnings: [...imported.warnings, ...(bundle.warnings || [])],
+        exportedMarkdown: path.basename(bundle.markdownPath || 'article.md'), sourceUrl: body.url });
+      return;
+    }
+
+    if (url.pathname === '/api/topics/research' && req.method === 'GET') {
+      sendJson(res, { ok: true, run: topicService.latest() }); return;
+    }
+    if (url.pathname === '/api/topics/research' && req.method === 'POST') {
+      const body = await readBody(req, { maxBytes: 32 * 1024, invalidJsonStatusCode: 400 });
+      const run = topicService.start(body);
+      sendJson(res, { ok: true, run: { id: run.id, status: run.status } }, 202); return;
+    }
+    const topicRunMatch = url.pathname.match(/^\/api\/topics\/runs\/(topic_[a-f0-9-]{36})$/);
+    if (topicRunMatch && req.method === 'GET') {
+      sendJson(res, { ok: true, run: topicService.get(topicRunMatch[1]) }); return;
+    }
+    if (url.pathname === '/api/topics/adopt' && req.method === 'POST') {
+      const body = await readBody(req, { maxBytes: 8192, invalidJsonStatusCode: 400 });
+      if (!body || typeof body.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(body.date)
+        || !Number.isFinite(Date.parse(body.date)) || new Date(body.date).toISOString().slice(0,10) !== body.date) throw statusError('请选择有效计划日期', 400);
+      const run = topicService.get(body.runId);
+      const card = run.status === 'ready' && run.analysis?.cards.find(c => c.id === body.cardId);
+      if (!card) throw statusError('该选题尚未完成分析或不存在', 400);
+      const existingPlan = one('SELECT * FROM weekly_plans WHERE date = ?', body.date);
+      if (existingPlan && (existingPlan.topic?.trim() || existingPlan.materials?.trim() || existingPlan.content_id)) {
+        throw statusError('该日期已有选题或关联文章，请选择空闲日期；未覆盖原计划', 409);
+      }
+      const sources = run.signals.filter(s => card.evidence_ids.includes(s.id));
+      const plan = updatePlan(body.date, { topic: card.topic, type: '热点选题', audience: card.reader_problem,
+        materials: sources.map(s => s.url).join('\n'), status: '选题已确认' });
+      sendJson(res, { ok: true, plan }); return;
+    }
+
+    const draftPreviewMatch = url.pathname.match(/^\/api\/content\/([^/]+)\/draft-preview$/);
+    if (draftPreviewMatch && req.method === 'POST') {
+      const original = normalizeContent(one('SELECT * FROM contents WHERE id = ?', draftPreviewMatch[1]));
+      if (!original) throw statusError('内容不存在', 404);
+      const body = await readBody(req, { maxBytes: MAX_IMPORT_REQUEST_BYTES, invalidJsonStatusCode: 400 });
+      if (!body || typeof body.title !== 'string' || typeof body.summary !== 'string' || typeof body.body !== 'string') throw statusError('预览需要标题、摘要和正文', 400);
+      validateContentFieldLimits(body);
+      const draft = { ...original, title: body.title.trim() || original.title, summary: body.summary.trim(), body: sanitizeImportedHtml(body.body), layout_html: '' };
+      if (body.platform === 'weixin' && body.template) draft.layout_html = renderLayoutTemplate(body.template, draft);
+      const preview = await previewContentForPlatform(original.id, body.platform, { ...previewOptions, contentOverride: draft, uploadsDir });
+      sendJson(res, { ok: true, preview: { ...preview, sourceState: 'unsaved' } });
       return;
     }
 
@@ -3918,6 +4161,7 @@ function createDashboardServer(options = {}) {
       if (!body || typeof body !== 'object' || Array.isArray(body)) {
         throw statusError('请求体必须是 JSON 对象', 400);
       }
+      const publishMode = dashboardPublishMode(body.publishMode);
 
       if (typeof body.platform !== 'string'
         || !body.platform.trim()
@@ -3930,15 +4174,12 @@ function createDashboardServer(options = {}) {
         throw statusError(`平台不存在: ${platform}`, 400);
       }
 
-      if (body.publishMode !== 'draft' && body.publishMode !== 'direct') {
-        throw statusError('publishMode 必须是 draft 或 direct', 400);
-      }
       const contentId = singlePlatformPublishMatch[1];
       const result = await executePublishOperation({
         operationId: body.operationId,
         contentId,
         platforms: [platform],
-        publishMode: body.publishMode,
+        publishMode,
         expectedUpdatedAt: body.expectedUpdatedAt,
         persistSelection: false,
         updateAggregateStatus: false,
@@ -3952,6 +4193,7 @@ function createDashboardServer(options = {}) {
       if (!body || typeof body !== 'object' || Array.isArray(body)) {
         throw statusError('请求体必须是 JSON 对象', 400);
       }
+      const publishMode = dashboardPublishMode(body.publishMode);
       if (typeof body.contentId !== 'string' || !body.contentId) {
         throw statusError('contentId 不能为空', 400);
       }
@@ -3959,7 +4201,7 @@ function createDashboardServer(options = {}) {
         operationId: body.operationId,
         contentId: body.contentId,
         platforms: body.platforms || [],
-        publishMode: body.publishMode || 'direct',
+        publishMode,
         expectedUpdatedAt: body.expectedUpdatedAt,
       });
       sendJson(res, { ok: true, ...result });
@@ -3967,9 +4209,7 @@ function createDashboardServer(options = {}) {
     }
 
     if (url.pathname === '/api/ai-command' && req.method === 'POST') {
-      const body = await readBody(req);
-      sendJson(res, { ok: true, command: runFakeAiCommand(body) });
-      return;
+      throw statusError('旧模拟AI流程已停用，请使用真实选题分析或内容导入', 410);
     }
 
     if (url.pathname === '/api/content' && req.method === 'GET') {
@@ -3978,7 +4218,7 @@ function createDashboardServer(options = {}) {
     }
 
     if (url.pathname === '/api/history' && req.method === 'GET') {
-      sendJson(res, { ok: true, jobs: rows('SELECT * FROM publish_jobs ORDER BY created_at DESC LIMIT 100').map(normalizeJob) });
+      sendJson(res, { ok: true, jobs: rows('SELECT * FROM publish_jobs ORDER BY created_at DESC LIMIT 100').map(normalizeJob).map(recoveryJob) });
       return;
     }
 
@@ -4035,6 +4275,7 @@ module.exports = {
   updatePlan,
   generateContent,
   importContent,
+  importContentBundle,
   updateContent,
   layoutContent,
   saveLocalDraft,

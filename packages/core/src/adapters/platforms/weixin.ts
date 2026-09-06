@@ -6,8 +6,38 @@ import type { Article, AuthResult, SyncResult, PlatformMeta } from '../../types'
 import type { PublishOptions } from '../types'
 import { createLogger } from '../../lib/logger'
 import juice from 'juice'
+import { parseHTML } from 'linkedom'
 
 const logger = createLogger('Weixin')
+
+class WeixinError extends Error {}
+
+function imageReference(src: string): string {
+  let hash = 2166136261
+  for (let index = 0; index < src.length; index++) hash = Math.imul(hash ^ src.charCodeAt(index), 16777619)
+  return `image-${(hash >>> 0).toString(16).padStart(8, '0')}`
+}
+
+function imageUrl(src: string): URL | null {
+  try {
+    const url = new URL(src)
+    if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password
+      || /^(?:0|10|127)\.|^169\.254\.|^192\.168\.|^172\.(?:1[6-9]|2\d|3[01])\./.test(url.hostname)
+      || url.hostname.startsWith('[') || /(^|\.)(localhost|local|internal)$/.test(url.hostname)) return null
+    return url
+  } catch { return null }
+}
+
+function isWeixinImage(src: string): boolean {
+  const url = imageUrl(src)
+  return !!url && ['mmbiz.qpic.cn', 'mmbiz.qlogo.cn'].includes(url.hostname)
+}
+
+function validateImageSource(src: string): void {
+  if (src.length <= 20 * 1024 * 1024 && (imageUrl(src)
+    || /^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/]+={0,2}$/i.test(src))) return
+  throw new WeixinError(`图片来源无效或尚未内嵌（${imageReference(src)}）；本地图片请先内嵌。`)
+}
 
 interface WeixinMeta {
   token: string
@@ -127,40 +157,37 @@ export class WeixinAdapter extends CodeAdapter {
         avatar: this.weixinMeta.avatar,
       }
     } catch (error) {
-      logger.debug('checkAuth: not logged in -', error)
-      return { isAuthenticated: false, error: (error as Error).message }
+      logger.debug('checkAuth failed')
+      return { isAuthenticated: false, error: '微信公众号登录检查失败，请检查登录状态。' }
     }
   }
 
   async publish(article: Article, options?: PublishOptions): Promise<SyncResult> {
+    if (options?.publishMode === 'direct' || options?.draftOnly === false) {
+      return this.createResult(false, { error: '微信公众号仅支持保存草稿，不支持自动公开发布；请在公众号后台确认后发布。' })
+    }
+    let createAttempted = false
     return this.withHeaderRules(this.HEADER_RULES, async () => {
       logger.info('Starting publish...')
 
       if (!this.weixinMeta) {
         const auth = await this.checkAuth()
         if (!auth.isAuthenticated) {
-          throw new Error('请先登录微信公众号')
+          throw new WeixinError('请先登录微信公众号')
         }
       }
 
-      // 微信到微信：使用原始 HTML，跳过所有处理
+      // Preserve WeChat formatting, but image integrity applies to every source.
       let content = (article.source?.platform === 'weixin' && (article as any).rawHtml)
         ? (article as any).rawHtml
         : (article.html || '')
 
       if (article.source?.platform === 'weixin') {
-        logger.info('Source is WeChat, using raw HTML, skipping content processing')
+        content = await this.processImagesStrict(content, options?.onImageProgress)
       } else {
         content = this.processLatex(content)
         content = this.stripExternalLinks(content)
-        content = await this.processImages(
-          content,
-          (src) => this.uploadImageByUrl(src),
-          {
-            skipPatterns: ['mmbiz.qpic.cn', 'mmbiz.qlogo.cn'],
-            onProgress: options?.onImageProgress,
-          }
-        )
+        content = await this.processImagesStrict(content, options?.onImageProgress)
         content = this.processContent(content)
       }
 
@@ -231,6 +258,7 @@ export class WeixinAdapter extends CodeAdapter {
         categories_list0: '[]',
       })
 
+      createAttempted = true
       const response = await this.runtime.fetch(
         `https://mp.weixin.qq.com/cgi-bin/operate_appmsg?t=ajax-response&sub=create&type=77&token=${this.weixinMeta!.token}&lang=zh_CN`,
         {
@@ -243,17 +271,19 @@ export class WeixinAdapter extends CodeAdapter {
         }
       )
 
+      if (!response.ok) throw new WeixinError(`微信公众号草稿请求失败（HTTP ${response.status}）。`)
       const res = await response.json() as {
         appMsgId?: string
         ret?: number
         base_resp?: { ret: number; err_msg?: string }
       }
 
-      logger.debug(' Save response:', res)
+      logger.debug('Received draft response')
 
-      if (!res.appMsgId) {
+      if (!res.appMsgId || !/^[1-9]\d*$/.test(String(res.appMsgId))
+        || (res.ret !== undefined && res.ret !== 0) || (res.base_resp?.ret !== undefined && res.base_resp.ret !== 0)) {
         const errMsg = this.formatError(res)
-        throw new Error(errMsg)
+        throw new WeixinError(errMsg)
       }
 
       const draftUrl = `https://mp.weixin.qq.com/cgi-bin/appmsg?t=media/appmsg_edit&action=edit&type=77&appmsgid=${res.appMsgId}&token=${this.weixinMeta!.token}&lang=zh_CN`
@@ -261,61 +291,103 @@ export class WeixinAdapter extends CodeAdapter {
       return this.createResult(true, {
         postId: res.appMsgId,
         postUrl: draftUrl,
-        draftOnly: options?.draftOnly ?? true,
+        draftOnly: true,
       })
     }).catch((error) => this.createResult(false, {
-      error: (error as Error).message,
+      error: error instanceof WeixinError ? error.message : '微信公众号草稿处理失败，请检查平台后台。',
+      ...(createAttempted ? {
+        uncertain: true,
+        postUrl: this.meta.homepage,
+        message: '草稿请求已发出但未获得可靠回执，请先检查公众号草稿箱，确认结果前不要重复提交。',
+      } : {}),
     }))
   }
 
-  protected async uploadImageByUrl(src: string): Promise<ImageUploadResult> {
-    if (!this.weixinMeta) {
-      throw new Error('未登录')
-    }
-
-    const imageResponse = await fetch(src)
-    if (!imageResponse.ok) {
-      throw new Error('图片下载失败: ' + src)
-    }
-    const imageBlob = await imageResponse.blob()
-
-    const formData = new FormData()
-    const timestamp = Date.now()
-    const fileName = `${timestamp}.jpg`
-
-    formData.append('type', imageBlob.type || 'image/jpeg')
-    formData.append('id', String(timestamp))
-    formData.append('name', fileName)
-    formData.append('lastModifiedDate', new Date().toString())
-    formData.append('size', String(imageBlob.size))
-    formData.append('file', imageBlob, fileName)
-
-    const { token, userName, ticket, svrTime } = this.weixinMeta
-    const seq = Date.now()
-
-    const response = await this.runtime.fetch(
-      `https://mp.weixin.qq.com/cgi-bin/filetransfer?action=upload_material&f=json&scene=8&writetype=doublewrite&groupid=1&ticket_id=${userName}&ticket=${ticket}&svr_time=${svrTime}&token=${token}&lang=zh_CN&seq=${seq}&t=${Math.random()}`,
-      {
-        method: 'POST',
-        credentials: 'include',
-        body: formData,
+  private async processImagesStrict(content: string, onProgress?: (current: number, total: number) => void): Promise<string> {
+    const { document } = parseHTML(content)
+    const images = Array.from(document.querySelectorAll('img'))
+    if (!images.length) return content
+    const sources = images.map(image => (image.getAttribute('data-src') || image.getAttribute('src') || '').trim())
+    for (let index = 0; index < sources.length; index++) {
+      try { validateImageSource(sources[index]) } catch (error) {
+        throw new WeixinError(`第 ${index + 1} 张图片：${(error as WeixinError).message}`)
       }
-    )
-
-    const res = await response.json() as {
-      cdn_url?: string
-      content?: string
-      base_resp?: { err_msg: string; ret: number }
     }
-
-    logger.debug(' Image upload response:', res)
-
-    if (res.base_resp?.err_msg !== 'ok' || !res.cdn_url) {
-      throw new Error('图片上传失败: ' + src)
+    const uploaded = new Map<string, string>()
+    for (let index = 0; index < images.length; index++) {
+      const src = sources[index]
+      let url = src
+      if (!isWeixinImage(src)) {
+        url = uploaded.get(src) || ''
+        if (!url) {
+          try { url = (await this.uploadImageByUrl(src)).url } catch (error) {
+            const detail = error instanceof WeixinError ? error.message : '图片处理失败'
+            throw new WeixinError(`第 ${index + 1} 张图片：${detail}；本次草稿已中止。`)
+          }
+          uploaded.set(src, url)
+        }
+      }
+      images[index].setAttribute('src', url)
+      for (const attr of Array.from(images[index].attributes)) {
+        if (attr.name.startsWith('data-') || ['srcset', 'sizes'].includes(attr.name)) images[index].removeAttribute(attr.name)
+      }
+      onProgress?.(index + 1, images.length)
     }
+    for (const source of Array.from(document.querySelectorAll('picture source'))) source.remove()
+    return document.toString()
+  }
 
-    return {
-      url: res.cdn_url,
+  protected async uploadImageByUrl(src: string): Promise<ImageUploadResult> {
+    validateImageSource(src)
+    let stage = '下载'
+    try {
+      if (!this.weixinMeta) throw new WeixinError('请先登录微信公众号')
+      const imageResponse = await this.runtime.fetch(src, { credentials: 'omit', redirect: 'error' })
+      if (!imageResponse.ok) throw new WeixinError(`图片下载失败（HTTP ${imageResponse.status}）`)
+      const imageBlob = await imageResponse.blob()
+      if (!imageBlob.size || imageBlob.size > 15 * 1024 * 1024 || !/^image\/(?:png|jpeg|gif|webp)(?:;|$)/i.test(imageBlob.type)) {
+        throw new WeixinError('图片格式或大小校验失败')
+      }
+      stage = '上传'
+
+      const formData = new FormData()
+      const timestamp = Date.now()
+      const fileName = `${timestamp}.jpg`
+
+      formData.append('type', imageBlob.type || 'image/jpeg')
+      formData.append('id', String(timestamp))
+      formData.append('name', fileName)
+      formData.append('lastModifiedDate', new Date().toString())
+      formData.append('size', String(imageBlob.size))
+      formData.append('file', imageBlob, fileName)
+
+      const { token, userName, ticket, svrTime } = this.weixinMeta
+      const seq = Date.now()
+
+      const response = await this.runtime.fetch(
+        `https://mp.weixin.qq.com/cgi-bin/filetransfer?action=upload_material&f=json&scene=8&writetype=doublewrite&groupid=1&ticket_id=${userName}&ticket=${ticket}&svr_time=${svrTime}&token=${token}&lang=zh_CN&seq=${seq}&t=${Math.random()}`,
+        {
+          method: 'POST',
+          credentials: 'include',
+          body: formData,
+        }
+      )
+
+      if (!response.ok) throw new WeixinError(`图片上传失败（HTTP ${response.status}）`)
+      const res = await response.json() as {
+        cdn_url?: string
+        content?: string
+        base_resp?: { err_msg: string; ret: number }
+      }
+
+      if (res?.base_resp?.err_msg !== 'ok' || res.base_resp.ret !== 0 || !res.cdn_url || !isWeixinImage(res.cdn_url)) {
+        throw new WeixinError('图片上传响应校验失败')
+      }
+
+      return { url: res.cdn_url }
+    } catch (error) {
+      const detail = error instanceof WeixinError ? error.message : `图片${stage}失败`
+      throw new WeixinError(`${detail}（${imageReference(src)}）`)
     }
   }
 
@@ -404,6 +476,6 @@ export class WeixinAdapter extends CodeAdapter {
       [220002]: '图片库已达到存储上限',
     }
 
-    return errorMap[ret as number] || `同步失败 (错误码: ${ret})`
+    return errorMap[ret as number] || (typeof ret === 'number' ? `同步失败 (错误码: ${ret})` : '同步失败：未获得有效草稿回执')
   }
 }

@@ -3,21 +3,23 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>内容运营工作台</title>
-  <link rel="stylesheet" href="/styles.css?v=20260830-dynamic-content-center">
+  <title>创作者工作台</title>
+  <link rel="icon" type="image/png" href="/assets/creator-writing-mascot.png?v=20260905-refined">
+  <link rel="apple-touch-icon" href="/assets/creator-writing-mascot.png?v=20260905-refined">
+  <link rel="stylesheet" href="/styles.css?v=20260905-brand">
+  <link rel="stylesheet" href="/workbench-theme.css?v=20260907-human-publication">
 </head>
 <body>
   <div class="app-shell">
-    <header class="topbar">
+    <header class="topbar" id="workspace-navigation">
       <div class="brand">
-        <span class="brand-mark" aria-hidden="true"><span class="brand-glyph">内</span></span>
+        <img class="brand-mascot" src="/assets/creator-writing-mascot.png?v=20260905-refined" width="44" height="44" alt="拿笔写作的小表情" decoding="async">
         <div class="brand-copy">
-          <strong>内容运营工作台</strong>
-          <span>选题 · 排版 · 发布</span>
+          <strong>创作者工作台</strong>
         </div>
       </div>
       <nav class="topnav" aria-label="主导航">
-        <button class="nav-btn active" data-view="dashboard" data-short="看板" title="数据看板">
+        <button class="nav-btn" data-view="dashboard" data-short="看板" title="数据看板">
           <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 13h6v7H4z"></path><path d="M14 4h6v16h-6z"></path><path d="M4 4h6v5H4z"></path></svg></span>
           <span class="nav-label">数据看板</span>
         </button>
@@ -25,7 +27,7 @@
           <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 3v4"></path><path d="M17 3v4"></path><path d="M4 8h16"></path><rect x="4" y="5" width="16" height="16" rx="3"></rect><path d="M8 13h3"></path><path d="M8 17h6"></path></svg></span>
           <span class="nav-label">选题计划</span>
         </button>
-        <button class="nav-btn" data-view="content" data-short="内容" title="内容中心">
+        <button class="nav-btn active" data-view="content" data-short="内容" title="内容中心">
           <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 3h7l4 4v14H7z"></path><path d="M14 3v5h5"></path><path d="M10 13h7"></path><path d="M10 17h5"></path></svg></span>
           <span class="nav-label">内容中心</span>
         </button>
@@ -43,28 +45,16 @@
         </button>
       </nav>
       <div class="sidebar-footer">
-        <div class="employee-picker" data-employee-picker>
-          <button class="user-card employee-card" type="button" data-action="toggle-employee-menu" aria-haspopup="menu" aria-expanded="false" aria-label="选择操控员工">
-            <span class="user-avatar employee-avatar" data-employee-avatar aria-hidden="true"></span>
-            <div class="user-copy">
-              <strong data-employee-name>内容编辑员</strong>
-              <span data-employee-role>正文与配图整理</span>
-            </div>
-          </button>
-          <div class="employee-menu" data-employee-menu role="menu" aria-label="选择操控员工"></div>
-        </div>
-        <button class="sidebar-toggle" type="button" data-action="toggle-sidebar" aria-label="折叠工作台" title="折叠工作台" aria-expanded="true">
-          <svg viewBox="0 0 24 24" aria-hidden="true" class="chevron-icon">
-            <path d="M15 18 9 12l6-6"></path>
-          </svg>
+        <button class="sidebar-toggle" type="button" data-action="toggle-sidebar" aria-label="折叠菜单" title="折叠菜单" aria-controls="workspace-navigation" aria-expanded="true">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM9 5v14M15 9l-3 3 3 3"/></svg>
         </button>
       </div>
     </header>
 
     <main class="main-area">
-      <section id="view-dashboard" class="view active"></section>
+      <section id="view-dashboard" class="view"></section>
       <section id="view-plans" class="view"></section>
-      <section id="view-content" class="view"></section>
+      <section id="view-content" class="view active"></section>
       <section id="view-publish" class="view"></section>
       <section id="view-platforms" class="view"></section>
       <section id="view-history" class="view"></section>
@@ -72,6 +62,11 @@
   </div>
 
   <div id="toast-root" class="toast-root" aria-live="polite"></div>
+
+  <dialog id="publish-recovery-dialog" class="recovery-dialog" aria-labelledby="recovery-title">
+    <div class="dialog-head"><div><strong id="recovery-title">恢复工作</strong><span>先保留稿件，再恢复窗口与核对结果</span></div><button class="icon-btn" type="button" data-action="close-publish-recovery" aria-label="关闭恢复窗口">×</button></div>
+    <div id="publish-recovery-body" class="recovery-dialog-body"></div>
+  </dialog>
 
   <dialog id="candidate-dialog">
     <div class="dialog-head">
@@ -129,7 +124,7 @@
     <div class="dialog-head">
       <div>
         <strong id="import-dialog-title">导入文章</strong>
-        <span id="import-dialog-description">粘贴正文，或在本机读取一个文本文件</span>
+        <span id="import-dialog-description">把写好的文章带进来，在一处编辑和查看平台预览。</span>
       </div>
       <button class="icon-btn" type="button" data-action="cancel-import" aria-label="关闭导入文章对话框" title="关闭">×</button>
     </div>
@@ -142,11 +137,13 @@
       <div class="import-tabs span-2" role="tablist" aria-label="导入方式">
         <button id="import-paste-tab" class="import-tab active" type="button" role="tab" tabindex="0" data-action="select-import-tab" data-import-tab="paste" aria-controls="import-paste-panel" aria-selected="true">粘贴正文</button>
         <button id="import-file-tab" class="import-tab" type="button" role="tab" tabindex="-1" data-action="select-import-tab" data-import-tab="file" aria-controls="import-file-panel" aria-selected="false">读取文件</button>
+        <button id="import-feishu-tab" class="import-tab" type="button" role="tab" tabindex="-1" data-action="select-import-tab" data-import-tab="feishu" aria-controls="import-feishu-panel" aria-selected="false">飞书链接</button>
       </div>
 
       <section id="import-paste-panel" class="import-tab-panel span-2" role="tabpanel" aria-labelledby="import-paste-tab">
         <label for="import-content-input"><span>文章正文</span></label>
-        <textarea id="import-content-input" rows="13" data-user-editable spellcheck="false" placeholder="支持 Markdown、HTML 或纯文本"></textarea>
+        <textarea id="import-content-input" rows="13" data-user-editable spellcheck="false" placeholder="在这里粘贴文章。支持 Markdown、HTML 或纯文本。"></textarea>
+        <p class="field-note">粘贴正文后核对配图；飞书文档可切换到“飞书链接”导出图文。</p>
       </section>
 
       <section id="import-file-panel" class="import-tab-panel span-2" role="tabpanel" aria-labelledby="import-file-tab" hidden>
@@ -156,8 +153,16 @@
         </label>
         <input id="import-file-input" class="visually-hidden" type="file" tabindex="-1" accept=".md,.markdown,.html,.htm,.txt" aria-describedby="import-file-note import-file-status">
         <button class="secondary import-file-trigger" type="button" data-action="choose-import-file">浏览本机文件</button>
-        <p id="import-file-note" class="field-note">文件只通过 FileReader 在当前浏览器中读取，原始文件不会上传。</p>
+        <label for="import-images-input">配套图片（PNG / JPG / GIF / WebP，可多选）</label>
+        <input id="import-images-input" type="file" multiple accept="image/png,image/jpeg,image/gif,image/webp">
+        <p id="import-file-note" class="field-note">正文最大5 MiB；每张配图最大8 MiB、合计24 MiB。按原图名匹配正文位置，缺图或重名时会提示，不静默丢图。</p>
         <output id="import-file-status" class="import-file-status" aria-live="polite">尚未选择文件</output>
+      </section>
+
+      <section id="import-feishu-panel" class="import-tab-panel span-2" role="tabpanel" aria-labelledby="import-feishu-tab" hidden>
+        <label for="import-feishu-url"><span>飞书文档链接</span></label>
+        <input id="import-feishu-url" type="url" autocomplete="off" placeholder="https://…feishu.cn/docx/… 或 /wiki/…">
+        <p class="field-note">通过个人飞书账号只读导出 Markdown 和原图，保存到本机，再导入内容中心。不会修改云端文档或发布文章；缺权限时明确停止。</p>
       </section>
 
       <div id="import-dialog-feedback" class="dialog-feedback span-2" role="status" aria-live="assertive"></div>
@@ -172,7 +177,7 @@
     <div class="dialog-head">
       <div>
         <strong id="platform-publish-dialog-title">确认平台操作</strong>
-        <span id="platform-publish-dialog-description">请核对文章、平台和发布模式后再执行</span>
+        <span id="platform-publish-dialog-description">只同步草稿或准备编辑器，不会公开发表或通知粉丝</span>
       </div>
       <button class="icon-btn" type="button" data-action="cancel-single-publish" aria-label="关闭平台发布确认对话框" title="关闭">×</button>
     </div>
@@ -185,11 +190,12 @@
       <div id="single-publish-feedback" class="dialog-feedback" role="status" aria-live="assertive"></div>
     </div>
     <div class="dialog-actions single-publish-actions">
+      <button class="secondary" id="single-publish-recovery-button" data-action="open-publish-recovery" hidden>恢复 / 核对</button>
       <button class="secondary" type="button" data-action="cancel-single-publish">取消</button>
       <button class="primary" type="button" data-action="confirm-single-publish">确认执行</button>
     </div>
   </dialog>
 
-  <script src="/app.js?v=20260830-dynamic-content-center"></script>
+  <script src="/app.js?v=20260907-human-publication"></script>
 </body>
 </html>

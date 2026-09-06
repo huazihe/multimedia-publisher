@@ -21,7 +21,7 @@
 ## 2. 主要目录
 
 ```text
-D:\Codex\WECHATSYNC
+<项目克隆目录>/multimedia-publisher
 ├─ packages\core                 # 核心发布 adapter、运行时、平台逻辑
 ├─ packages\cli                  # 独立 CLI，入口 dist/index.js
 ├─ publisher-dashboard           # 本地可视化面板

@@ -7,6 +7,10 @@ const { createRequire } = require('node:module');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const TEMPLATE_DIR = path.join(REPO_ROOT, 'skills', 'weixin-layout', 'templates');
+const TEMPLATE_LABELS = new Map(
+  require('../skills/weixin-layout/template-catalog.json')
+    .flatMap(({ label, files }) => files.map(filename => [filename, label]))
+);
 const ARTICLE_ALLOWED_ELEMENTS = new Set([
   'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
   'p', 'div', 'section', 'article', 'main', 'aside', 'header', 'footer', 'span',
@@ -113,12 +117,8 @@ function compareFilenames(left, right) {
 }
 
 function readableTemplateLabel(filename) {
-  const basename = filename.slice(0, -'.html'.length);
-  const descriptiveTemplate = basename.match(/^template_style\d+_(.+)$/);
-  if (descriptiveTemplate) return descriptiveTemplate[1].replace(/_/g, ' ').trim();
-  const numberedTemplate = basename.match(/^(?:template_)?style_?(\d+)$/);
-  if (numberedTemplate) return `样式 ${numberedTemplate[1]}`;
-  return basename.replace(/^template_/, '').replace(/_/g, ' ').trim();
+  // Keep filenames as identifiers; only the display name comes from the catalog.
+  return TEMPLATE_LABELS.get(filename) || filename.slice(0, -'.html'.length);
 }
 
 function listLayoutTemplates() {
@@ -630,7 +630,12 @@ function directChildContaining(ancestor, descendant) {
 function createProfile(document, root, content) {
   const title = findTitlePrototype(root, content);
   const lead = findLeadPrototype(content);
-  const paragraph = findParagraphPrototype(content);
+  let paragraph = findParagraphPrototype(content);
+  // White text from a dark lead card is not a body-paragraph prototype.
+  if (lead?.contains(paragraph) && /^(?:#fff(?:fff)?|white)$/i.test(paragraph?.style.getPropertyValue('color') || '')) {
+    paragraph = [...content.querySelectorAll('p')].find(candidate =>
+      !lead.contains(candidate) && normalizedText(candidate.textContent).length >= 24) || paragraph;
+  }
   const heading = findHeadingPrototype(content, title);
   const footer = findFooterPrototype(root, content);
   return {
@@ -660,6 +665,12 @@ function createSummary(document, profile, summary) {
   const element = document.createElement(tagName);
   copyPresentation(profile.lead, element);
   withDefaultStyle(element, DEFAULT_STYLES.summary);
+  const leadText = [...(profile.lead?.querySelectorAll('p') || [])]
+    .sort((left, right) => normalizedText(right.textContent).length - normalizedText(left.textContent).length)[0];
+  const leadColor = leadText?.style.getPropertyValue('color') || '';
+  if (profile.lead?.style.getPropertyValue('background') && /^(?:#fff(?:fff)?|white)$/i.test(leadColor)) {
+    element.style.setProperty('color', leadColor);
+  }
   element.setAttribute('data-wechat-slot', 'summary');
   element.textContent = summary;
   return element;
@@ -792,6 +803,53 @@ function updateFooterInPlace(document, profile, accountName, accountDescription)
 }
 
 function updateTitleInPlace(element, title) {
+  const svg = element.closest('svg');
+  if (svg) {
+    // SVG is stripped by WeChat. Keep its decoration separate from the real HTML title.
+    const heading = createTitle(element.ownerDocument, { title: element }, title);
+    const fill = element.getAttribute('fill') || '';
+    const gradientId = fill.match(/^url\(#([^)]*)\)$/)?.[1];
+    const gradient = gradientId && [...svg.querySelectorAll('[id]')].find(node => node.id === gradientId);
+    const gradientColor = gradient?.querySelector('stop')?.getAttribute('stop-color');
+    if (gradientColor) heading.style.setProperty('color', gradientColor);
+    heading.style.setProperty('position', 'relative');
+    heading.style.setProperty('margin', '0');
+    heading.style.setProperty('padding', '24px 16px');
+    const shell = element.ownerDocument.createElement('section');
+    shell.setAttribute('style', 'position:relative;max-width:100%;');
+    svg.replaceWith(shell);
+    element.remove();
+    svg.setAttribute('aria-hidden', 'true');
+    svg.style.setProperty('position', 'absolute');
+    svg.style.setProperty('inset', '0');
+    svg.style.setProperty('width', '100%');
+    svg.style.setProperty('height', '100%');
+    shell.append(svg, heading);
+    element = heading;
+  }
+  // A short classical title can stay vertical. Longer copy needs a wrapping frame.
+  if ([...title].length > 8) {
+    for (let parent = element.parentElement; parent && !parent.hasAttribute('data-wechat-template-root'); parent = parent.parentElement) {
+      if (!/writing-mode\s*:\s*vertical/i.test(parent.getAttribute('style') || '')) continue;
+      parent.style.setProperty('writing-mode', 'horizontal-tb');
+      parent.style.setProperty('-webkit-writing-mode', 'horizontal-tb');
+      parent.style.setProperty('white-space', 'normal');
+      parent.style.setProperty('letter-spacing', '2px');
+      parent.style.setProperty('line-height', '1.6');
+      parent.style.setProperty('min-width', '0');
+      parent.style.setProperty('max-width', '100%');
+      const frame = parent.parentElement;
+      if (frame) {
+        frame.style.setProperty('box-sizing', 'border-box');
+        frame.style.setProperty('max-width', '100%');
+        frame.style.setProperty('min-width', '0');
+      }
+    }
+  }
+  element.style.setProperty('overflow-wrap', 'anywhere');
+  element.style.setProperty('min-width', '0');
+  element.style.setProperty('max-width', '100%');
+  element.style.setProperty('box-sizing', 'border-box');
   clearElement(element);
   element.setAttribute('data-wechat-slot', 'title');
   element.textContent = title;

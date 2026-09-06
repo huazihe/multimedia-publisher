@@ -25,6 +25,9 @@ export interface Article {
 export interface SyncResult {
   platform: string
   success: boolean
+  /** Outcome is unverified and may have remote side effects. Must accompany
+   * success:false; callers must require manual reconciliation before retrying. */
+  uncertain?: boolean
   postId?: string
   postUrl?: string
   draftOnly?: boolean  // 是否只保存了草稿

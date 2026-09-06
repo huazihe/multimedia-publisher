@@ -1,0 +1,132 @@
+[
+  {
+    "label": "海蓝渐层·圆角导读",
+    "description": "亮海蓝居中标题搭配浅蓝渐层圆角导语，适合产品体验与轻松阅读。",
+    "files": ["style_10.html"]
+  },
+  {
+    "label": "橙线白底·案例笔记",
+    "description": "橙棕顶线、白底正文与竖线导语，适合现场记录、案例复盘与经验笔记。",
+    "files": ["style_11.html", "template_style3_工业质检清爽风.html", "专业案例·清爽蓝白.html", "案例杂志·专栏.html"]
+  },
+  {
+    "label": "蓝线白底·专业解读",
+    "description": "亮蓝顶线、浅蓝标题区与清晰章节分隔，适合产品方案与专业解读。",
+    "files": ["style_12.html", "style_5.html", "template_style5_专业案例报道风.html", "工业质检·清爽绿白.html", "案例杂志·编辑部.html"]
+  },
+  {
+    "label": "天蓝描边·轻盈导读",
+    "description": "深天蓝居中标题搭配浅蓝细描边导语卡，适合行业观察与团队介绍。",
+    "files": ["style_13.html"]
+  },
+  {
+    "label": "紫色高亮·科技专题",
+    "description": "紫色标题与深紫渐层导语卡形成鲜明对比，适合技术通报与科技专题。",
+    "files": ["style_4.html"]
+  },
+  {
+    "label": "暖橙居中·人文杂志",
+    "description": "黑色居中标题、紧凑导语与暖橙正文，适合人物故事与人文随笔。",
+    "files": ["style_6.html"]
+  },
+  {
+    "label": "深绿渐层·自然清新",
+    "description": "深绿标题与浅绿渐层导语相呼应，适合自然、健康与可持续主题。",
+    "files": ["style_7.html"]
+  },
+  {
+    "label": "青绿白底·清爽长文",
+    "description": "青绿顶线、白底正文与竖线导语，适合技术说明与层次清楚的长文。",
+    "files": ["style_8.html", "template_style1_专业案例报道风.html", "template_style8_工业质检清爽风.html", "制造白皮书·浅灰阅读.html", "案例杂志·评论.html"]
+  },
+  {
+    "label": "灰蓝白底·深度报告",
+    "description": "低饱和灰蓝顶线、浅灰蓝标题区与白底正文，适合行业报告与方案分析。",
+    "files": ["style_9.html", "template_style2_工程现场笔记风.html", "template_style9_制造业白皮书风.html", "工程笔记·暖白案例.html"]
+  },
+  {
+    "label": "黑白横线·杂志专栏",
+    "description": "黑白粗标题配上下横线与居中斜体导语，适合观点专栏与人物访谈。",
+    "files": ["template_style11_杂志分栏风.html"]
+  },
+  {
+    "label": "黑白留白·极简阅读",
+    "description": "黑色左对齐标题、灰色导语与大面积留白，适合观点文章与深度思考。",
+    "files": ["template_style12_极简段落风.html"]
+  },
+  {
+    "label": "米黄细框·古典书信",
+    "description": "米黄细框标题与棕褐文字营造古典纸感，适合书信、节日寄语与品牌文化。",
+    "files": ["template_style13.html"]
+  },
+  {
+    "label": "暖橙虚线·手帐随笔",
+    "description": "橙色虚线标题框、胶带装饰与暖白导语卡，适合经验分享与手帐随笔。",
+    "files": ["template_style4_暖橙手帐风.html"]
+  },
+  {
+    "label": "靛蓝衬线·学术报刊",
+    "description": "靛蓝细横线、衬线标题与纸白导语框，适合研究解读与学术专题。",
+    "files": ["template_style6_报纸学术风.html"]
+  },
+  {
+    "label": "天蓝细字·轻量科普",
+    "description": "细字重标题、天蓝章节字与轻描边导语卡，适合轻量科普与产品介绍。",
+    "files": ["template_style7_云端轻量风.html"]
+  },
+  {
+    "label": "暖棕封面·信笺随笔",
+    "description": "暖棕渐层封面、细字标题与居中章节，适合书信体文章与温和叙事。",
+    "files": ["云笺·暖棕国风.html"]
+  },
+  {
+    "label": "商务深蓝·专业报告",
+    "description": "深蓝粗标题、蓝色横线与灰蓝导语，适合商业分析与专业报告。",
+    "files": ["商务蓝·专业报告.html"]
+  },
+  {
+    "label": "浅杏双线·温柔随笔",
+    "description": "浅杏底色、白色圆角导语与双线章节标题，适合慢生活记录与温柔随笔。",
+    "files": ["暖色二号·柔和阅读.html"]
+  },
+  {
+    "label": "赭石金印·国风长文",
+    "description": "赭石渐层封面配金色圆印与章节短线，适合文化主题与国风长文。",
+    "files": ["暖色国风·赭石金.html"]
+  },
+  {
+    "label": "米杏宋体·生活随笔",
+    "description": "米杏纸色、宋体居中标题与首字下沉导语，适合生活感悟与情感随笔。",
+    "files": ["暖色调·温柔陪伴.html"]
+  },
+  {
+    "label": "墨棕封面·人文大刊",
+    "description": "墨棕整页封面配底部衬线大标题，适合人物特写与人文深度报道。",
+    "files": ["杂志风·图文并茂.html"]
+  },
+  {
+    "label": "炭黑封面·深度阅读",
+    "description": "炭黑短封面、岩石装饰与居中短线章节，适合沉静的观点与深度阅读。",
+    "files": ["砚石·大地色系.html"]
+  },
+  {
+    "label": "琥珀封面·秋日手帐",
+    "description": "琥珀棕短封面、米白正文与橙色章节竖线，适合季节记录与生活手帐。",
+    "files": ["秋叶·暖橙手帐.html"]
+  },
+  {
+    "label": "绿线白底·通用文章",
+    "description": "白底黑字、简洁导语与绿色章节竖线，适合日常资讯与通用文章。",
+    "files": ["通用排版·基础样式.html"]
+  },
+  {
+    "label": "橙金渐层·活力分享",
+    "description": "橙金渐层封面、光晕装饰与橙色章节竖线，适合品牌故事与活力分享。",
+    "files": ["霞光·暖橙渐变.html"]
+  },
+  {
+    "label": "青绿封面·清雅阅读",
+    "description": "青绿纹理封面、浅绿纸色与绿色章节竖线，适合清雅的品牌故事与长文。",
+    "files": ["青瓷·青绿清雅.html"]
+  }
+]

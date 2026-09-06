@@ -3,6 +3,7 @@ import type { Article, AuthResult, PlatformMeta, SyncResult } from '../../types'
 import type { PublishOptions } from '../types'
 import { createLogger } from '../../lib/logger'
 import { buildAccountIdentityScript, type AccountIdentity } from '../../lib/account-identity'
+import { parseMarkdownImages } from '../../lib/markdown-images'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
@@ -328,6 +329,16 @@ export class DouyinAdapter extends CodeAdapter {
   }
 
   async publish(article: Article, options?: PublishOptions): Promise<SyncResult> {
+    const directMode = options?.publishMode === 'direct' || options?.draftOnly === false
+    if (/<img\b/i.test(article.html || '') || parseMarkdownImages(article.markdown || '').length || /<img\b/i.test(article.markdown || '')) {
+      return this.createResult(false, { error: '抖音当前只支持纯文字正文，无法保留内嵌图片的位置；已阻止提交，请先准备独立的纯文字版本。' })
+    }
+    if (Array.from((article.title || '').trim()).length > 30) {
+      return this.createResult(false, { error: '标题超过当前抖音适配器的30字上限，请自行调整；未自动截断标题。' })
+    }
+    if (!directMode && article.cover) {
+      return this.createResult(false, { error: '抖音纯文字草稿暂不支持封面同步；已阻止提交，未忽略封面。' })
+    }
     if (this.runtime.type !== 'node') {
       return this.createResult(false, {
         error: 'Douyin standalone publishing requires Node runtime with Chrome CDP.',
@@ -350,37 +361,41 @@ export class DouyinAdapter extends CodeAdapter {
 
     let client: CdpClient | null = null
     let tempCoverPath: string | null = null
+    let remoteTouched = false
     try {
-      const directMode = options?.publishMode === 'direct'
       if (directMode) tempCoverPath = await this.prepareCoverImage(article)
       client = await this.connect(port, directMode ? ARTICLE_URL : UPLOAD_URL)
       if (directMode) {
         await this.navigate(client, ARTICLE_URL)
+        remoteTouched = true
         const published = await this.publishDirect(client, title, summary, body, tempCoverPath)
         if (!published.ok) throw new Error(published.error || 'Douyin direct publish failed.')
 
         logger.info(`Publish submitted: ${title}`)
-        return this.createResult(true, {
-          postId: title,
+        return this.createResult(false, {
+          uncertain: true,
           postUrl: published.url || ARTICLE_URL,
-          draftOnly: false,
-          message: published.message || '已自动点击抖音文章发布按钮；如平台要求封面、头图或二次确认，请检查抖音创作者中心页面。',
+          error: '抖音未获得可验证的公开发布回执。',
+          message: '已尝试点击发布，请先在创作者中心核查作品状态或二次确认提示；核查前不要重复提交。',
         })
       }
 
       await this.navigate(client, UPLOAD_URL)
+      remoteTouched = true
       const draft = await this.saveDraft(client, title, summary, body)
 
-      logger.info(`Draft saved: ${draft.draft?.creation_id || title}`)
+      logger.info('Draft saved and read back')
       return this.createResult(true, {
-        postId: draft.draft?.creation_id || title,
+        postId: draft.draft!.creation_id,
         postUrl: UPLOAD_URL,
         draftOnly: true,
         message: '已保存到抖音文章草稿，请在抖音创作者中心确认后发布。',
       })
     } catch (error) {
       return this.createResult(false, {
-        error: (error as Error).message,
+        error: '抖音操作未完成，未取得匹配的保存或发布结果。',
+        postUrl: directMode ? ARTICLE_URL : UPLOAD_URL,
+        ...(remoteTouched ? { uncertain: true, message: '页面输入或草稿请求已开始，请先检查创作者中心的草稿和作品；核查前不要重复提交。' } : {}),
       })
     } finally {
       client?.close()
@@ -408,10 +423,11 @@ export class DouyinAdapter extends CodeAdapter {
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ item: { common: { draft: { req_type: 3 } } } })
-    }).then(response => response.json())`)
+    }).then(response => { if (!response.ok) throw new Error('Draft read request failed'); return response.json(); })`)
   }
 
   private async saveDraft(client: CdpClient, title: string, summary: string, body: string): Promise<DouyinDraftResponse> {
+    const creationId = 'codex' + Date.now()
     const saved = await this.evaluate<DouyinDraftResponse>(client, `(() => {
       const payload = {
         item: {
@@ -425,7 +441,7 @@ export class DouyinAdapter extends CodeAdapter {
               text_extra: '[]',
               visibility_type: 0,
               timing: 0,
-              creation_id: 'codex' + Date.now(),
+              creation_id: ${JSON.stringify(creationId)},
               init_timestamp: Math.floor(Date.now() / 1000),
               req_type: 0
             }
@@ -439,7 +455,7 @@ export class DouyinAdapter extends CodeAdapter {
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
-      }).then(response => response.json());
+      }).then(response => { if (!response.ok) throw new Error('Draft save request failed'); return response.json(); });
     })()`)
 
     if (saved.status_code !== 0) {
@@ -447,11 +463,11 @@ export class DouyinAdapter extends CodeAdapter {
     }
 
     const draft = await this.readDraft(client)
-    const bodyProbe = body.slice(0, 80)
     if (
       draft.status_code !== 0
+      || draft.draft?.creation_id !== creationId
       || draft.draft?.title !== title
-      || !(draft.draft.long_article || '').includes(bodyProbe)
+      || draft.draft?.long_article !== body
     ) {
       throw new Error(`Douyin draft verification failed: ${draft.status_msg || draft.status_code || 'draft content did not match'}`)
     }
@@ -776,7 +792,7 @@ export class DouyinAdapter extends CodeAdapter {
     await client.send('Page.setInterceptFileChooserDialog', { enabled: false }).catch(() => undefined)
     await delay(1500)
     await this.confirmImageUploadDialog(client).catch(() => undefined)
-    await this.waitForImageUploadSettled(client, label).catch(() => undefined)
+    await this.waitForImageUploadSettled(client, label)
     return true
   }
 
@@ -884,7 +900,7 @@ export class DouyinAdapter extends CodeAdapter {
       await delay(600)
     }
 
-    logger.warn(`${label}: image upload did not expose a stable preview before timeout.`)
+    throw new Error(`${label}: 图片上传完成状态未确认，已停止自动提交。`)
   }
 
   private async readAccountIdentity(client: CdpClient): Promise<AccountIdentity> {

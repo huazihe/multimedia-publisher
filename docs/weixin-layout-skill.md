@@ -4,7 +4,7 @@
 > 
 > 当前维护源：`skills/weixin-layout/`
 > 
-> 最近盘点：2026-07-26
+> 最近盘点：2026-09-05
 
 ## 1. 这个 Skill 负责什么
 
@@ -20,18 +20,22 @@
 # 随机选择一套模板
 python3 skills/weixin-layout/scripts/pick_layout.py --json
 
-# 查看全部模板
+# 查看中文名称与原文件名映射
 python3 skills/weixin-layout/scripts/pick_layout.py --list
 
 # 使用固定种子复现模板选择结果
 python3 skills/weixin-layout/scripts/pick_layout.py --json --seed 20260722
 
-# 指定模板
+# 用原文件名指定模板（本文件实际显示为“蓝线白底·专业解读”）
 python3 skills/weixin-layout/scripts/pick_layout.py --json \
   --template "工业质检·清爽绿白.html"
 ```
 
 脚本返回的 `path` 是本次实际选中的模板路径。后续处理必须使用这个路径，不要自行拼接另一份模板。
+
+JSON 输出保留 `filename`、`path`、`size`，并增加中文显示字段 `label`。`--template` 仍接受原文件名，不接受显示名；一个显示名可能对应多个完全相同的模板文件。`--list` 首行显示“共 40 个模板文件，26 种排版”，随后每行用制表符分隔中文名称与原文件名。
+
+随机选择仍基于原有 40 个文件及排序，同一 `--seed` 的文件选择结果不变。显示名合并不改变脚本的抽样范围或概率。
 
 ## 3. 输入约定
 
@@ -65,13 +69,63 @@ python3 skills/weixin-layout/scripts/pick_layout.py --json \
 skills/weixin-layout/
 ├── SKILL.md                         # Skill 行为规范与边界
 ├── agents/openai.yaml                # Skill 在 Agent 目录中的显示信息
+├── template-catalog.json             # 中文名称、用途说明与原文件名映射
 ├── references/外部公众号样式库.md      # 只记录抽象样式，不保存外部全文和品牌素材
 ├── scripts/pick_layout.py            # 随机或指定模板
 ├── scripts/check_layout.py           # HTML 静态验收
 └── templates/                        # 公众号 HTML 模板库
 ```
 
-当前模板库共 40 套，包含工业质检、专业案例、工程笔记、白皮书、杂志分栏、暖色阅读、青瓷清雅等方向。模板文件名本身就是风格索引，新增模板时要保持名称可读、可检索。
+当前模板库包含 40 个 HTML 文件，按原始文件字节的 SHA-256 分为 26 个不同内容组，另有 14 个重复文件。每组共用一个中文显示名；内容不同的组使用不同名称。保留所有原文件及文件名，以兼容历史选择和已经生成的文章。
+
+`template-catalog.json` 是工作台和 Python 脚本共用的名称真源，结构为数组：
+
+```json
+[
+  {
+    "label": "海蓝渐层·圆角导读",
+    "description": "亮海蓝居中标题搭配浅蓝渐层圆角导语，适合产品体验与轻松阅读。",
+    "files": ["style_10.html"]
+  }
+]
+```
+
+名称以实际配色、标题版式和适用内容为依据。历史文件名只作为稳定标识，不能直接当作颜色或风格事实。例如 `专业案例·清爽蓝白.html` 实际采用橙棕色线条，归入“橙线白底·案例笔记”；`工业质检·清爽绿白.html` 实际采用蓝色线条，归入“蓝线白底·专业解读”。
+
+| 中文显示名 | 文件数 | 代表文件 |
+| --- | ---: | --- |
+| 海蓝渐层·圆角导读 | 1 | `style_10.html` |
+| 橙线白底·案例笔记 | 4 | `style_11.html` |
+| 蓝线白底·专业解读 | 5 | `style_12.html` |
+| 天蓝描边·轻盈导读 | 1 | `style_13.html` |
+| 紫色高亮·科技专题 | 1 | `style_4.html` |
+| 暖橙居中·人文杂志 | 1 | `style_6.html` |
+| 深绿渐层·自然清新 | 1 | `style_7.html` |
+| 青绿白底·清爽长文 | 5 | `style_8.html` |
+| 灰蓝白底·深度报告 | 4 | `style_9.html` |
+| 黑白横线·杂志专栏 | 1 | `template_style11_杂志分栏风.html` |
+| 黑白留白·极简阅读 | 1 | `template_style12_极简段落风.html` |
+| 米黄细框·古典书信 | 1 | `template_style13.html` |
+| 暖橙虚线·手帐随笔 | 1 | `template_style4_暖橙手帐风.html` |
+| 靛蓝衬线·学术报刊 | 1 | `template_style6_报纸学术风.html` |
+| 天蓝细字·轻量科普 | 1 | `template_style7_云端轻量风.html` |
+| 暖棕封面·信笺随笔 | 1 | `云笺·暖棕国风.html` |
+| 商务深蓝·专业报告 | 1 | `商务蓝·专业报告.html` |
+| 浅杏双线·温柔随笔 | 1 | `暖色二号·柔和阅读.html` |
+| 赭石金印·国风长文 | 1 | `暖色国风·赭石金.html` |
+| 米杏宋体·生活随笔 | 1 | `暖色调·温柔陪伴.html` |
+| 墨棕封面·人文大刊 | 1 | `杂志风·图文并茂.html` |
+| 炭黑封面·深度阅读 | 1 | `砚石·大地色系.html` |
+| 琥珀封面·秋日手帐 | 1 | `秋叶·暖橙手帐.html` |
+| 绿线白底·通用文章 | 1 | `通用排版·基础样式.html` |
+| 橙金渐层·活力分享 | 1 | `霞光·暖橙渐变.html` |
+| 青绿封面·清雅阅读 | 1 | `青瓷·青绿清雅.html` |
+
+完整的重复文件映射见目录 JSON 或 `pick_layout.py --list`。表中的代表文件仅用于查阅，不用于替换用户已选的文件。
+
+工作台接口约定：`listLayoutTemplates()` 仍按文件名排序，返回 40 条 `{filename, label}`，不在每条记录中添加说明或组标识。前端仅在 `/api/layout-templates` 响应带有 `catalogVersion: 1` 标记时按 `label` 合并显示，以免误合并旧服务中同名但内容不同的模板。已有 `selectedFilename` 应保留为所在组的代表，前端随机换模板时应排除当前组。
+
+文章的 `data-wechat-template` 仍记录实际原文件名；中文显示名不写入正文、内容哈希或生成时间。若本地临时新增文件尚未登记名称，两端会显示去掉 `.html` 的原文件名，避免编造风格；正式交付前必须补齐目录并通过覆盖校验。
 
 ## 6. HTML 验收
 
@@ -101,15 +155,16 @@ python3 skills/weixin-layout/scripts/check_layout.py \
 1. 放入 `skills/weixin-layout/templates/`；
 2. 至少包含以下占位内容：文章主标题、栏目/副标题、导语、正文、公众号名称、公众号简介；
 3. 复用模板自身的结构和 class，不依赖本机绝对路径；
-4. 能被 `pick_layout.py --list` 发现；
+4. 登记到 `template-catalog.json`，能被 `pick_layout.py --list` 以中文名称发现；完全相同的文件加入原组，内容不同则使用新名称，不用“样式 1”等编号名；
 5. 用一个最小示例文章完成 `check_layout.py` 验收；
 6. 在下方变更记录中登记模板名、用途和验收日期。
 
 新增模板登记卡：
 
 ```text
-模板名称：
+中文显示名：
 文件名：
+用途说明：
 适用内容：案例 / 行业趋势 / 技术干货 / 活动报道 / 其他
 主色与辅色：
 标题与正文层级：
@@ -125,14 +180,27 @@ python3 skills/weixin-layout/scripts/check_layout.py \
 - 修改 Skill 行为时，优先修改 `SKILL.md`，再同步更新本维护手册。
 - 修改模板时，只改对应模板文件，不把通用规则散落到多个模板里。
 - 修改脚本参数时，同步更新“快速使用”和“标准处理流程”。
+- 修改名称时只更新 `template-catalog.json` 及对应文档、命名断言，不改 HTML、文件名、渲染函数或历史文章。工作台服务加载目录后需重启才能读取名称变化，Python 脚本每次启动读取。
+- 目录必须恰好覆盖全部 HTML 文件一次；同名即同 SHA-256，同 SHA-256 即同名。新增或删除模板时同步调整测试中的文件数、内容组数及相关文档。
 - 新增模板、删除模板或改变默认公众号信息时，必须写入变更记录。
 - 发布前不得把 Cookie、浏览器 profile、session 文件、数据库或任何登录凭证放进 Skill 包。
 - Skill 包只包含排版规则、脚本、参考说明和模板，不包含运行时数据。
+
+名称与兼容性回归检查：
+
+```bash
+node --test publisher-dashboard/test/layout-templates.test.js
+python3 skills/weixin-layout/scripts/pick_layout.py --list
+python3 skills/weixin-layout/scripts/pick_layout.py --json --seed 20260905
+```
+
+测试覆盖中文名称、完整文件映射、重复内容分组、40 个原文件名的文章元数据，以及 Python JSON 字段和固定种子选择兼容性。仅改名称时，还应在改动前后用相同文章输入和固定 `generatedAt` 对比 40 个模板原文件与渲染 HTML 的 SHA-256，确认内容及元数据未发生变化。
 
 ## 9. 变更记录
 
 | 日期 | 变更 | 影响范围 |
 | --- | --- | --- |
+| 2026-09-05 | 建立 26 个中文名称与 40 个原文件的共用目录，工作台和 Python 统一读取；保留原文件标识与渲染逻辑 | 显示名称、模板元数据、命名与兼容性校验 |
 | 2026-07-26 | 建立公众号排版 Skill 维护手册；盘点 40 套模板；生成可下载 Skill 包 | 文档、模板维护、交接 |
 
 ## 10. 可下载包

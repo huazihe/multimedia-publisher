@@ -48,6 +48,10 @@ let cdpRequestId = 0
 const DOUYIN_DEFAULT_CDP_PORT = 9333
 
 const PLATFORM_LOGINS: Record<string, PlatformLoginConfig> = {
+  jianshu: {name:'简书',loginUrl:'https://www.jianshu.com/sign_in',domains:['.jianshu.com']},
+  netease: {name:'网易号',loginUrl:'https://mp.163.com/login.html',domains:['.mp.163.com']},
+  uisdc: { name: '优设', loginUrl: 'https://www.uisdc.com/#login', domains: ['.uisdc.com'] },
+  sspai: { name: '少数派', loginUrl: 'https://sspai.com/login', domains: ['.sspai.com'] },
   zhihu: {
     name: '知乎',
     loginUrl: 'https://www.zhihu.com/signin',

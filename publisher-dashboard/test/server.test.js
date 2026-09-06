@@ -52,6 +52,7 @@ function rawHttpRequest(input, options = {}) {
 }
 
 const testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'publisher-dashboard-test-'));
+process.env.PUBLISHER_DATA_DIR = testDataDir;
 process.env.PUBLISHER_DB = path.join(testDataDir, 'publisher.sqlite');
 process.env.PUBLISHER_OPERATIONS_FILE = path.join(testDataDir, 'publish-operations.json');
 const invalidPreviewCookieFile = path.join(testDataDir, 'invalid-preview-cookies.json');
@@ -437,7 +438,7 @@ test('local API requires trusted origin and per-server CSRF for mutations', asyn
     const publishEndpoint = `${firstOrigin}/api/content/${imported.id}/publish-platform`;
     const publishBody = JSON.stringify({
       platform: 'zhihu',
-      publishMode: 'direct',
+      publishMode: 'draft',
       operationId: 'csrf-publish-operation-0001',
       expectedUpdatedAt: imported.updated_at,
     });
@@ -616,6 +617,13 @@ test('parseSyncResults reads current CLI OK and FAIL rows', () => {
 test('loginExported detects cookie export output', () => {
   assert.equal(loginExported('Exported 3 cookies to cookies.json'), true);
   assert.equal(loginExported('Open browser and log in'), false);
+});
+
+test('parseSyncResults preserves uncertain outcomes and their verification URL', () => {
+  assert.deepEqual(parseSyncResults('  [UNCERTAIN] xiaohongshu\n    https://creator.xiaohongshu.com/publish/publish\n    未得到明确回执，请勿重复提交\n  [OK] weixin (草稿)\n    已回读\n'), {
+    xiaohongshu: { status: 'uncertain', url: 'https://creator.xiaohongshu.com/publish/publish', error: '未得到明确回执，请勿重复提交' },
+    weixin: { status: 'success', url: null, message: '已回读' },
+  });
 });
 
 test('generateCandidates creates five candidates', () => {
@@ -2002,6 +2010,20 @@ test('source-aware signatures change with the selected WeChat layout but not unu
   assert.equal(firstMarkdown.sourceHash, secondMarkdown.sourceHash);
 });
 
+test('unresolved writes cannot be retried by changing revision, template, mode or batch subset', () => {
+  const journal=createOperationJournal({filePath:path.join(testDataDir,'unresolved-material-content.json')});
+  const signature={contentId:'same-article',platforms:['weixin','sspai'],publishMode:'draft',contentHash:'a'.repeat(64),sourceHash:'b'.repeat(64),expectedUpdatedAt:'2026-09-05T12:00:00.000Z'};
+  journal.begin('unresolved-material-0001',signature);
+  journal.markUncertain('unresolved-material-0001');
+  for(const changes of [
+    {expectedUpdatedAt:'2026-09-05T13:00:00.000Z'},
+    {sourceHash:'c'.repeat(64)},
+    {platforms:['sspai']},
+    {publishMode:'direct'},
+  ]) assert.throws(()=>journal.begin('unresolved-material-0002',{...signature,...changes}),/不确定|人工核对/);
+  assert.equal(journal.begin('unresolved-material-0003',{...signature,platforms:['zhihu']}).kind,'started');
+});
+
 test('source-aware journal replays the same source and distinguishes a changed source', () => {
   const operationsFile = path.join(testDataDir, 'source-aware-exact-match-operations.json');
   const firstSignature = {
@@ -2104,7 +2126,7 @@ for (const legacyState of ['completed', 'running', 'uncertain', 'failed']) {
       const legacySignature = {
         contentId: fixture.id,
         platforms: ['zhihu'],
-        publishMode: 'direct',
+        publishMode: 'draft',
         contentHash: createHash('sha256').update(contentToMarkdown(content), 'utf8').digest('hex'),
       };
       const timestamp = new Date().toISOString();
@@ -2147,7 +2169,7 @@ for (const legacyState of ['completed', 'running', 'uncertain', 'failed']) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           platform: 'zhihu',
-          publishMode: 'direct',
+          publishMode: 'draft',
           operationId,
           expectedUpdatedAt: content.updated_at,
         }),
@@ -2289,7 +2311,7 @@ test('publisher exception persists completed results and leaves an uncertain ter
       body: JSON.stringify({
         contentId: fixture.id,
         platforms: ['zhihu', 'juejin'],
-        publishMode: 'direct',
+        publishMode: 'draft',
         operationId,
         expectedUpdatedAt,
       }),
@@ -2307,7 +2329,7 @@ test('publisher exception persists completed results and leaves an uncertain ter
     assert.equal(job.status, 'uncertain');
     assert.notEqual(job.status, 'running');
     assert.deepEqual(job.results.map(item => [item.platform, item.status]), [
-      ['zhihu', 'success'],
+      ['zhihu', 'platform_draft'],
       ['juejin', 'uncertain'],
     ]);
     assert.match(job.results.find(item => item.platform === 'juejin').message, /ambiguous external result/);
@@ -2323,7 +2345,7 @@ test('publisher exception persists completed results and leaves an uncertain ter
     assert.deepEqual(distribution(dashboardAfter, 'juejin'), distribution(dashboardBefore, 'juejin'));
     assert.equal(
       distribution(dashboardAfter, 'zhihu').success,
-      distribution(dashboardBefore, 'zhihu').success + 1
+      distribution(dashboardBefore, 'zhihu').success
     );
 
     const journal = JSON.parse(fs.readFileSync(operationsFile, 'utf8'));
@@ -2333,7 +2355,7 @@ test('publisher exception persists completed results and leaves an uncertain ter
     assert.equal(journal.records[0].result.jobStatus, 'uncertain');
     assert.equal(journal.records[0].result.sourceUpdatedAt, expectedUpdatedAt);
     assert.deepEqual(journal.records[0].result.platformResults, [
-      { platform: 'zhihu', status: 'success' },
+      { platform: 'zhihu', status: 'platform_draft' },
       { platform: 'juejin', status: 'uncertain' },
     ]);
 
@@ -2386,7 +2408,7 @@ test('publisher side-effect exception marks signature uncertain and blocks a new
     const publish = operationId => workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId, expectedUpdatedAt }),
+      body: JSON.stringify({ platform: 'zhihu', publishMode: 'draft', operationId, expectedUpdatedAt }),
     });
 
     let response = await publish('post-effect-uncertain-operation-0001');
@@ -2420,6 +2442,14 @@ test('publisher side-effect exception marks signature uncertain and blocks a new
     assert.equal(response.status, 409);
     assert.match((await response.json()).error, /不确定|人工核对/);
     assert.equal(publisherCalls, 1);
+    const unchanged=getDashboardData().contents.find(item=>item.id===fixture.id);
+    const saved=updateContent(fixture.id,{title:unchanged.title,summary:unchanged.summary,body:unchanged.body,expectedUpdatedAt:unchanged.updated_at});
+    assert.notEqual(saved.updated_at,expectedUpdatedAt);
+    expectedUpdatedAt=saved.updated_at;
+    response=await publish('post-effect-uncertain-operation-0003');
+    assert.equal(response.status,409);
+    assert.match((await response.json()).error,/不确定|人工核对/);
+    assert.equal(publisherCalls,1);
   } finally {
     await closeServer(testServer);
     cleanupPublishStateFixture(fixture);
@@ -2457,7 +2487,7 @@ test('all preflight failures record failed and allow a new operationId retry', a
     const publish = operationId => workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId, expectedUpdatedAt }),
+      body: JSON.stringify({ platform: 'zhihu', publishMode: 'draft', operationId, expectedUpdatedAt }),
     });
 
     let response = await publish('preflight-failed-operation-0001');
@@ -2512,7 +2542,7 @@ test('publisher-started all-failed result records uncertain and blocks a new ope
     const publish = operationId => workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId, expectedUpdatedAt }),
+      body: JSON.stringify({ platform: 'zhihu', publishMode: 'draft', operationId, expectedUpdatedAt }),
     });
 
     let response = await publish('publisher-all-failed-operation-0001');
@@ -2566,7 +2596,7 @@ test('publisher response without a definite outcome is persisted as uncertain an
     const publish = operationId => workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId, expectedUpdatedAt }),
+      body: JSON.stringify({ platform: 'zhihu', publishMode: 'draft', operationId, expectedUpdatedAt }),
     });
 
     let response = await publish('indeterminate-response-operation-0001');
@@ -2622,7 +2652,7 @@ test('partial publisher success records completed and replays without another pu
       body: JSON.stringify({
         contentId: fixture.id,
         platforms: ['zhihu', 'juejin'],
-        publishMode: 'direct',
+        publishMode: 'draft',
         operationId,
         expectedUpdatedAt,
       }),
@@ -2638,7 +2668,7 @@ test('partial publisher success records completed and replays without another pu
     assert.equal(replay.cached, true);
     assert.equal(replay.job.status, 'partial_failed');
     assert.deepEqual(replay.job.results.map(item => [item.platform, item.status]), [
-      ['zhihu', 'success'],
+      ['zhihu', 'platform_draft'],
       ['juejin', 'failed'],
     ]);
     assert.equal(publisherCalls, 2);
@@ -2675,7 +2705,7 @@ test('lost completed response persists replay alias and changed alias signature 
     const publish = operationId => workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId, expectedUpdatedAt }),
+      body: JSON.stringify({ platform: 'zhihu', publishMode: 'draft', operationId, expectedUpdatedAt }),
     });
 
     const lostResponse = await publish('lost-response-operation-0001');
@@ -2777,7 +2807,7 @@ test('publish blocks a tampered later snapshot without calling its platform publ
       planStatus: '已排版',
     });
     publishResult = await publishContent(fixture.id, ['zhihu', 'juejin'], {
-      publishMode: 'direct',
+      publishMode: 'draft',
       preflight: async () => null,
       platformPublisher: async (sourceFile, platform) => {
         publisherCalls += 1;
@@ -2795,7 +2825,7 @@ test('publish blocks a tampered later snapshot without calling its platform publ
     assert.equal(publishResult.job.status, 'partial_failed');
     assert.deepEqual(
       publishResult.job.results.map(item => [item.platform, item.status]),
-      [['zhihu', 'success'], ['juejin', 'failed']]
+      [['zhihu', 'platform_draft'], ['juejin', 'failed']]
     );
     assert.match(
       publishResult.job.results.find(item => item.platform === 'juejin').message,
@@ -2853,7 +2883,7 @@ test('second snapshot staging failure leaves no running job or orphan and fails 
       body: JSON.stringify({
         contentId: fixture.id,
         platforms: ['zhihu', 'juejin'],
-        publishMode: 'direct',
+        publishMode: 'draft',
         operationId: 'snapshot-staging-failure-operation-0001',
         expectedUpdatedAt: currentContentUpdatedAt(fixture.id),
       }),
@@ -2994,7 +3024,7 @@ test('preflight-only failures are persisted before the next platform and remain 
       planStatus: '已排版',
     });
     publishResult = await publishContent(fixture.id, ['zhihu', 'juejin'], {
-      publishMode: 'direct',
+      publishMode: 'draft',
       preflight: async platform => {
         preflightCalls += 1;
         if (platform === 'juejin') {
@@ -3087,16 +3117,16 @@ test('publishContent can record one platform without mutating selection or aggre
       planStatus: '选题已确认',
     });
     const result = await publishContent(fixture.id, ['zhihu'], {
-      publishMode: 'direct',
+      publishMode: 'draft',
       persistSelection: false,
       updateAggregateStatus: false,
       preflight: async () => null,
       platformPublisher: successfulPlatformPublisher(),
     });
 
-    assert.equal(result.job.status, 'published');
+    assert.equal(result.job.status, 'draft_saved');
     assert.deepEqual(result.job.platforms, ['zhihu']);
-    assert.deepEqual(result.job.results.map(item => [item.platform, item.status]), [['zhihu', 'success']]);
+    assert.deepEqual(result.job.results.map(item => [item.platform, item.status]), [['zhihu', 'platform_draft']]);
     assert.deepEqual(readPublishState(fixture), {
       selectedPlatforms: ['weixin', 'douyin'],
       contentStatus: '已排版',
@@ -3162,7 +3192,7 @@ test('POST publish-platform records sequential jobs without changing aggregate c
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         platform: 'juejin',
-        publishMode: 'direct',
+        publishMode: 'draft',
         operationId: 'sequential-operation-0002',
         expectedUpdatedAt,
       }),
@@ -3170,7 +3200,7 @@ test('POST publish-platform records sequential jobs without changing aggregate c
     assert.equal(response.status, 200);
     result = await response.json();
     assert.deepEqual(result.job.platforms, ['juejin']);
-    assert.deepEqual(result.job.results.map(item => [item.platform, item.status]), [['juejin', 'success']]);
+    assert.deepEqual(result.job.results.map(item => [item.platform, item.status]), [['juejin', 'platform_draft']]);
     assert.notEqual(result.job.id, firstJobId);
     assert.deepEqual(readPublishState(fixture), {
       selectedPlatforms: ['weixin', 'douyin'],
@@ -3180,7 +3210,7 @@ test('POST publish-platform records sequential jobs without changing aggregate c
     assert.equal(highLevelPublisherCalls, 0);
     assert.deepEqual(platformCalls.map(call => [call.platform, call.publishMode]), [
       ['zhihu', 'draft'],
-      ['juejin', 'direct'],
+      ['juejin', 'draft'],
     ]);
   } finally {
     await closeServer(testServer);
@@ -3221,14 +3251,14 @@ for (const mode of ['single', 'batch']) {
       const payload = mode === 'single'
         ? {
           platform: 'zhihu',
-          publishMode: 'direct',
+          publishMode: 'draft',
           operationId: 'stale-single-admission-0001',
           expectedUpdatedAt,
         }
         : {
           contentId: fixture.id,
           platforms: ['zhihu'],
-          publishMode: 'direct',
+          publishMode: 'draft',
           operationId: 'stale-batch-admission-0001',
           expectedUpdatedAt,
         };
@@ -3277,7 +3307,7 @@ test('single and batch publish endpoints require a nonempty expectedUpdatedAt be
         url: `http://127.0.0.1:${port}/api/content/${fixture.id}/publish-platform`,
         body: {
           platform: 'zhihu',
-          publishMode: 'direct',
+          publishMode: 'draft',
           operationId: 'missing-single-revision-0001',
         },
       },
@@ -3286,7 +3316,7 @@ test('single and batch publish endpoints require a nonempty expectedUpdatedAt be
         body: {
           contentId: fixture.id,
           platforms: ['zhihu'],
-          publishMode: 'direct',
+          publishMode: 'draft',
           operationId: 'missing-batch-revision-0001',
           expectedUpdatedAt: '',
         },
@@ -3354,11 +3384,11 @@ for (const mode of ['single', 'batch']) {
         ? `http://127.0.0.1:${port}/api/content/${fixture.id}/publish-platform`
         : `http://127.0.0.1:${port}/api/publish`;
       const payload = mode === 'single'
-        ? { platform: 'zhihu', publishMode: 'direct', operationId, expectedUpdatedAt }
+        ? { platform: 'zhihu', publishMode: 'draft', operationId, expectedUpdatedAt }
         : {
           contentId: fixture.id,
           platforms: ['zhihu'],
-          publishMode: 'direct',
+          publishMode: 'draft',
           operationId,
           expectedUpdatedAt,
         };
@@ -3388,7 +3418,7 @@ for (const mode of ['single', 'batch']) {
       assert.equal(result.sourceUpdatedAt, expectedUpdatedAt);
       assert.equal(result.content, null);
       assert.equal(result.job.content_id, fixture.id);
-      assert.deepEqual(result.job.results.map(item => [item.platform, item.status]), [['zhihu', 'success']]);
+      assert.deepEqual(result.job.results.map(item => [item.platform, item.status]), [['zhihu', 'platform_draft']]);
       assert.equal(publisherCalls, 1);
       assert.equal(publishedTitle, admitted.title);
       assert.equal(publishedMarkdown, contentToMarkdown(admitted));
@@ -3409,7 +3439,7 @@ for (const mode of ['single', 'batch']) {
       assert.equal(replay.canonicalConflict, true);
       assert.equal(replay.needsReload, true);
       assert.equal(replay.content, null);
-      assert.deepEqual(replay.job.results.map(item => [item.platform, item.status]), [['zhihu', 'success']]);
+      assert.deepEqual(replay.job.results.map(item => [item.platform, item.status]), [['zhihu', 'platform_draft']]);
       assert.equal(publisherCalls, 1);
     } finally {
       releasePublisher?.();
@@ -3468,7 +3498,7 @@ test('POST publish-platform keeps state stable across concurrent single-platform
 
     const responses = await Promise.all([
       request('zhihu', 'draft', 'concurrent-operation-0001'),
-      request('juejin', 'direct', 'concurrent-operation-0002'),
+      request('juejin', 'draft', 'concurrent-operation-0002'),
     ]);
     const payloads = await Promise.all(responses.map(response => response.json()));
 
@@ -3484,7 +3514,7 @@ test('POST publish-platform keeps state stable across concurrent single-platform
       payload.job.platforms[0],
       [payload.job.status, payload.job.results[0].status],
     ])), {
-      juejin: ['published', 'success'],
+      juejin: ['draft_saved', 'platform_draft'],
       zhihu: ['draft_saved', 'platform_draft'],
     });
     assert.deepEqual(readPublishState(fixture), {
@@ -3493,7 +3523,7 @@ test('POST publish-platform keeps state stable across concurrent single-platform
       planStatus: '已排版',
     });
     assert.deepEqual(platformCalls.map(call => [call.platform, call.publishMode]).sort(), [
-      ['juejin', 'direct'],
+      ['juejin', 'draft'],
       ['zhihu', 'draft'],
     ]);
   } finally {
@@ -3539,7 +3569,7 @@ test('POST publish-platform rejects an in-flight duplicate and releases the guar
     const publish = operationId => workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId, expectedUpdatedAt }),
+      body: JSON.stringify({ platform: 'zhihu', publishMode: 'draft', operationId, expectedUpdatedAt }),
     });
 
     const operationId = 'in-flight-operation-0001';
@@ -3567,7 +3597,7 @@ test('POST publish-platform rejects an in-flight duplicate and releases the guar
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         platform: 'juejin',
-        publishMode: 'direct',
+        publishMode: 'draft',
         operationId,
         expectedUpdatedAt,
       }),
@@ -3615,7 +3645,7 @@ test('single publish completed cache expires by TTL and evicts oldest entries wh
     const publish = operationId => workbenchFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ platform: 'zhihu', publishMode: 'direct', operationId, expectedUpdatedAt }),
+      body: JSON.stringify({ platform: 'zhihu', publishMode: 'draft', operationId, expectedUpdatedAt }),
     });
 
     let response = await publish('cache-policy-operation-0001');
@@ -3652,7 +3682,7 @@ test('batch publish journal survives server restart, replays completion, and rej
   const requestBody = {
     contentId: '',
     platforms: ['juejin', 'zhihu'],
-    publishMode: 'direct',
+    publishMode: 'draft',
     operationId,
   };
   const platformPublisher = async (markdownFile, platform) => {
@@ -3692,7 +3722,7 @@ test('batch publish journal survives server restart, replays completion, and rej
     let response = await post(running.endpoint, {
       contentId: fixture.id,
       platforms: ['zhihu'],
-      publishMode: 'direct',
+      publishMode: 'draft',
     });
     assert.equal(response.status, 400);
     assert.match((await response.json()).error, /operationId/);
@@ -3753,8 +3783,8 @@ test('POST publish-platform validates one known platform, mode, body, and conten
       [{ platform: ['zhihu'], publishMode: 'draft', operationId }, /必须且只能指定一个平台/],
       [{ platform: 'zhihu,juejin', publishMode: 'draft', operationId }, /必须且只能指定一个平台/],
       [{ platform: 'unknown-platform', publishMode: 'draft', operationId }, /平台不存在/],
-      [{ platform: 'zhihu', operationId }, /publishMode.*draft.*direct/],
-      [{ platform: 'zhihu', publishMode: 'scheduled', operationId }, /publishMode.*draft.*direct/],
+      [{ platform: 'zhihu', operationId }, /expectedUpdatedAt/],
+      [{ platform: 'zhihu', publishMode: 'scheduled', operationId }, /publishMode.*draft/],
       [{ platform: 'zhihu', publishMode: 'draft' }, /operationId/],
       [{ platform: 'zhihu', publishMode: 'draft', operationId: 'bad operation id' }, /operationId/],
       [[], /JSON 对象/],
@@ -3785,7 +3815,7 @@ test('POST publish-platform validates one known platform, mode, body, and conten
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           platform: 'zhihu',
-          publishMode: 'direct',
+          publishMode: 'draft',
           operationId,
           expectedUpdatedAt: content.updated_at,
         }),
@@ -3861,8 +3891,9 @@ test('POST /api/publish keeps the existing batch publisher contract', async () =
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contentId: fixture.id,
-        platforms: ['weixin'],
+        platforms: ['weixin', 'woshipm', 'sspai'],
         operationId: 'batch-contract-operation-0002',
+        publishMode: 'draft',
         expectedUpdatedAt,
       }),
     });
@@ -3870,11 +3901,36 @@ test('POST /api/publish keeps the existing batch publisher contract', async () =
     assert.equal(response.status, 200);
     assert.equal(result.ok, true);
     assert.equal(highLevelPublisherCalls, 0);
+    assert.equal(result.job.status, 'draft_saved');
+    assert.deepEqual(result.job.results.map(item => [item.platform, item.status]), [
+      ['weixin', 'platform_draft'], ['woshipm', 'platform_draft'], ['sspai', 'platform_draft'],
+    ]);
     assert.deepEqual(platformCalls.map(call => [call.platform, call.publishMode]), [
       ['zhihu', 'draft'],
       ['juejin', 'draft'],
-      ['weixin', 'direct'],
+      ['weixin', 'draft'],
+      ['woshipm', 'draft'],
+      ['sspai', 'draft'],
     ]);
+    for (const platform of ['weixin','woshipm','sspai']) {
+      const blocked=await workbenchFetch(`http://127.0.0.1:${port}/api/publish`, {
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({contentId:fixture.id,platforms:[platform],publishMode:'direct',operationId:`batch-onlydraft-${platform}-0001`,expectedUpdatedAt:currentContentUpdatedAt(fixture.id)}),
+      });
+      assert.equal(blocked.status,400);assert.equal((await blocked.json()).code,'MANUAL_PUBLICATION_REQUIRED');
+    }
+    assert.equal(platformCalls.length,5);
+    const jobsBefore=db.prepare('SELECT COUNT(*) n FROM publish_jobs').get().n;
+    for(const publishMode of ['draft','direct']){
+      const response=await workbenchFetch(`http://127.0.0.1:${port}/api/publish`,{
+        method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contentId:fixture.id,platforms:['uisdc'],publishMode,operationId:`uisdc-manual-${publishMode}-0001`,expectedUpdatedAt:currentContentUpdatedAt(fixture.id)}),
+      });
+      assert.equal(response.status,400);
+      const rejection=await response.json();
+      if(publishMode==='direct') assert.equal(rejection.code,'MANUAL_PUBLICATION_REQUIRED');
+      else assert.match(rejection.error,/手工投稿/);
+    }
+    assert.equal(platformCalls.length,5);assert.equal(db.prepare('SELECT COUNT(*) n FROM publish_jobs').get().n,jobsBefore);
   } finally {
     await closeServer(testServer);
     cleanupPublishStateFixture(fixture);
@@ -4742,7 +4798,7 @@ test('default JSON request bodies are limited to 8 MiB', async () => {
   try {
     testServer = createDashboardServer();
     const port = await listenOnRandomPort(testServer);
-    const response = await workbenchFetch(`http://127.0.0.1:${port}/api/topics/generate`, {
+    const response = await workbenchFetch(`http://127.0.0.1:${port}/api/plans/range`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ date: '2099-01-01', padding: 'a'.repeat(8 * 1024 * 1024) }),
@@ -5750,7 +5806,8 @@ test('POST /api/content/import returns validation and request-size status codes'
     assert.match((await response.json()).error, /请求内容过大/);
 
     response = await post(`http://127.0.0.1:${port}/api/topics/generate`, '{"date":');
-    assert.equal(response.status, 500);
+    assert.equal(response.status, 410);
+    assert.match((await response.json()).error, /旧示例选题接口已停用/);
   } finally {
     for (const title of titles) {
       const rows = db.prepare('SELECT id FROM contents WHERE title = ?').all(title);

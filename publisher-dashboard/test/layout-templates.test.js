@@ -34,6 +34,8 @@ const {
 } = require('../layout-templates');
 
 const TEMPLATE_DIR = path.resolve(__dirname, '../../skills/weixin-layout/templates');
+const TEMPLATE_CATALOG = require('../../skills/weixin-layout/template-catalog.json');
+const PICK_LAYOUT_SCRIPT = path.resolve(__dirname, '../../skills/weixin-layout/scripts/pick_layout.py');
 const requireFromCore = createRequire(path.resolve(__dirname, '../../packages/core/package.json'));
 const { parseHTML } = (() => {
   try {
@@ -116,6 +118,65 @@ function renderedBodyH1Texts(body, title = '正文主标题') {
     .map(element => element.textContent.replace(/\s+/g, ' ').trim());
 }
 
+test('SVG title templates expose HTML text with the original palette and typography', () => {
+  for (const [filename, size, color] of [
+    ['style_4.html', '24px', '#4c1d95'], ['style_7.html', '28px', '#064e3b'],
+    ['style_10.html', '30px', '#0ea5e9'], ['style_13.html', '29px', '#0369a1'],
+  ]) {
+    const input = { title: '多平台排版验收：图文混排效果如何', summary: '导语',
+      body: '<p>图片之前</p><img src="data:image/png;base64,AAAA"><p>图片之后</p>',
+      accountName: '', accountDescription: '' };
+    const doc = parseHTML(renderLayoutTemplate(filename, input)).document;
+    const title = doc.querySelector('[data-wechat-slot="title"]');
+    assert.equal(title.localName, 'h1', filename);
+    assert.equal(title.closest('svg'), null, filename);
+    assert.equal(title.style.getPropertyValue('font-size'), size, filename);
+    assert.equal(title.style.getPropertyValue('color'), color, filename);
+    assert.notEqual(title.style.getPropertyValue('opacity'), '0', filename);
+    for (const svg of doc.querySelectorAll('svg')) svg.remove();
+    assert.equal(doc.querySelector('[data-wechat-slot="title"]').textContent, input.title, filename);
+    assert.match(doc.body.textContent, /图片之前图片之后/);
+    assert.equal(doc.querySelectorAll('img').length, 1);
+  }
+});
+
+test('classical title keeps short vertical copy and wraps longer copy inside its original frame', () => {
+  for (const [text, writingMode] of [['春日来信', 'vertical-rl'], ['多平台排版验收：图文混排效果如何', 'horizontal-tb']]) {
+    const doc = parseHTML(renderLayoutTemplate('template_style13.html', {
+      title: text, summary: '', body: '<p>正文</p>', accountName: '', accountDescription: '',
+    })).document;
+    const title = doc.querySelector('[data-wechat-slot="title"]');
+    assert.equal(title.parentElement.style.getPropertyValue('writing-mode'), writingMode);
+    assert.match(title.parentElement.parentElement.getAttribute('style'), /#d4a574/);
+    assert.equal(title.style.getPropertyValue('color'), '#78350f');
+  }
+});
+
+test('purple SVG template keeps white lead text on its dark card and dark body text on the page', () => {
+  const doc = parseHTML(renderLayoutTemplate('style_4.html', {
+    title: '标题', summary: '深色卡片上的导语', body: '<p>普通正文</p>', accountName: '', accountDescription: '',
+  })).document;
+  const lead = doc.querySelector('[data-wechat-slot="summary"]');
+  const body = [...doc.querySelectorAll('p')].find(node => node.textContent === '普通正文');
+  assert.equal(lead.style.getPropertyValue('color'), '#fff');
+  assert.match(lead.getAttribute('style'), /linear-gradient/);
+  assert.equal(body.style.getPropertyValue('color'), '#374151');
+});
+
+test('layout checker ignores non-visible CSS comments but still checks visible placeholders and resources', () => {
+  const input = path.join(testDataDir, 'static-check.html');
+  const run = body => {
+    fs.writeFileSync(input, `<!doctype html><html><head><style>/* 正文区域 */p{color:red}</style></head><body>${body}</body></html>`);
+    const result = spawnSync('python3', [path.resolve(__dirname, '../../skills/weixin-layout/scripts/check_layout.py'), input], { encoding: 'utf8' });
+    return { status: result.status, ...JSON.parse(result.stdout) };
+  };
+  assert.equal(run('<p>实际文章</p><!-- 示例正文 -->').ok, true);
+  assert.equal(run('<p>正文<strong>区域</strong></p>').status, 2);
+  assert.equal(run('<p>正&#25991;区域</p>').status, 2);
+  assert.match(run('<img src="/Users/example/a.png">').errors.join(' '), /本机绝对路径/);
+  assert.match(run('<img src="https://example.test/a.png">').errors.join(' '), /没有内嵌/);
+});
+
 test('discovers exactly 40 templates with stable safe metadata', () => {
   const first = listLayoutTemplates();
   const second = listLayoutTemplates();
@@ -134,9 +195,89 @@ test('discovers exactly 40 templates with stable safe metadata', () => {
     assert.equal(fs.lstatSync(path.join(TEMPLATE_DIR, template.filename)).isFile(), true);
   }
 
-  assert.equal(first.find(template => template.filename === 'style_10.html').label, '样式 10');
-  assert.equal(first.find(template => template.filename === 'template_style11_杂志分栏风.html').label, '杂志分栏风');
-  assert.equal(first.find(template => template.filename === '专业案例·清爽蓝白.html').label, '专业案例·清爽蓝白');
+  assert.equal(first.find(template => template.filename === 'style_10.html').label, '海蓝渐层·圆角导读');
+  assert.equal(first.find(template => template.filename === 'template_style11_杂志分栏风.html').label, '黑白横线·杂志专栏');
+  // Historical filenames can describe the wrong palette; labels follow actual content.
+  assert.equal(first.find(template => template.filename === '专业案例·清爽蓝白.html').label, '橙线白底·案例笔记');
+  assert.equal(first.find(template => template.filename === '工业质检·清爽绿白.html').label, '蓝线白底·专业解读');
+});
+
+test('catalog covers every file exactly once with 26 descriptive Chinese names', () => {
+  const filenames = listLayoutTemplates().map(template => template.filename);
+  const catalogFiles = TEMPLATE_CATALOG.flatMap(entry => entry.files);
+  assert.equal(TEMPLATE_CATALOG.length, 26);
+  assert.equal(new Set(TEMPLATE_CATALOG.map(entry => entry.label)).size, 26);
+  assert.equal(new Set(catalogFiles).size, catalogFiles.length);
+  assert.deepEqual([...catalogFiles].sort(), filenames);
+
+  for (const entry of TEMPLATE_CATALOG) {
+    assert.deepEqual(Object.keys(entry).sort(), ['description', 'files', 'label']);
+    assert.match(entry.label, /^[\p{Script=Han}]{2,8}·[\p{Script=Han}]{2,8}$/u);
+    assert.doesNotMatch(entry.label, /样式|template|style|\d/i);
+    assert.equal(entry.description, entry.description.trim());
+    assert.match(entry.description, /[\p{Script=Han}]/u);
+    assert.ok(entry.files.length > 0, entry.label);
+    for (const filename of entry.files) {
+      assert.equal(path.basename(filename), filename);
+      assert.equal(path.win32.basename(filename), filename);
+    }
+  }
+});
+
+test('same labels mean identical template bytes and identical bytes always share a label', () => {
+  const labelsByFile = new Map(TEMPLATE_CATALOG.flatMap(entry => entry.files.map(filename => [filename, entry.label])));
+  const hashByLabel = new Map();
+  const labelByHash = new Map();
+  for (const { filename, label } of listLayoutTemplates()) {
+    assert.equal(label, labelsByFile.get(filename), filename);
+    const hash = createHash('sha256').update(fs.readFileSync(path.join(TEMPLATE_DIR, filename))).digest('hex');
+    if (hashByLabel.has(label)) assert.equal(hash, hashByLabel.get(label), `${label}: different content must not merge`);
+    if (labelByHash.has(hash)) assert.equal(label, labelByHash.get(hash), `${filename}: duplicate content needs the same name`);
+    hashByLabel.set(label, hash);
+    labelByHash.set(hash, label);
+  }
+  assert.equal(hashByLabel.size, 26);
+  assert.equal(labelByHash.size, 26);
+});
+
+test('all 40 named templates retain the selected filename in article metadata', () => {
+  const content = {
+    title: '命名兼容检查', summary: '保留既有文章标识', body: '<p>兼容正文</p>',
+    accountName: '', accountDescription: '', generatedAt: '2026-09-05T00:00:00.000Z',
+  };
+  for (const { filename, label } of listLayoutTemplates()) {
+    const html = renderLayoutTemplate(filename, content);
+    assert.deepEqual(inspectLayoutMetadata(html), {
+      template: filename, canonicalHash: canonicalContentHash(content), generatedAt: content.generatedAt,
+    }, filename);
+    assert.ok(!html.includes(label), `Display label leaked into the article: ${filename}`);
+  }
+});
+
+test('Python picker shares catalog names while preserving filename path size and seeded choices', () => {
+  const run = args => {
+    const result = spawnSync('python3', [PICK_LAYOUT_SCRIPT, ...args], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr || result.error?.message);
+    return result.stdout;
+  };
+  const templates = listLayoutTemplates();
+  for (const { filename, label } of templates) {
+    const result = JSON.parse(run(['--template', filename, '--json']));
+    assert.deepEqual(result, {
+      filename, path: path.join(TEMPLATE_DIR, filename),
+      size: fs.statSync(path.join(TEMPLATE_DIR, filename)).size, label,
+    });
+  }
+  const [heading, ...mappings] = run(['--list']).trimEnd().split('\n');
+  assert.equal(heading, '共 40 个模板文件，26 种排版');
+  assert.deepEqual(mappings, templates.map(({ filename, label }) => `${label}\t${filename}`));
+  // Recorded from the original picker before adding labels; random selection stays file-based.
+  for (const [seed, expected] of [[0, '制造白皮书·浅灰阅读.html'], [20260905, '通用排版·基础样式.html']]) {
+    const selected = JSON.parse(run(['--seed', String(seed), '--json']));
+    assert.equal(selected.filename, expected);
+    assert.equal(selected.label, templates.find(template => template.filename === expected).label);
+    assert.deepEqual(JSON.parse(run(['--seed', String(seed)])), selected);
+  }
 });
 
 test('rejects traversal, missing files, and non-template names', () => {
@@ -568,13 +709,14 @@ test('preserves the rich-media SVG title shell but removes unrelated sample diag
   });
   const { document } = parseHTML(html);
   const content = document.querySelector('#js_content');
-  const title = content?.querySelector(':scope > section svg [data-wechat-slot="title"]');
-  const titleShell = title?.closest('section');
+  const title = content?.querySelector(':scope > section [data-wechat-slot="title"]');
+  const titleShell = title?.closest('section')?.parentElement;
 
   assert.ok(content);
   assert.ok(titleShell);
   assert.equal(titleShell.parentElement, content);
-  assert.equal(title.localName, 'text');
+  assert.equal(title.localName, 'h1');
+  assert.equal(title.closest('svg'), null);
   assert.equal(title.textContent, 'SVG 主题真实标题');
   assert.ok(titleShell.querySelector('svg circle'), '首屏 SVG 圆形装饰被删除');
   assert.equal(content.querySelectorAll('svg').length, 1, '保留了正文中的无关示例 SVG');

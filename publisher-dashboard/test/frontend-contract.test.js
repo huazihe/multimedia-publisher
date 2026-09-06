@@ -26,6 +26,17 @@ const { parseHTML } = (() => {
 })();
 const { document } = parseHTML(indexSource);
 
+test('keeps a compact creator brand with a writing mascot and matching tab icon', () => {
+  assert.equal(document.querySelector('title').textContent, '创作者工作台');
+  assert.equal(document.querySelector('.brand-copy').textContent.trim(), '创作者工作台');
+  const logo=document.querySelector('.brand-mascot');
+  assert.ok(logo);assert.match(logo.getAttribute('src'), /creator-writing-mascot\.png/);
+  assert.equal(document.querySelector('link[rel="icon"]').getAttribute('href'),logo.getAttribute('src'));
+  assert.equal(document.querySelector('.brand-mark'),null);
+  assert.equal(document.querySelector('.workspace-utility-note'),null);
+  assert.doesNotMatch(indexSource,/留心创作|安心分发/);
+});
+
 function extractFunctionSource(source, name, nextName) {
   const start = source.indexOf(`function ${name}(`);
   const end = source.indexOf(`\nfunction ${nextName}(`, start);
@@ -48,10 +59,20 @@ test('keeps the six dynamic dashboard views and delegated navigation contract', 
   assert.match(appSource, /async function loadData\s*\(/);
   assert.match(appSource, /document\.addEventListener\(['"]click['"]/);
   assert.match(appSource, /toggle-sidebar/);
-  assert.match(appSource, /toggle-employee-menu/);
+  assert.doesNotMatch(appSource, /toggle-employee-menu|select-employee|const EMPLOYEES/);
   assert.match(appSource, /start-login/);
   assert.match(appSource, /publish-selected/);
   assert.match(appSource, /data-history-filter/);
+});
+
+test('the sidebar owns its icon-only collapse control and has no virtual employees',()=>{
+  const toggle=document.querySelector('[data-action="toggle-sidebar"]');
+  assert.ok(toggle.closest('#workspace-navigation'));
+  assert.equal(toggle.textContent.trim(),'');assert.ok(toggle.querySelector('svg'));
+  assert.equal(toggle.getAttribute('aria-controls'),'workspace-navigation');
+  assert.equal(document.querySelector('.workspace-utility-bar'),null);
+  assert.equal(document.querySelector('[data-employee-picker]'),null);
+  assert.ok(document.querySelector('#publish-recovery-dialog'));
 });
 
 test('defines an accessible semantic import dialog for paste and local text files', () => {
@@ -61,7 +82,7 @@ test('defines an accessible semantic import dialog for paste and local text file
   assert.ok(document.querySelector('#import-dialog-title'));
 
   const tabs = [...dialog.querySelectorAll('[role="tab"][data-import-tab]')];
-  assert.deepEqual(tabs.map(tab => tab.dataset.importTab), ['paste', 'file']);
+  assert.deepEqual(tabs.map(tab => tab.dataset.importTab), ['paste', 'file', 'feishu']);
   assert.deepEqual(tabs.map(tab => ({
     id: tab.id,
     selected: tab.getAttribute('aria-selected'),
@@ -70,6 +91,7 @@ test('defines an accessible semantic import dialog for paste and local text file
   })), [
     { id: 'import-paste-tab', selected: 'true', controls: 'import-paste-panel', tabIndex: '0' },
     { id: 'import-file-tab', selected: 'false', controls: 'import-file-panel', tabIndex: '-1' },
+    { id: 'import-feishu-tab', selected: 'false', controls: 'import-feishu-panel', tabIndex: '-1' },
   ]);
   const panels = [...dialog.querySelectorAll('[role="tabpanel"]')];
   assert.deepEqual(panels.map(panel => ({
@@ -79,6 +101,7 @@ test('defines an accessible semantic import dialog for paste and local text file
   })), [
     { id: 'import-paste-panel', labelledBy: 'import-paste-tab', hidden: false },
     { id: 'import-file-panel', labelledBy: 'import-file-tab', hidden: true },
+    { id: 'import-feishu-panel', labelledBy: 'import-feishu-tab', hidden: true },
   ]);
 
   const title = dialog.querySelector('#import-title-input');
@@ -185,10 +208,13 @@ test('implements roving tabindex and keyboard navigation for import and platform
       tab.getAttribute('aria-selected'),
       tab.getAttribute('tabindex'),
     ]),
-    [['false', '-1'], ['true', '0']],
+    [['false', '-1'], ['true', '0'], ['false', '-1']],
   );
   assert.equal(importDocument.querySelector('#import-paste-panel').hidden, true);
   assert.equal(importDocument.querySelector('#import-file-panel').hidden, false);
+  setImportTab('feishu');
+  assert.equal(importDocument.querySelector('#import-file-panel').hidden, true);
+  assert.equal(importDocument.querySelector('#import-feishu-panel').hidden, false);
 
   const handleSource = extractFunctionSource(appSource, 'handleTablistKeydown', 'setImportFeedback');
   assert.ok(handleSource);
@@ -231,11 +257,13 @@ test('implements roving tabindex and keyboard navigation for import and platform
 function renderPlatformWorkspace(activePlatform) {
   const source = extractFunctionSource(appSource, 'platformAdaptationHtml', 'platformPaneFocusKey');
   assert.ok(source);
-  const featured = ['weixin', 'zhihu', 'juejin', 'xiaohongshu', 'toutiao'];
+  const featured = ['weixin', 'woshipm', 'sspai', 'xiaohongshu', 'uisdc', 'douyin'];
   const platforms = [...featured, 'csdn'].map(id => ({ id, name: id === 'csdn' ? 'CSDN' : id }));
   const render = vm.runInNewContext(`(${source})`, {
     state: { activePreviewPlatform: activePlatform, data: { platforms }, previewDevice: 'desktop' },
     FEATURED_PREVIEW_PLATFORMS: featured,
+    UISDC_SUBMISSION_URL: 'https://www.uisdc.com/contribution?type=post',
+    sortLoginPlatforms: items => items,
     ensureActivePreviewPlatform: () => {},
     previewPlatformRecord: id => platforms.find(platform => platform.id === id),
     platformTabId: id => `platform-preview-tab-${id}`,
@@ -244,28 +272,60 @@ function renderPlatformWorkspace(activePlatform) {
     platformAvatar: () => '',
     wechatTemplateControls: () => '<div>微信模板</div>',
     platformPreviewResult: () => '<div>预览</div>',
+    platformPreparationMode: id => ['uisdc','jianshu','netease'].includes(id) ? 'manual' : ['xiaohongshu','toutiao','douban'].includes(id) ? 'editor' : ['douyin','qiehao'].includes(id) ? 'draft-text' : 'draft',
+    platformHandoffResult: () => null,
   });
   return parseHTML(`<main>${render({ id: 'content-1' })}</main>`).document;
 }
 
-test('keeps exactly five featured platform tabs when another platform is selected', () => {
-  const featured = ['weixin', 'zhihu', 'juejin', 'xiaohongshu', 'toutiao'];
+test('keeps six featured platform tabs when another platform is selected', () => {
+  const featured = ['weixin', 'woshipm', 'sspai', 'xiaohongshu', 'uisdc', 'douyin'];
   const documentWithOther = renderPlatformWorkspace('csdn');
   const tabs = [...documentWithOther.querySelectorAll('.platform-preview-tabs [role="tab"]')];
   assert.deepEqual(tabs.map(tab => tab.dataset.platform), featured);
-  assert.equal(tabs.length, 5);
+  assert.equal(tabs.length, featured.length);
   assert.equal(tabs.filter(tab => tab.getAttribute('aria-selected') === 'true').length, 0);
   assert.deepEqual(tabs.filter(tab => tab.getAttribute('tabindex') === '0').map(tab => tab.dataset.platform), ['weixin']);
   assert.equal(documentWithOther.querySelector('[data-platform-preview-select] option[selected]')?.value, 'csdn');
   assert.match(documentWithOther.querySelector('.platform-adaptation-head h2').textContent, /CSDN/);
   assert.equal(documentWithOther.querySelector('#platform-preview-panel').getAttribute('aria-label'), 'CSDN 平台适配预览');
 
-  const documentWithFeatured = renderPlatformWorkspace('zhihu');
+  const documentWithFeatured = renderPlatformWorkspace('woshipm');
   const featuredTabs = [...documentWithFeatured.querySelectorAll('.platform-preview-tabs [role="tab"]')];
-  assert.equal(featuredTabs.length, 5);
-  assert.deepEqual(featuredTabs.filter(tab => tab.getAttribute('aria-selected') === 'true').map(tab => tab.dataset.platform), ['zhihu']);
-  assert.deepEqual(featuredTabs.filter(tab => tab.getAttribute('tabindex') === '0').map(tab => tab.dataset.platform), ['zhihu']);
-  assert.equal(documentWithFeatured.querySelector('#platform-preview-panel').getAttribute('aria-labelledby'), 'platform-preview-tab-zhihu');
+  assert.equal(featuredTabs.length, featured.length);
+  assert.deepEqual(featuredTabs.filter(tab => tab.getAttribute('aria-selected') === 'true').map(tab => tab.dataset.platform), ['woshipm']);
+  assert.deepEqual(featuredTabs.filter(tab => tab.getAttribute('tabindex') === '0').map(tab => tab.dataset.platform), ['woshipm']);
+  assert.equal(documentWithFeatured.querySelector('#platform-preview-panel').getAttribute('aria-labelledby'), 'platform-preview-tab-woshipm');
+});
+
+test('uisdc offers the official manual submission entry without fake draft or direct actions', () => {
+  const doc=renderPlatformWorkspace('uisdc');
+  assert.equal(doc.querySelector('[data-action="open-platform-session"]').getAttribute('data-url'),'https://www.uisdc.com/contribution?type=post');
+  assert.equal(doc.querySelector('[data-action="open-platform-draft"]'),null);
+  assert.equal(doc.querySelector('[data-action="open-platform-direct"]'),null);
+  assert.match(doc.querySelector('#platform-delivery-note').textContent,/手工投稿|官方表单/);
+});
+
+test('keeps draft operations ahead of the preview and hands final publication to the user', () => {
+  const doc=renderPlatformWorkspace('woshipm');
+  const children=[...doc.querySelector('#platform-preview-panel').children];
+  assert.ok(children.findIndex(e=>e.classList.contains('platform-publish-actions'))<children.findIndex(e=>e.hasAttribute('data-platform-preview-live')));
+  assert.equal(doc.querySelector('[data-action="open-platform-direct"]'),null);
+  const handoff=doc.querySelector('[data-action="open-platform-session"]');
+  assert.equal(handoff.textContent,'检查草稿并发表');assert.equal(handoff.hasAttribute('disabled'),true);
+  assert.match(doc.querySelector('#platform-delivery-note').textContent,/不会公开发表/);
+});
+
+test('woshipm iframe has its own responsive reading canvas without restyling WeChat templates', () => {
+  const source=extractFunctionSource(appSource,'platformPreviewDocument','wechatTemplateControls');
+  const render=vm.runInNewContext(`(${source})`,{escapeHtml:s=>String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;'),platformName:p=>p});
+  const input={format:'html',htmlPreview:'<p>原稿</p><img src="/uploads/example.png">'};
+  const doc=parseHTML(render(input,'woshipm')).document;
+  const html=doc.querySelector('iframe').getAttribute('srcdoc');
+  assert.match(html,/class="workbench-reading-column"/);assert.match(html,/max-width:100%!important/);assert.match(html,/height:auto!important/);
+  assert.ok(!/overflow-x:hidden/.test(html));
+  const wechat=parseHTML(render(input,'weixin')).document.querySelector('iframe').getAttribute('srcdoc');
+  assert.equal(wechat,input.htmlPreview);
 });
 
 test('restores focus for platform selector, device controls, and featured tabs after rerender', () => {
@@ -343,7 +403,7 @@ test('implements import, lazy adaptation preview, templated WeChat layout, and s
   assert.match(appSource, /const sourceFilename\s*=\s*state\.importTab === ['"]file['"]\s*\?\s*state\.importFileName\s*:\s*['"]/);
   assert.doesNotMatch(appSource, /new FormData\s*\(/, '原始文件不得作为 multipart 上传');
 
-  assert.match(appSource, /FEATURED_PREVIEW_PLATFORMS\s*=\s*\[['"]weixin['"],\s*['"]zhihu['"],\s*['"]juejin['"],\s*['"]xiaohongshu['"],\s*['"]toutiao['"]\]/);
+  assert.match(appSource, /FEATURED_PREVIEW_PLATFORMS\s*=\s*\[['"]weixin['"],\s*['"]woshipm['"],\s*['"]sspai['"],\s*['"]xiaohongshu['"],\s*['"]uisdc['"],\s*['"]douyin['"]\]/);
   assert.match(appSource, /allPlatforms\.map\(/, '全部平台下拉框必须由完整平台数据动态生成');
   assert.match(appSource, /data-platform-preview-select/);
   assert.match(appSource, /data-preview-device=["']desktop["']/);
@@ -360,7 +420,7 @@ test('implements import, lazy adaptation preview, templated WeChat layout, and s
   assert.match(appSource, /mode:\s*['"]direct['"]/);
   assert.match(appSource, /operationId:\s*operation\.operationId/);
   assert.match(appSource, /platform-publish-dialog['"]\)\.close\(\)[\s\S]*?await loadData\(\)/, '发布成功必须先关闭确认框再刷新数据');
-  assert.match(appSource, /发布成功，但列表刷新失败/);
+  assert.match(appSource, /同步结果已返回，但列表刷新失败/);
   assert.match(appSource, /workbenchCsrfToken/);
   assert.match(appSource, /X-Workbench-CSRF/);
   assert.match(appSource, /state\.workbenchCsrfToken\s*=\s*res\.data\.csrfToken/);
@@ -405,4 +465,30 @@ test('keeps the browser JavaScript syntactically valid', () => {
 test('browser consumes server-normalized canonical HTML without an ad-hoc Markdown parser', () => {
   assert.doesNotMatch(appSource, /function\s+markdownToEditableHtml\s*\(/);
   assert.match(appSource, /sanitizeClientCanonicalHtml\(`\$\{body\}\$\{contentImagesHtml/);
+});
+
+test('platform preview distinguishes relative image references and pending table conversion', () => {
+  const fnSource = extractFunctionSource(appSource, 'platformPreviewResult', 'platformAdaptationHtml');
+  assert.ok(fnSource);
+  const key = 'content::revision::woshipm';
+  const run = (html, platform = 'woshipm') => {
+    const preview = { title: '文章', format: 'html', htmlPreview: html, article: { html }, warnings: [], imageCount: 1 };
+    const fn = vm.runInNewContext(`(${fnSource})`, {
+      state: { previewCache: new Map([[key, preview]]), previewErrors: new Map(), previewLoading: new Set(), previewDevice: 'desktop' },
+      platformPreviewKey: () => key,
+      platformName: id => id,
+      escapeHtml: value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
+      previewLimitChips: () => '1 个图片引用',
+      platformPreviewDocument: () => '<p>预览</p>',
+    });
+    return fn({ id: 'content' }, platform);
+  };
+  const local = run('<table><tr><td>内容</td></tr></table><img src="%E6%8F%92%E5%9B%BE/local.png">');
+  assert.match(local, /1 个本地或相对图片引用/);
+  assert.match(local, /尚未将表格转成图片/);
+  assert.match(local, /已保存母稿的适配结果/);
+  const remote = run('<p>正文</p><img src="https://example.com/image.png">');
+  assert.doesNotMatch(remote, /本地或相对图片引用|尚未将表格转成图片/);
+  assert.match(remote, /图片可用性与平台最终效果仍需核对/);
+  assert.doesNotMatch(run('<table><tr><td>内容</td></tr></table>', 'zhihu'), /尚未将表格转成图片/);
 });

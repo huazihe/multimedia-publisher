@@ -4,12 +4,15 @@ import fs from 'fs'
 import juice from 'juice'
 import ora from 'ora'
 import path from 'path'
+import { createRequire } from 'node:module'
 import {
   adapterRegistry,
+  createTurndownService,
   htmlToMarkdown,
   markdownToHtml,
   prepareArticleForPlatform,
   registerDefaultAdapters,
+  TurndownService,
   type Article,
   type PlatformPreparedArticle,
   type SyncResult,
@@ -51,12 +54,6 @@ export interface DirectPreviewOptions {
 }
 
 type DirectArticleOptions = Pick<DirectPreviewOptions, 'title' | 'cover'>
-
-interface LocalImage {
-  originalRef: string
-  localPath: string
-  absolutePath: string
-}
 
 const MIME_TYPES: Record<string, string> = {
   '.png': 'image/png',
@@ -291,7 +288,7 @@ function parseMarkdown(content: string): ParsedContent {
   let title: string | null = null
   let body = content
 
-  const yamlMatch = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n/)
+  const yamlMatch = content.match(/^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/)
   if (yamlMatch) {
     title = parseFrontMatterTitle(yamlMatch[1])
     body = content.slice(yamlMatch[0].length)
@@ -305,10 +302,11 @@ function parseMarkdown(content: string): ParsedContent {
     }
   }
 
-  body = body.trim()
+  // Leading indentation is Markdown syntax, including an indented image-code example.
+  body = body.replace(/^(?:[ \t]*\r?\n)+|(?:\r?\n[ \t]*)+$/g, '')
   return {
     title,
-    content: body || content,
+    content: body.trim() ? body : content,
     format: 'markdown',
   }
 }
@@ -339,6 +337,123 @@ function parseFrontMatterTitle(frontMatter: string): string | null {
   return legacyTitle ? legacyTitle[1].trim() : value
 }
 
+// Reuse Juice's installed parsers so the CLI does not need another parser dependency.
+const requireFromJuice = createRequire(createRequire(import.meta.url).resolve('juice'))
+const { load: loadHtml } = requireFromJuice('cheerio')
+const cssParser = requireFromJuice('mensch')
+
+interface CssDeclaration { type: string; name: string; value: string }
+interface CssRule { type: string; name?: string; rules?: CssRule[]; selectors?: string[]; declarations?: CssDeclaration[] }
+
+function safeCss(css: string, inline = false, mobileTemplate = false): string {
+  // Decode escapes before checking tokens (e.g. u\\72l / expre/**/ssion).
+  const decoded = css.replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\\([\da-f]{1,6})\s?|\\([^\r\n])/gi, (_, hex: string, char: string) =>
+      hex ? String.fromCodePoint(Math.min(parseInt(hex, 16), 0x10ffff)) : char)
+  const safeFunctions = new Set([
+    'rgb', 'rgba', 'hsl', 'hsla', 'hwb', 'lab', 'lch', 'oklab', 'oklch', 'color', 'color-mix',
+    'linear-gradient', 'radial-gradient', 'conic-gradient', 'repeating-linear-gradient',
+    'repeating-radial-gradient', 'calc', 'min', 'max', 'clamp', 'var', 'env',
+    'translate', 'translatex', 'translatey', 'translate3d', 'scale', 'scalex', 'scaley',
+    'rotate', 'skew', 'matrix', 'cubic-bezier', 'steps', 'repeat', 'minmax', 'fit-content',
+  ])
+  const allowed = (declaration: CssDeclaration) => {
+    const { name, value } = declaration
+    return declaration.type === 'property'
+      && /^(?:--)?[a-z-][a-z\d-]*$/i.test(name)
+      && !/^(?:behavior|-moz-binding|content)$/i.test(name)
+      && !/[<>@{}\\\u0000-\u001f\u007f]/.test(value)
+      && !/(?:javascript|vbscript)\s*:/i.test(value)
+      && [...value.matchAll(/([\w-]+)\s*\(/g)].every(match => safeFunctions.has(match[1].toLowerCase()))
+  }
+  try {
+    const ast = cssParser.parse(inline ? `x{${decoded}}` : decoded)
+    const flatten = (rules: CssRule[]): CssRule[] => rules.flatMap(rule => {
+      if (rule.type === 'rule' && rule.selectors?.every(selector => !/[<@{}]/.test(selector))) return [rule]
+      // WeChat discards media queries. Generated templates use a 390px phone snapshot,
+      // including their own small-screen overrides, rather than the desktop headline size.
+      const width = rule.type === 'media' && rule.name?.match(/^(?:(?:only\s+)?(?:screen|all)\s+and\s+)?\(\s*(min|max)-width\s*:\s*([\d.]+)px\s*\)$/i)
+      if (mobileTemplate && width && (width[1].toLowerCase() === 'max' ? 390 <= +width[2] : 390 >= +width[2])) {
+        return flatten(rule.rules || [])
+      }
+      return []
+    })
+    const rules = flatten(ast.stylesheet.rules)
+    // @import, font faces, animations and unsupported conditions are never preserved.
+    for (const rule of rules) rule.declarations = (rule.declarations || []).filter(allowed)
+    if (inline) return (rules[0]?.declarations || []).map(item => `${item.name}:${item.value}`).join(';')
+    ast.stylesheet.rules = rules
+    return cssParser.stringify(ast)
+  } catch {
+    return ''
+  }
+}
+
+function localStylesheet(href: string, filePath: string, mobileTemplate: boolean): string {
+  try {
+    const reference = decodeURIComponent(href.trim().split(/[?#]/)[0])
+    if (!reference || /[\u0000-\u0020\\]/.test(reference)
+      || /^(?:[a-z][\w+.-]*:|\/)/i.test(reference) || path.extname(reference).toLowerCase() !== '.css') return ''
+    const directory = fs.realpathSync(path.dirname(filePath))
+    const target = fs.realpathSync(path.resolve(directory, reference))
+    const relative = path.relative(directory, target)
+    if (relative.startsWith(`..${path.sep}`) || relative === '..' || path.isAbsolute(relative)) return ''
+    const stat = fs.statSync(target)
+    if (!stat.isFile() || stat.size > 1024 * 1024) return ''
+    return safeCss(fs.readFileSync(target, 'utf8'), false, mobileTemplate)
+  } catch {
+    return ''
+  }
+}
+
+function inlineHtmlStyles(content: string, filePath: string): string {
+  const $ = loadHtml(content)
+  const mobileTemplate = $('[data-wechat-template-root="true"]').length > 0
+  $('link').each((_: number, node: unknown) => {
+    const link = $(node)
+    const css = /(?:^|\s)stylesheet(?:\s|$)/i.test(link.attr('rel') || '')
+      ? localStylesheet(link.attr('href') || '', filePath, mobileTemplate) : ''
+    if (css && (!link.attr('media') || link.attr('media').toLowerCase() === 'all')) {
+      link.replaceWith($('<style></style>').text(css))
+    } else link.remove()
+  })
+  // Head nodes must not be able to inject body markup or fetch resources when serialized.
+  $('script,base,iframe,object,embed,template,noscript,meta[http-equiv]').remove()
+  $('style').each((_: number, node: unknown) => {
+    const style = $(node)
+    if (style.attr('media') && style.attr('media').toLowerCase() !== 'all') style.remove()
+    else style.text(safeCss(style.text(), false, mobileTemplate))
+  })
+  const cleanInline = () => $('[style]').each((_: number, node: unknown) => {
+    const element = $(node)
+    element.attr('style', safeCss(element.attr('style') || '', true))
+  })
+  cleanInline()
+  // Inline against the complete DOM: head styles and html/body selectors still exist here.
+  juice.juiceDocument($, {
+    removeStyleTags: true,
+    preserveImportant: true,
+    preserveMediaQueries: false,
+    preserveFontFaces: false,
+    preserveKeyFrames: false,
+    preservePseudos: false,
+    inlinePseudoElements: false,
+    resolveCSSVariables: true,
+    applyAttributesTableElements: false,
+    applyWidthAttributes: false,
+    applyHeightAttributes: false,
+  })
+  cleanInline()
+  $('style,link').remove()
+  let body = $('body').html() || ''
+  // Keep inherited page presentation when the platform strips the document shell.
+  for (const tag of ['body', 'html']) {
+    const style = $(tag).attr('style')
+    if (style) body = $('<section></section>').attr('style', style).html(body).toString()
+  }
+  return body.trim()
+}
+
 function parseHtml(content: string, filePath: string): ParsedContent {
   const titleMatch = content.match(/<title[^>]*>([^<]+)<\/title>/i)
   const h1Match = content.match(/<h1[^>]*>([^<]+)<\/h1>/i)
@@ -350,31 +465,7 @@ function parseHtml(content: string, filePath: string): ParsedContent {
     || content.match(/<meta\s[^>]*content=["']([^"']+)["'][^>]*name=["']description["'][^>]*>/i)
     || content.match(/<meta\s[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["'][^>]*>/i)
 
-  const fileDir = path.dirname(filePath)
-  content = content.replace(
-    /<link\s[^>]*rel=["']stylesheet["'][^>]*href=["']([^"']+)["'][^>]*\/?>/gi,
-    (match, href: string) => {
-      if (href.startsWith('http://') || href.startsWith('https://')) return match
-      const cssPath = path.resolve(fileDir, href)
-      return fs.existsSync(cssPath)
-        ? `<style>${fs.readFileSync(cssPath, 'utf-8')}</style>`
-        : match
-    }
-  )
-
-  const bodyMatch = content.match(/<body[^>]*>([\s\S]*?)<\/body>/i)
-  let body = bodyMatch ? bodyMatch[1].trim() : content
-
-  try {
-    body = juice(body, {
-      removeStyleTags: true,
-      preserveImportant: true,
-      preserveMediaQueries: false,
-      preserveFontFaces: false,
-    })
-  } catch {
-    // Keep original HTML if CSS inlining fails.
-  }
+  const body = inlineHtmlStyles(content, filePath)
 
   if (!title) title = path.basename(filePath, path.extname(filePath))
 
@@ -387,39 +478,6 @@ function parseHtml(content: string, filePath: string): ParsedContent {
   }
 }
 
-function findLocalImages(content: string, basePath: string): LocalImage[] {
-  const images: LocalImage[] = []
-  const seen = new Set<string>()
-  const addImage = (originalRef: string, localPath: string) => {
-    if (
-      seen.has(localPath)
-      || localPath.startsWith('http://')
-      || localPath.startsWith('https://')
-      || localPath.startsWith('data:')
-    ) return
-
-    seen.add(localPath)
-    images.push({
-      originalRef,
-      localPath,
-      absolutePath: path.resolve(basePath, localPath),
-    })
-  }
-
-  let match
-  const mdImageRegex = /!\[[^\]]*\]\(([^)]+)\)/g
-  while ((match = mdImageRegex.exec(content)) !== null) {
-    addImage(match[0], match[1].trim())
-  }
-
-  const htmlImageRegex = /<img[^>]+src=["']([^"']+)["'][^>]*>/gi
-  while ((match = htmlImageRegex.exec(content)) !== null) {
-    addImage(match[0], match[1].trim())
-  }
-
-  return images
-}
-
 function readImageAsDataUri(imagePath: string): string | null {
   if (!fs.existsSync(imagePath)) return null
   const ext = path.extname(imagePath).toLowerCase()
@@ -429,7 +487,10 @@ function readImageAsDataUri(imagePath: string): string | null {
 }
 
 function resolveLocalImagePath(localPath: string, basePath: string): string {
-  const normalized = localPath.replace(/\\/g, '/').split(/[?#]/)[0]
+  // Markdown renderers encode Unicode/spaces; HTML parsers already decode attribute entities.
+  const reference = localPath.replace(/\\/g, '/').split(/[?#]/)[0]
+  let normalized = reference
+  try { normalized = decodeURIComponent(reference) } catch { /* Keep literal percent filenames. */ }
 
   if (normalized.startsWith('/uploads/')) {
     return path.resolve(basePath, '..', normalized.slice(1))
@@ -439,8 +500,8 @@ function resolveLocalImagePath(localPath: string, basePath: string): string {
     return path.resolve(basePath, '..', normalized)
   }
 
-  if (path.isAbsolute(localPath)) return localPath
-  return path.resolve(basePath, localPath)
+  if (path.isAbsolute(normalized)) return normalized
+  return path.resolve(basePath, normalized)
 }
 
 function convertLocalImagesToDataUri(
@@ -448,17 +509,37 @@ function convertLocalImagesToDataUri(
   basePath: string,
   onMissingImage?: (localPath: string) => void
 ): string {
-  let processedContent = content
-  for (const image of findLocalImages(content, basePath)) {
-    const absolutePath = resolveLocalImagePath(image.localPath, basePath)
-    const dataUri = readImageAsDataUri(absolutePath)
-    if (!dataUri) {
-      onMissingImage?.(image.localPath)
-      continue
+  // Only HTML enters this function. Markdown code/escapes are resolved by its renderer,
+  // not by a regex scanning source text for image-looking strings.
+  const $ = loadHtml(content, {}, false)
+  const literals = new Set(['pre', 'code', 'template', 'noscript', 'script', 'style',
+    'textarea', 'xmp', 'iframe', 'noembed', 'noframes', 'plaintext', 'svg', 'math'])
+  const resolved = new Map<string, string | null>()
+  let changed = false
+  const visit = (node: { name?: string; children?: unknown[] }) => {
+    // Do not use .parents('template'): parse5 puts template children in a detached fragment.
+    if (node.name && literals.has(node.name.toLowerCase())) return
+    if (node.name === 'img') {
+      const image = $(node)
+      const source = String(image.attr('src') || '').trim()
+      if (!source || /[\u0000-\u001f\u007f]/.test(source)
+        || /^(?:[a-z][\w+.-]*:|[\\/]{2}|[?#])/i.test(source)) return
+      const absolutePath = resolveLocalImagePath(source, basePath)
+      if (!resolved.has(absolutePath)) {
+        const dataUri = readImageAsDataUri(absolutePath)
+        resolved.set(absolutePath, dataUri)
+        if (!dataUri) onMissingImage?.(source)
+      }
+      const dataUri = resolved.get(absolutePath)
+      if (dataUri) {
+        image.attr('src', dataUri)
+        changed = true
+      }
     }
-    processedContent = processedContent.replace(image.localPath, dataUri)
+    for (const child of node.children || []) visit(child as typeof node)
   }
-  return processedContent
+  visit($.root().get(0))
+  return changed ? $.html() : content
 }
 
 function resolveCover(cover: string | undefined, basePath: string): string | undefined {
@@ -467,6 +548,35 @@ function resolveCover(cover: string | undefined, basePath: string): string | und
   const dataUri = readImageAsDataUri(absolutePath)
   if (!dataUri) throw new Error(`灏侀潰鍥炬枃浠朵笉瀛樺湪鎴栨牸寮忎笉鏀寔: ${absolutePath}`)
   return dataUri
+}
+
+function htmlToMarkdownPreservingCode(html: string): string {
+  if (!/<(?:pre|code)\b/i.test(html)) return htmlToMarkdown(html)
+  // The core regex fallback strips HTML-looking text after extracting a code block.
+  // Use its existing DOM converter and preserve literal code with Turndown's code rules.
+  const converter = createTurndownService()
+  const codeConverter = new TurndownService({ codeBlockStyle: 'fenced' })
+  converter.addRule('literalCode', {
+    filter: ['pre', 'code'],
+    replacement: (_content, node) => {
+      const code = codeConverter.turndown((node as HTMLElement).outerHTML)
+      return node.nodeName === 'PRE' ? `\n\n${code}\n\n` : code
+    },
+  })
+  return converter.turndown(html)
+}
+
+function prepareDirectArticleForPlatform(article: Article, platform: string): PlatformPreparedArticle {
+  const prepared = prepareArticleForPlatform(article, platform)
+  if (prepared.format === 'text' || !/<(?:pre|code)\b/i.test(prepared.article.html || '')) return prepared
+  const markdown = htmlToMarkdownPreservingCode(prepared.article.html || '')
+  return {
+    ...prepared,
+    content: prepared.format === 'markdown' ? markdown : prepared.content,
+    // This is already platform-sanitized HTML with the original code text intact.
+    htmlPreview: prepared.format === 'markdown' ? prepared.article.html! : prepared.htmlPreview,
+    article: { ...prepared.article, markdown },
+  }
 }
 
 function buildArticle(
@@ -481,12 +591,12 @@ function buildArticle(
   }
 
   const basePath = path.dirname(filePath)
-  const markdown = parsed.format === 'markdown'
-    ? convertLocalImagesToDataUri(parsed.content, basePath, onMissingImage)
-    : htmlToMarkdown(convertLocalImagesToDataUri(parsed.content, basePath, onMissingImage))
-  const html = parsed.format === 'html'
-    ? convertLocalImagesToDataUri(parsed.content, basePath, onMissingImage)
-    : convertLocalImagesToDataUri(markdownToHtml(parsed.content), basePath, onMissingImage)
+  const html = convertLocalImagesToDataUri(
+    parsed.format === 'html' ? parsed.content : markdownToHtml(parsed.content),
+    basePath,
+    onMissingImage
+  )
+  const markdown = htmlToMarkdownPreservingCode(html)
 
   return {
     title,
@@ -503,7 +613,7 @@ export function buildPlatformPreview(
   options: Pick<DirectPreviewOptions, 'title' | 'cover'> = {}
 ): PlatformPreparedArticle {
   const article = buildArticle(path.resolve(file), options)
-  return prepareArticleForPlatform(article, platform.trim().toLowerCase())
+  return prepareDirectArticleForPlatform(article, platform.trim().toLowerCase())
 }
 
 export async function runDirectPreview(
@@ -514,13 +624,17 @@ export async function runDirectPreview(
   console.log(JSON.stringify(preview))
 }
 
-function printResults(results: SyncResult[]): void {
+export function printResults(results: SyncResult[]): void {
   console.log()
   console.log(chalk.bold('同步结果:'))
   console.log()
 
   for (const result of results) {
-    if (result.success) {
+    if (result.uncertain) {
+      console.log('  [UNCERTAIN]', chalk.bold(result.platform))
+      if (result.postUrl) console.log(`    ${chalk.cyan(result.postUrl)}`)
+      console.log(`    ${chalk.yellow(result.error || result.message || '结果待人工核对，请勿重复提交')}`)
+    } else if (result.success) {
       console.log('  [OK]', chalk.bold(result.platform), result.draftOnly ? chalk.gray('(草稿)') : '')
       if (result.postUrl) console.log(`    ${chalk.cyan(result.postUrl)}`)
       if (result.message) console.log(`    ${chalk.gray(result.message)}`)
@@ -530,9 +644,11 @@ function printResults(results: SyncResult[]): void {
     }
   }
 
-  const successCount = results.filter(result => result.success).length
+  const successCount = results.filter(result => result.success && !result.uncertain).length
+  const uncertainCount = results.filter(result => result.uncertain).length
+  const failedCount = results.length - successCount - uncertainCount
   console.log()
-  console.log(`同步完成: ${chalk.green(`${successCount} 成功`)}, ${chalk.red(`${results.length - successCount} 失败`)}`)
+  console.log(`同步完成: ${chalk.green(`${successCount} 成功`)}, ${chalk.red(`${failedCount} 失败`)}, ${chalk.yellow(`${uncertainCount} 待核对`)}`)
 }
 
 export async function runDirectSync(
@@ -590,7 +706,7 @@ export async function runDirectSync(
 
     const spinner = ora(`${directMode ? '发布到' : '同步到'} ${platform}...`).start()
     try {
-      const prepared = prepareArticleForPlatform(article, platform)
+      const prepared = prepareDirectArticleForPlatform(article, platform)
       const result = await adapter.publish(prepared.article, {
         draftOnly: true,
         publishMode: directMode ? 'direct' : 'draft',
@@ -603,7 +719,8 @@ export async function runDirectSync(
           }
         : result
       results.push(finalResult)
-      if (finalResult.success) spinner.succeed(`${platform} ${directMode ? '已直接发布' : '已保存草稿'}`)
+      if (finalResult.uncertain) spinner.warn(`${platform} 结果待人工核对，请勿重复提交`)
+      else if (finalResult.success) spinner.succeed(`${platform} ${directMode ? '已直接发布' : '已保存草稿'}`)
       else spinner.fail(`${platform} ${directMode ? '发布失败' : '同步失败'}`)
     } catch (error) {
       spinner.fail(`${platform} ${directMode ? '发布失败' : '同步失败'}`)
@@ -617,7 +734,7 @@ export async function runDirectSync(
   }
 
   printResults(results)
-  if (results.some(result => !result.success)) process.exitCode = 1
+  if (results.some(result => !result.success || result.uncertain)) process.exitCode = 1
 }
 
 export async function runDirectPlatforms(

@@ -7,6 +7,7 @@ import argparse
 import json
 import re
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 
 
@@ -23,6 +24,32 @@ PLACEHOLDER_PATTERNS = (
 )
 
 
+class VisibleBodyText(HTMLParser):
+    """Collect body text, excluding CSS, scripts, inert markup and comments."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.in_body = False
+        self.ignored = []
+        self.parts = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "body":
+            self.in_body = True
+        if tag in {"head", "style", "script", "template", "noscript"}:
+            self.ignored.append(tag)
+
+    def handle_endtag(self, tag):
+        if self.ignored and tag == self.ignored[-1]:
+            self.ignored.pop()
+        if tag == "body":
+            self.in_body = False
+
+    def handle_data(self, data):
+        if self.in_body and not self.ignored:
+            self.parts.append(data)
+
+
 def check(path: Path) -> dict:
     if not path.is_file():
         return {"ok": False, "errors": [f"文件不存在：{path}"]}
@@ -32,8 +59,10 @@ def check(path: Path) -> dict:
     for required in ("<!doctype html", "<html", "<head", "<body", "</html>"):
         if required not in lower:
             errors.append(f"缺少 HTML 结构：{required}")
+    visible = VisibleBodyText()
+    visible.feed(text)
     for pattern in PLACEHOLDER_PATTERNS:
-        if re.search(pattern, text, re.IGNORECASE):
+        if re.search(pattern, "".join(visible.parts), re.IGNORECASE):
             errors.append(f"仍有模板占位内容：{pattern}")
     if re.search(r"(?:src|href)=[\"'](?:/Users/|/home/|[A-Za-z]:[\\/])", text, re.IGNORECASE):
         errors.append("存在本机绝对路径资源引用")

@@ -5,8 +5,45 @@ import { CodeAdapter, type ImageUploadResult } from '../code-adapter'
 import type { Article, AuthResult, SyncResult, PlatformMeta } from '../../types'
 import type { PublishOptions } from '../types'
 import { createLogger } from '../../lib/logger'
+import { parseHTML } from 'linkedom'
 
 const logger = createLogger('Woshipm')
+
+// A stable, short source reference is enough to locate a failed image without
+// logging signed URL parameters, userinfo, API errors, or a complete data URI.
+function imageReference(src: string): string {
+  let hash = 2166136261
+  for (let i = 0; i < src.length; i++) hash = Math.imul(hash ^ src.charCodeAt(i), 16777619)
+  return `image-${(hash >>> 0).toString(16).padStart(8, '0')}`
+}
+
+class WoshipmImageError extends Error {
+  constructor(readonly stage: string, readonly status?: number) {
+    super(`图片${stage}失败${status === undefined ? '' : `（HTTP ${status}）`}`)
+  }
+}
+
+function remoteImageURL(src: string): URL | null {
+  try {
+    const url = new URL(src)
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return null
+    if (url.hostname === 'localhost' || url.hostname.endsWith('.localhost') || url.hostname.endsWith('.local') ||
+        /^(?:0|10|127)\.|^169\.254\.|^192\.168\.|^172\.(?:1[6-9]|2\d|3[01])\./.test(url.hostname) ||
+        url.hostname.startsWith('[')) return null
+    return url
+  } catch { return null }
+}
+
+function isHostedImage(src: string): boolean {
+  const url = remoteImageURL(src)
+  return !!url && (url.hostname === 'woshipm.com' || url.hostname.endsWith('.woshipm.com'))
+}
+
+function validateImageSource(src: string): void {
+  const valid = src.length <= 20 * 1024 * 1024 && (remoteImageURL(src) ||
+    /^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/]+={0,2}$/i.test(src))
+  if (!valid) throw new Error(`图片来源无效或尚未内嵌（${imageReference(src)}）；本地 /uploads/ 或相对图片必须先转为 data URI`)
+}
 
 export class WoshipmAdapter extends CodeAdapter {
   readonly meta: PlatformMeta = {
@@ -83,6 +120,10 @@ export class WoshipmAdapter extends CodeAdapter {
   }
 
   async publish(article: Article, options?: PublishOptions): Promise<SyncResult> {
+    if (options?.publishMode === 'direct' || options?.draftOnly === false) {
+      return this.createResult(false, { error: '人人都是产品经理仅支持保存草稿，不支持自动公开发布；请在平台后台人工确认。' })
+    }
+    let createAttempted = false
     return this.withHeaderRules(this.HEADER_RULES, async () => {
       logger.info('Starting publish...')
 
@@ -91,16 +132,10 @@ export class WoshipmAdapter extends CodeAdapter {
       let content = article.html || ''
 
       // 2. 处理图片
-      content = await this.processImages(
-        content,
-        (src) => this.uploadImageByUrl(src),
-        {
-          skipPatterns: ['woshipm.com', 'image.woshipm.com'],
-          onProgress: options?.onImageProgress,
-        }
-      )
+      content = await this.processImagesStrict(content, options?.onImageProgress)
 
       // 4. 创建草稿
+      createAttempted = true
       const createResponse = await this.runtime.fetch(
         'https://www.woshipm.com/wp-admin/admin-ajax.php',
         {
@@ -120,35 +155,42 @@ export class WoshipmAdapter extends CodeAdapter {
 
       // 检查响应状态和内容
       const responseText = await createResponse.text()
-      logger.debug('Create draft response:', createResponse.status, responseText.substring(0, 300))
+      logger.debug('Create draft response status:', createResponse.status)
 
       if (!createResponse.ok) {
-        throw new Error(`创建草稿失败: ${createResponse.status} - ${responseText}`)
+        throw new Error(`创建草稿请求失败: HTTP ${createResponse.status}`)
       }
 
-      let createData: { post_id?: string | number; url?: string; success?: boolean; error?: string }
+      let createData: { post_id?: unknown; url?: string; success?: boolean } | null
       try {
         createData = JSON.parse(responseText)
       } catch {
-        throw new Error(`创建草稿失败: 响应不是有效 JSON - ${responseText.substring(0, 100)}`)
+        throw new Error('创建草稿响应不是有效 JSON')
       }
 
-      if (!createData.post_id) {
-        throw new Error(createData.error || '创建草稿失败: 无效响应')
+      const draftId = typeof createData?.post_id === 'string'
+        || (typeof createData?.post_id === 'number' && Number.isSafeInteger(createData.post_id))
+        ? String(createData.post_id) : ''
+      if (!/^[1-9]\d*$/.test(draftId) || createData?.success === false) {
+        throw new Error('创建草稿未返回有效回执')
       }
 
-      const draftId = String(createData.post_id)
-      const draftUrl = createData.url || `https://www.woshipm.com/writing?pid=${draftId}`
+      const draftUrl = createData?.url || `https://www.woshipm.com/writing?pid=${draftId}`
 
       logger.debug('Draft created:', draftId)
 
       return this.createResult(true, {
         postId: draftId,
         postUrl: draftUrl,
-        draftOnly: options?.draftOnly ?? true,
+        draftOnly: true,
       })
     }).catch((error) => this.createResult(false, {
-      error: (error as Error).message,
+      error: createAttempted ? '人人都是产品经理草稿请求未取得可靠回执。' : (error as Error).message,
+      ...(createAttempted ? {
+        uncertain: true,
+        postUrl: 'https://www.woshipm.com/writing',
+        message: '草稿请求已发出，平台可能已保存；请先到人人都是产品经理写作后台检查草稿，核对结果前不要重复提交。',
+      } : {}),
     }))
   }
 
@@ -156,30 +198,79 @@ export class WoshipmAdapter extends CodeAdapter {
    * 通过 Blob 上传图片（覆盖基类方法）
    */
   async uploadImage(file: Blob, filename?: string): Promise<string> {
-    return this.uploadImageBinaryInternal(file, filename || 'image.png')
+    try {
+      return await this.uploadImageBinaryInternal(file, filename || 'image.png')
+    } catch (error) {
+      throw new Error(error instanceof WoshipmImageError ? error.message : '图片上传失败（binary）')
+    }
+  }
+
+  /** The shared processor deliberately continues on errors; woshipm must abort. */
+  private async processImagesStrict(content: string, onProgress?: (current: number, total: number) => void): Promise<string> {
+    const { document } = parseHTML(content)
+    const images = Array.from(document.querySelectorAll('img'))
+    if (!images.length) return content
+    // Validate ALL sources before the first transfer, including unquoted/single
+    // quoted attributes. Relative images must never reach a remote draft.
+    for (let i = 0; i < images.length; i++) {
+      try { validateImageSource(images[i].getAttribute('src') || '') } catch (error) {
+        throw new Error(`第 ${i + 1} 张图片：${(error as Error).message}`)
+      }
+    }
+    const uploaded = new Map<string, string>()
+    for (let i = 0; i < images.length; i++) {
+      const img = images[i]
+      const src = img.getAttribute('src') || ''
+      // Remove alternative browser-loading paths; only a verified src survives.
+      img.removeAttribute('srcset')
+      img.removeAttribute('sizes')
+      img.removeAttribute('data-src')
+      img.removeAttribute('data-original')
+      if (!isHostedImage(src)) {
+        let url = uploaded.get(src)
+        if (!url) {
+          try { url = (await this.uploadImageByUrl(src)).url } catch (error) {
+            throw new Error(`第 ${i + 1} 张图片：${(error as Error).message}`)
+          }
+          uploaded.set(src, url)
+        }
+        img.setAttribute('src', url)
+      }
+      onProgress?.(i + 1, images.length)
+    }
+    // <picture> sources can override img.src even after successful uploading.
+    for (const source of Array.from(document.querySelectorAll('picture source'))) source.remove()
+    return document.toString()
   }
 
   /**
    * 通过 URL 上传图片
    */
   protected async uploadImageByUrl(src: string): Promise<ImageUploadResult> {
+    validateImageSource(src)
+    let stage = '下载'
     try {
       // 1. 下载图片（使用 runtime.fetch 以支持跨域）
       const imageResponse = await this.runtime.fetch(src, {
         credentials: 'omit',
       })
       if (!imageResponse.ok) {
-        throw new Error(`Failed to fetch image: ${imageResponse.status}`)
+        throw new WoshipmImageError(stage, imageResponse.status)
       }
 
       const blob = await imageResponse.blob()
+      if (!blob.size || blob.size > 15 * 1024 * 1024 || !/^image\/(?:png|jpeg|gif|webp)(?:;|$)/i.test(blob.type)) {
+        throw new WoshipmImageError('格式或大小校验')
+      }
 
       // 2. 上传到 woshipm
-      const url = await this.uploadImageBinaryInternal(blob, this.getFilenameFromUrl(src))
+      stage = '上传'
+      const url = await this.uploadImageBinaryInternal(blob, `${imageReference(src)}.${blob.type.split('/')[1].split(';')[0]}`)
       return { url }
     } catch (error) {
-      logger.warn('Failed to upload image by URL:', src, error)
-      return { url: src } // 失败时返回原 URL
+      const detail = error instanceof WoshipmImageError ? error.message : `图片${stage}失败`
+      // Do not attach the raw cause: runtime/server exceptions may include secrets.
+      throw new Error(`${detail}（${imageReference(src)}）；已中止本次草稿/发布`)
     }
   }
 
@@ -207,29 +298,18 @@ export class WoshipmAdapter extends CodeAdapter {
       body: formData,
     })
 
+    if (!response.ok) throw new WoshipmImageError('上传', response.status)
+
     const data = await response.json() as {
       data?: Array<{ url?: string }>
       error?: string
     }
 
-    if (data.data && data.data.length > 0 && data.data[0].url) {
-      logger.debug('Uploaded image:', filename, '->', data.data[0].url)
+    if (typeof data?.data?.[0]?.url === 'string' && isHostedImage(data.data[0].url)) {
+      logger.debug('Image upload completed')
       return data.data[0].url
     }
 
-    throw new Error(data.error || 'Failed to upload image')
-  }
-
-  /**
-   * 从 URL 提取文件名
-   */
-  private getFilenameFromUrl(url: string): string {
-    try {
-      const pathname = new URL(url).pathname
-      const filename = pathname.split('/').pop() || 'image.png'
-      return filename
-    } catch {
-      return 'image.png'
-    }
+    throw new WoshipmImageError('上传响应校验')
   }
 }
