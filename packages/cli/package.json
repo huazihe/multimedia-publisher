@@ -1,10 +1,10 @@
 {
-  "name": "@weibot/cli",
+  "name": "@creator-workbench/cli",
   "version": "1.1.0",
-  "description": "WEIBOT CLI - standalone multi-platform article publisher",
+  "description": "CREATOR CLI - standalone multi-platform article publisher",
   "main": "dist/index.js",
   "bin": {
-    "weibot": "./dist/index.js"
+    "creator": "./dist/index.js"
   },
   "files": [
     "dist"
@@ -19,7 +19,7 @@
     "clean": "rm -rf dist"
   },
   "keywords": [
-    "weibot",
+    "creator",
     "markdown",
     "zhihu",
     "juejin",
@@ -31,7 +31,7 @@
   "author": "fun",
   "license": "MIT",
   "dependencies": {
-    "@weibot/core": "workspace:*",
+    "@creator-workbench/core": "workspace:*",
     "chalk": "^5.3.0",
     "commander": "^12.1.0",
     "juice": "^11.1.1",

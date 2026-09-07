@@ -28,7 +28,7 @@ function analysis(id, platforms = ['sspai']) {
     evidence_ids: [id], missing_evidence: ['文章正文', '原始发布时间', '作者实测'], risk: 'medium' }] };
 }
 function temporaryRoot(t) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'weibot-topic-research-test-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'creator-topic-research-test-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   return root;
 }

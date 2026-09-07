@@ -4,7 +4,7 @@ import type { PublishOptions } from '../types'
 
 // Observed on the official site and web.js / tougao.js v4.6.13 (2026-09-06).
 // The submission form sends external document links for editorial review;
-// it does not expose an article draft-saving contract. See docs/uisdc-integration.md.
+// it does not expose an article draft-saving contract.
 export const UISDC_URLS = {
   homepage: 'https://www.uisdc.com/',
   login: 'https://www.uisdc.com/#login',

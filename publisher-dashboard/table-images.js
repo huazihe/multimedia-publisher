@@ -3,7 +3,7 @@
 const fs = require('node:fs/promises');
 const { constants } = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
+const { loadChromium: loadProjectChromium, resolveBrowserPath } = require('../runtime/browser.cjs');
 const { createHash, randomBytes } = require('node:crypto');
 const { createRequire } = require('node:module');
 
@@ -163,19 +163,14 @@ th{background:#e8eef5;font-weight:600}tbody tr:nth-child(even) td{background:#f8
 
 function loadChromium(injected) {
   if (injected) return injected;
-  for (const name of ['playwright', 'playwright-core',
-    path.join(os.homedir(), '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright')]) {
-    try { return require(name).chromium; } catch (error) {
-      if (error.code !== 'MODULE_NOT_FOUND') throw error;
-    }
+  try { return loadProjectChromium(); } catch (error) {
+    throw fail('TABLE_IMAGE_RENDERER_UNAVAILABLE', error.message);
   }
-  throw fail('TABLE_IMAGE_RENDERER_UNAVAILABLE', '找不到本机 Playwright，请注入 renderTable 或 chromium；不会自动安装依赖');
 }
 
 async function chromeRenderer(options) {
   const chromium = loadChromium(options.chromium);
-  const executablePath = options.executablePath || (process.platform === 'darwin'
-    ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : undefined);
+  const executablePath = options.executablePath || (options.chromium ? undefined : resolveBrowserPath({ chromium }));
   let browser;
   try {
     browser = await chromium.launch({ headless: true, executablePath, timeout: options.timeoutMs,

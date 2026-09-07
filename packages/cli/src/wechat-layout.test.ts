@@ -10,7 +10,7 @@ const require = createRequire(import.meta.url)
 const repo = fileURLToPath(new URL('../../../', import.meta.url))
 const { listLayoutTemplates, renderLayoutTemplate } = require(path.join(repo, 'publisher-dashboard/layout-templates.js'))
 const { parseHTML } = createRequire(path.join(repo, 'packages/core/package.json'))('linkedom')
-const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'weibot-template-regression-'))
+const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'creator-template-regression-'))
 afterAll(() => fs.rmSync(directory, { recursive: true, force: true }))
 const pixel = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2T9sAAAAASUVORK5CYII='
 const title = '多平台排版验收：图文混排效果如何'

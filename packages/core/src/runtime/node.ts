@@ -277,7 +277,7 @@ export class NodeRuntime implements RuntimeInterface {
       this.importCookies(this.config.cookies)
     }
 
-    const cookieFile = this.config.cookieFile || process.env.WEIBOT_COOKIE_FILE
+    const cookieFile = this.config.cookieFile || process.env.CREATOR_COOKIE_FILE
     if (!cookieFile || !existsSync(cookieFile)) return
 
     const content = await readFile(cookieFile, 'utf-8')
@@ -348,13 +348,13 @@ export class NodeRuntime implements RuntimeInterface {
 
   private resolveStorageDir(): string {
     return this.config.storageDir
-      || process.env.WEIBOT_STORAGE_DIR
-      || path.join(os.homedir(), '.weibot-node')
+      || process.env.CREATOR_STORAGE_DIR
+      || path.join(os.homedir(), '.creator-node')
   }
 
   private resolveDownloadDir(): string {
     return this.config.downloadDir
-      || process.env.WEIBOT_DOWNLOAD_DIR
+      || process.env.CREATOR_DOWNLOAD_DIR
       || path.join(this.resolveStorageDir(), 'downloads')
   }
 

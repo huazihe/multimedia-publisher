@@ -339,7 +339,7 @@ export class DoubanAdapter extends CodeAdapter {
   }
 
   private resolveCdpPort(): number | null {
-    return resolveEnvPort(['WEIBOT_DOUBAN_CDP_PORT', 'DOUBAN_CDP_PORT'], 'Douban')
+    return resolveEnvPort(['CREATOR_DOUBAN_CDP_PORT', 'DOUBAN_CDP_PORT'], 'Douban')
   }
 
   private normalizeBody(article: Article): string {

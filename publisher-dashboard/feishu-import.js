@@ -18,10 +18,10 @@ const { parseHTML } = (() => {
 const markdownParser = new Marked();
 
 const DEFAULT_OUTPUT_ROOT = path.join(__dirname, 'data', 'feishu-imports');
-// Use the installed native CLI, not its JS launcher (which can auto-install and
-// leave a child running after a launcher timeout). Never inspect CLI credentials.
-const DEFAULT_CLI_PATH = process.env.PUBLISHER_LARK_CLI || path.join(os.homedir(), '.npm-global', 'lib', 'node_modules', '@larksuite', 'cli', 'bin', 'lark-cli');
-const DEFAULT_PROFILE = process.env.PUBLISHER_FEISHU_PROFILE || 'misshe-personal';
+// Resolve an already installed CLI from PATH or explicit deployment configuration.
+// Never install tools, inspect credentials, or switch identities after failure.
+const DEFAULT_CLI_PATH = process.env.PUBLISHER_LARK_CLI || 'lark-cli';
+const DEFAULT_PROFILE = process.env.PUBLISHER_FEISHU_PROFILE || 'personal';
 const PROFILES = new Set([DEFAULT_PROFILE, 'enterprise-reader']);
 const RESOURCE_ID = /^[A-Za-z0-9]{10,128}$/;
 const FEISHU_HOST = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)?(?:feishu\.cn|larksuite\.com)$/;
@@ -87,8 +87,9 @@ function commandRunner(profile, deps) {
     fail('INVALID_OPTIONS', '导出超时设置超出允许范围。', 400);
   }
   const cliPath = deps.cliPath ?? DEFAULT_CLI_PATH;
-  if (typeof cliPath !== 'string' || !path.isAbsolute(cliPath) || /[\u0000-\u001f]/u.test(cliPath)) {
-    fail('INVALID_OPTIONS', 'CLI 路径必须是服务端配置的绝对路径。', 400);
+  if (typeof cliPath !== 'string' || /[\u0000-\u001f]/u.test(cliPath)
+      || (!path.isAbsolute(cliPath) && !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(cliPath))) {
+    fail('INVALID_OPTIONS', 'CLI 必须是服务端配置的绝对路径或 PATH 中的命令名称。', 400);
   }
   const execute = deps.execFile ?? execFile;
   const started = performance.now();

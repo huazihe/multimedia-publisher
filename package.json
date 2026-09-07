@@ -1,10 +1,12 @@
 {
-  "name": "weibot",
+  "name": "creator-workbench",
   "version": "2.0.0",
   "private": true,
-  "description": "WEIBOT - standalone multi-platform content publisher",
+  "packageManager": "pnpm@9.15.9",
+  "description": "CREATOR - standalone multi-platform content publisher",
   "workspaces": [
-    "packages/*"
+    "packages/*",
+    "publisher-dashboard"
   ],
   "scripts": {
     "postinstall": "node scripts/prepare-optional-adapters.mjs",
@@ -13,16 +15,17 @@
     "prebuild:cli": "node scripts/prepare-optional-adapters.mjs",
     "pretypecheck": "node scripts/prepare-optional-adapters.mjs",
     "dev": "npm run dashboard",
+    "start": "npm --prefix publisher-dashboard start",
     "build": "npm run build:core && npm run build:cli",
-    "build:core": "npx -y pnpm@9.15.9 --filter @weibot/core build",
-    "build:cli": "npx -y pnpm@9.15.9 --filter @weibot/cli build",
+    "build:core": "npx -y pnpm@9.15.9 --filter @creator-workbench/core build",
+    "build:cli": "npx -y pnpm@9.15.9 --filter @creator-workbench/cli build",
     "dashboard": "npm run build && npm --prefix publisher-dashboard start",
     "dashboard:test": "npm run build && npm --prefix publisher-dashboard test",
-    "core:test": "npx -y pnpm@9.15.9 --filter @weibot/core test -- --run",
-    "cli:test": "npx -y pnpm@9.15.9 --filter @weibot/cli test -- --run",
+    "core:test": "npx -y pnpm@9.15.9 --filter @creator-workbench/core test -- --run",
+    "cli:test": "npx -y pnpm@9.15.9 --filter @creator-workbench/cli test -- --run",
     "test": "npm run core:test && npm run cli:test && npm run dashboard:test",
-    "typecheck": "npx -y pnpm@9.15.9 --filter @weibot/core typecheck && npx -y pnpm@9.15.9 --filter @weibot/cli typecheck",
-    "clean": "npx -y pnpm@9.15.9 --filter @weibot/core clean && npx -y pnpm@9.15.9 --filter @weibot/cli clean"
+    "typecheck": "npx -y pnpm@9.15.9 --filter @creator-workbench/core typecheck && npx -y pnpm@9.15.9 --filter @creator-workbench/cli typecheck",
+    "clean": "npx -y pnpm@9.15.9 --filter @creator-workbench/core clean && npx -y pnpm@9.15.9 --filter @creator-workbench/cli clean"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
@@ -30,7 +33,6 @@
     "@typescript-eslint/parser": "^6.13.0",
     "eslint": "^8.55.0",
     "marked": "^17.0.1",
-    "playwright": "1.58.2",
     "prettier": "^3.1.0",
     "rehype-parse": "^9.0.1",
     "rehype-remark": "^10.0.1",
@@ -42,10 +44,11 @@
     "unified": "^11.0.5"
   },
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=22.13.0"
   },
   "dependencies": {
-    "@modyfi/vite-plugin-yaml": "^1.1.1"
+    "@modyfi/vite-plugin-yaml": "^1.1.1",
+    "playwright": "1.58.2"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

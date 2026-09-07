@@ -114,7 +114,7 @@ function imageExtension(source: string, contentType?: string | null): string {
 
 async function writeTempImages(sources: string[]): Promise<string[]> {
   if (!sources.length) return []
-  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'weibot-toutiao-'))
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'creator-toutiao-'))
   const files: string[] = []
 
   for (let index = 0; index < sources.length; index += 1) {
@@ -143,7 +143,7 @@ async function writeTempImages(sources: string[]): Promise<string[]> {
 
 function resolveCdpPort(): number | null {
   return resolveEnvPort(
-    ['WEIBOT_TOUTIAO_CDP_PORT', 'TOUTIAO_CDP_PORT'],
+    ['CREATOR_TOUTIAO_CDP_PORT', 'TOUTIAO_CDP_PORT'],
     'Toutiao'
   )
 }
@@ -179,7 +179,7 @@ export class ToutiaoAdapter extends CodeAdapter {
 
     return {
       isAuthenticated: false,
-      error: '请先运行 weibot login toutiao，或设置 WEIBOT_TOUTIAO_CDP_PORT。',
+      error: '请先运行 creator login toutiao，或设置 CREATOR_TOUTIAO_CDP_PORT。',
     }
   }
 
@@ -193,7 +193,7 @@ export class ToutiaoAdapter extends CodeAdapter {
     const port = resolveCdpPort()
     if (!port) {
       return this.createResult(false, {
-        error: '请先运行 weibot login toutiao，或设置 WEIBOT_TOUTIAO_CDP_PORT。',
+        error: '请先运行 creator login toutiao，或设置 CREATOR_TOUTIAO_CDP_PORT。',
       })
     }
 
@@ -859,8 +859,8 @@ export class ToutiaoAdapter extends CodeAdapter {
         const rect = el.getBoundingClientRect();
         return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
       }
-      document.querySelectorAll('input[data-weibot-toutiao-upload]').forEach(el => {
-        el.removeAttribute('data-weibot-toutiao-upload');
+      document.querySelectorAll('input[data-creator-toutiao-upload]').forEach(el => {
+        el.removeAttribute('data-creator-toutiao-upload');
       });
       const inputs = Array.from(document.querySelectorAll('input[type="file"]'));
       const target = inputs
@@ -873,7 +873,7 @@ export class ToutiaoAdapter extends CodeAdapter {
           return { el, score };
         })
         .sort((a, b) => b.score - a.score)[0]?.el;
-      target?.setAttribute('data-weibot-toutiao-upload', 'true');
+      target?.setAttribute('data-creator-toutiao-upload', 'true');
     })()`, 5000).catch(() => undefined)
 
     const root = await client.send<{ root?: { nodeId?: number } }>('DOM.getDocument', {
@@ -885,7 +885,7 @@ export class ToutiaoAdapter extends CodeAdapter {
 
     const result = await client.send<{ nodeIds?: number[] }>('DOM.querySelectorAll', {
       nodeId: rootNodeId,
-      selector: 'input[data-weibot-toutiao-upload="true"]',
+      selector: 'input[data-creator-toutiao-upload="true"]',
     })
     const nodeIds = result.nodeIds || []
     if (nodeIds.length) return nodeIds[0]
@@ -985,13 +985,13 @@ export class ToutiaoAdapter extends CodeAdapter {
 
   private async installPublishRecorder(client: CdpClient): Promise<void> {
     await client.evaluate<void>(`(() => {
-      window.__weibotToutiaoNetwork = [];
-      if (window.__weibotToutiaoRecorderInstalled) return;
-      window.__weibotToutiaoRecorderInstalled = true;
+      window.__creatorToutiaoNetwork = [];
+      if (window.__creatorToutiaoRecorderInstalled) return;
+      window.__creatorToutiaoRecorderInstalled = true;
       const shouldRecord = (url) => /\\/mp\\/agw\\/article\\/(publish|edit)|\\/article\\/publish|\\/graphic\\/publish/i.test(String(url || ''));
       const pushRecord = (record) => {
         try {
-          window.__weibotToutiaoNetwork.push({
+          window.__creatorToutiaoNetwork.push({
             ...record,
             body: typeof record.body === 'string' ? record.body.slice(0, 4000) : record.body,
             time: Date.now()
@@ -1014,12 +1014,12 @@ export class ToutiaoAdapter extends CodeAdapter {
       const originalOpen = XMLHttpRequest.prototype.open;
       const originalSend = XMLHttpRequest.prototype.send;
       XMLHttpRequest.prototype.open = function(method, url) {
-        this.__weibotToutiaoUrl = url;
+        this.__creatorToutiaoUrl = url;
         return originalOpen.apply(this, arguments);
       };
       XMLHttpRequest.prototype.send = function() {
         const xhr = this;
-        const url = xhr.__weibotToutiaoUrl;
+        const url = xhr.__creatorToutiaoUrl;
         if (shouldRecord(url)) {
           xhr.addEventListener('loadend', () => {
             pushRecord({
@@ -1058,7 +1058,7 @@ export class ToutiaoAdapter extends CodeAdapter {
     }>(`(() => ({
       url: location.href,
       text: (document.body?.innerText || '').replace(/\\s+/g, ' ').slice(-2500),
-      records: Array.isArray(window.__weibotToutiaoNetwork) ? window.__weibotToutiaoNetwork.slice(-20) : []
+      records: Array.isArray(window.__creatorToutiaoNetwork) ? window.__creatorToutiaoNetwork.slice(-20) : []
     }))()`, 5000)
 
     const publishRecords = state.records.filter(record => /article\/publish|graphic\/publish/i.test(record.url || ''))

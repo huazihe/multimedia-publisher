@@ -11,6 +11,9 @@ importers:
       '@modyfi/vite-plugin-yaml':
         specifier: ^1.1.1
         version: 1.1.1(rollup@4.55.1)(vite@7.3.1(@types/node@20.19.27)(jiti@1.21.7)(yaml@2.8.2))
+      playwright:
+        specifier: 1.58.2
+        version: 1.58.2
     devDependencies:
       '@types/node':
         specifier: ^20.10.0
@@ -27,9 +30,6 @@ importers:
       marked:
         specifier: ^17.0.1
         version: 17.0.1
-      playwright:
-        specifier: 1.58.2
-        version: 1.58.2
       prettier:
         specifier: ^3.1.0
         version: 3.7.4
@@ -60,7 +60,7 @@ importers:
 
   packages/cli:
     dependencies:
-      '@weibot/core':
+      '@creator-workbench/core':
         specifier: workspace:*
         version: link:../core
       chalk:
@@ -182,6 +182,15 @@ importers:
       linkedom:
         specifier: ^0.18.12
         version: 0.18.12
+      marked:
+        specifier: ^17.0.1
+        version: 17.0.1
+      turndown:
+        specifier: ^7.2.2
+        version: 7.2.2
+      turndown-plugin-gfm:
+        specifier: ^1.0.2
+        version: 1.0.2
 
 packages:
 

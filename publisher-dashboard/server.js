@@ -6,6 +6,7 @@ const os = require('os');
 const path = require('path');
 const { createHash, randomBytes, timingSafeEqual } = require('node:crypto');
 const { createRequire } = require('node:module');
+const { resolveBrowserPath, resolveLoginRoot } = require('../runtime/browser.cjs');
 const { execFile, spawn } = require('child_process');
 const net = require('net');
 const { DatabaseSync } = require('node:sqlite');
@@ -33,8 +34,8 @@ const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 const DB_PATH = process.env.PUBLISHER_DB || path.join(DATA_DIR, 'publisher.sqlite');
 const OPERATIONS_FILE = process.env.PUBLISHER_OPERATIONS_FILE || path.join(DATA_DIR, 'publish-operations.json');
 const CLI_PATH = path.join(REPO_ROOT, 'packages', 'cli', 'dist', 'index.js');
-const COOKIE_FILE = process.env.WEIBOT_COOKIE_FILE || path.join(REPO_ROOT, 'cookies.json');
-const LOGIN_DIR = path.join(REPO_ROOT, '.weibot-login');
+const COOKIE_FILE = process.env.CREATOR_COOKIE_FILE || path.join(REPO_ROOT, 'cookies.json');
+const LOGIN_DIR = resolveLoginRoot({ cwd: REPO_ROOT });
 const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT || 18810);
 const requireFromCore = createRequire(path.join(REPO_ROOT, 'packages', 'core', 'package.json'));
@@ -1385,13 +1386,13 @@ function runProcess(command, args, options = {}) {
   });
 }
 
-async function runWeibotCli(args, timeout = 30000) {
+async function runCreatorCli(args, timeout = 30000) {
   if (!fs.existsSync(CLI_PATH)) {
     throw new Error(`CLI 尚未构建: ${CLI_PATH}`);
   }
   return runProcess(process.execPath, [CLI_PATH, '--runtime', 'node', '--cookie-file', COOKIE_FILE, ...args], {
     cwd: REPO_ROOT,
-    env: commandEnv({ WEIBOT_COOKIE_FILE: COOKIE_FILE }),
+    env: commandEnv({ CREATOR_COOKIE_FILE: COOKIE_FILE }),
     timeout,
   });
 }
@@ -1498,33 +1499,6 @@ function groupCookies(cookies) {
     grouped[normalized.domain].push(normalized);
   }
   return grouped;
-}
-
-function candidateBrowsers() {
-  const candidates = [process.env.CHROME_PATH].filter(Boolean);
-  if (process.platform === 'win32') {
-    for (const root of [process.env.PROGRAMFILES, process.env['PROGRAMFILES(X86)'], process.env.LOCALAPPDATA].filter(Boolean)) {
-      candidates.push(
-        path.join(root, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-        path.join(root, 'Microsoft', 'Edge', 'Application', 'msedge.exe')
-      );
-    }
-  } else if (process.platform === 'darwin') {
-    candidates.push(
-      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'
-    );
-  } else {
-    candidates.push('/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/microsoft-edge');
-  }
-  return candidates;
-}
-
-function resolveBrowserPath() {
-  for (const candidate of candidateBrowsers()) {
-    if (candidate && fs.existsSync(candidate)) return candidate;
-  }
-  throw new Error('没有找到 Chrome 或 Edge，请设置 CHROME_PATH 后重试');
 }
 
 function findFreePort() {
@@ -1797,7 +1771,7 @@ function loginExported(output) {
 
 async function refreshPlatformsFromCli() {
   try {
-    const result = await runWeibotCli(['platforms'], 20000);
+    const result = await runCreatorCli(['platforms'], 20000);
     if (result.error) throw result.error;
     const parsed = parsePlatformOutput(result.output);
     if (!parsed.length) {
@@ -2814,7 +2788,7 @@ async function previewContentForPlatform(contentId, platform, options = {}) {
     const source = createPlatformSource(content, platformId, previewDir, { basename: 'content' });
     const canonicalTitle = normalizeCanonicalContent(content).title;
 
-    const runner = options.runner || runWeibotCli;
+    const runner = options.runner || runCreatorCli;
     let result;
     try {
       result = await runner(
@@ -2945,7 +2919,7 @@ async function publishOnePlatform(markdownFile, platform, title, publishMode = '
   dashboardPublishMode(publishMode);
   if (platform === 'uisdc') return { output: '', info: { status: 'failed', error: '优设仅支持手工投稿，请使用官方文章投稿入口' } };
   const args = ['sync', markdownFile, '-p', platform, '-t', title];
-  const result = await runWeibotCli(args, 180000);
+  const result = await runCreatorCli(args, 180000);
   const parsed = parseSyncResults(result.output);
   const parsedKeys = Object.keys(parsed);
   const info = parsed[platform] || (parsedKeys.length === 1 ? parsed[parsedKeys[0]] : null);
@@ -3890,7 +3864,7 @@ function createDashboardServer(options = {}) {
         });
         return;
       }
-      const result = await runWeibotCli(['auth', platform], 45000);
+      const result = await runCreatorCli(['auth', platform], 45000);
       const parsed = parseAuthOutput(platform, result.output);
       setPlatformAuthStatus(platform, parsed.auth_status, parsed.account);
       sendJson(res, { ok: true, platform: parsed, rawOutput: result.output });
@@ -3935,7 +3909,7 @@ function createDashboardServer(options = {}) {
 
       let parsed;
       let authOutput = '';
-      const authResult = await runWeibotCli(['auth', session.platform], 60000);
+      const authResult = await runCreatorCli(['auth', session.platform], 60000);
       authOutput = authResult.output;
       parsed = parseAuthOutput(session.platform, authResult.output);
       if (INTERACTIVE_AUTH_PLATFORMS.has(session.platform) && parsed.auth_status !== 'logged_in' && session.exportedCount > 0) {
@@ -4057,7 +4031,7 @@ function createDashboardServer(options = {}) {
       if (!body || typeof body.url !== 'string') throw statusError('请提供飞书文档链接', 400);
       const exportRoot = options.feishuExportRoot || path.join(path.dirname(DB_PATH), 'feishu-imports');
       const exporter = options.feishuExporter || require('./feishu-import').exportFeishuDocument;
-      const bundle = await exporter({ url: body.url, profile: body.profile || process.env.PUBLISHER_FEISHU_PROFILE || 'misshe-personal', outputRoot: exportRoot });
+      const bundle = await exporter({ url: body.url, profile: body.profile || process.env.PUBLISHER_FEISHU_PROFILE || 'personal', outputRoot: exportRoot });
       const assets = importedAssetsFromBundle(bundle, exportRoot);
       const imported = await importContentBundle({ title: bundle.title, body: bundle.markdown, filename: 'feishu.md',
         format: 'markdown', summary: '', type: '飞书导入', assets }, { uploadsDir });

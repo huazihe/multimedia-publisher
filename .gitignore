@@ -20,7 +20,8 @@ docs/qa/evidence/
 # Local authentication state and session data — never publish
 cookies.json
 cookies.*.json
-.weibot-login/
+.creator-login/
+.*-login/
 **/session.json
 *.sqlite
 *.sqlite-*

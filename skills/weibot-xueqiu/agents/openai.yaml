@@ -1,4 +1,0 @@
-﻿interface:
-  display_name: "闆悆鍙戝竷"
-  short_description: "浣跨敤 WEIBOT Node 杩愯鏃朵繚瀛橀洩鐞冭崏绋?
-  default_prompt: "Use $wechat-xueqiu to publish an article draft."

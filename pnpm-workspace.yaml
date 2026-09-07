@@ -1,5 +1,3 @@
 packages:
   - packages/*
-
-ignoredBuiltDependencies:
-  - esbuild
+  - publisher-dashboard

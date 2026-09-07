@@ -103,7 +103,7 @@ function loadLinkedom() {
   } catch (error) {
     if (error?.code !== 'MODULE_NOT_FOUND' || !String(error.message).includes("'linkedom'")) throw error;
     // The dashboard is not currently a pnpm workspace package. Root installs still
-    // provide LinkeDOM through @weibot/core; standalone dashboard installs use the
+    // provide LinkeDOM through @creator-workbench/core; standalone dashboard installs use the
     // dependency declared in publisher-dashboard/package.json.
     const requireFromCore = createRequire(path.join(REPO_ROOT, 'packages', 'core', 'package.json'));
     return requireFromCore('linkedom');

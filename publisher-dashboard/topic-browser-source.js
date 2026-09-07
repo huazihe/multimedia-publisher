@@ -6,6 +6,7 @@ const path = require('node:path');
 const http = require('node:http');
 const { createHash } = require('node:crypto');
 const { createRequire } = require('node:module');
+const { resolveLoginRoot } = require('../runtime/browser.cjs');
 const { parseHTML } = (() => {
   try { return require('linkedom'); } catch (error) {
     if (error.code !== 'MODULE_NOT_FOUND') throw error;
@@ -19,7 +20,7 @@ const CONFIG = Object.freeze({
   xiaohongshu: { url: 'https://www.xiaohongshu.com/explore', hosts: ['www.xiaohongshu.com', 'xiaohongshu.com'], kind: 'recommendation_feed' },
   zhihu: { url: 'https://www.zhihu.com/hot', hosts: ['www.zhihu.com', 'zhihu.com'], kind: 'official_hot_list' },
 });
-const LOGIN_ROOT = path.resolve(__dirname, '..', '.weibot-login');
+const LOGIN_ROOT = resolveLoginRoot({ cwd: path.resolve(__dirname, '..') });
 const METHODS = new Set(['Target.createTarget', 'Target.attachToTarget', 'Target.closeTarget',
   'Page.enable', 'Page.getFrameTree', 'Page.navigate', 'Page.createIsolatedWorld',
   'Fetch.enable', 'Fetch.continueRequest', 'Fetch.failRequest', 'Runtime.evaluate']);
@@ -276,7 +277,7 @@ function normalizeRows(rows, platform, sourceUrl, capturedAt, limit) {
 }
 
 /**
- * Reuse ONLY this worktree's active .weibot-login/<platform>/session.json.
+ * Reuse ONLY this worktree's active .creator-login/<platform>/session.json.
  * Public input: {platform: douyin|xiaohongshu|zhihu, limit?:1..50}. All other
  * fields are rejected. No launching, focus, cookies, saved user-tab selection,
  * input scripts, browser settings, or account/session writes.
@@ -343,7 +344,7 @@ async function collectBrowserTopicSignals(options, injected = {}) {
       const frame = (await send('Page.getFrameTree'))?.frameTree?.frame;
       if (frame?.url === 'about:blank') { await bounded(() => deps.sleep(500), signal); continue; }
       safePageUrl(frame?.url, platform);
-      const world = await send('Page.createIsolatedWorld', { frameId: frame.id, worldName: 'weibot-topic-reader', grantUniveralAccess: false });
+      const world = await send('Page.createIsolatedWorld', { frameId: frame.id, worldName: 'creator-topic-reader', grantUniveralAccess: false });
       if (!Number.isInteger(world?.executionContextId)) fail('cdp_error', '无法创建只读采集上下文');
       const evaluated = await send('Runtime.evaluate', { contextId: world.executionContextId,
         expression: `(${visibleSnapshot.toString()})(${JSON.stringify(platform)},${Math.min(150, limit * 3)})`,

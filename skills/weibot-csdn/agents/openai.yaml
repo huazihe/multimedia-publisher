@@ -1,4 +1,0 @@
-﻿interface:
-  display_name: "CSDN鍙戝竷"
-  short_description: "浣跨敤 WEIBOT Node 杩愯鏃朵繚瀛楥SDN鑽夌"
-  default_prompt: "Use $wechat-csdn to publish an article draft."

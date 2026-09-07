@@ -2,7 +2,7 @@ import { ManualArticleAdapter } from './manual-base'
 import type { PlatformMeta } from '../../types'
 
 // Official homepage links, verified by public HTTP on 2026-09-06.
-// See docs/general-article-platforms.md for evidence and verification limits.
+// Official manual writing entry; no automatic draft or publication contract.
 export const JIANSHU_URLS = {
   homepage: 'https://www.jianshu.com/',
   login: 'https://www.jianshu.com/sign_in',

@@ -9,5 +9,5 @@ export default defineConfig({
   banner: {
     js: '#!/usr/bin/env node',
   },
-  noExternal: ['@weibot/core'],
+  noExternal: ['@creator-workbench/core'],
 })

@@ -57,7 +57,7 @@ process.env.PUBLISHER_DB = path.join(testDataDir, 'publisher.sqlite');
 process.env.PUBLISHER_OPERATIONS_FILE = path.join(testDataDir, 'publish-operations.json');
 const invalidPreviewCookieFile = path.join(testDataDir, 'invalid-preview-cookies.json');
 fs.writeFileSync(invalidPreviewCookieFile, 'not valid cookie JSON', 'utf8');
-process.env.WEIBOT_COOKIE_FILE = invalidPreviewCookieFile;
+process.env.CREATOR_COOKIE_FILE = invalidPreviewCookieFile;
 
 const {
   parsePlatformOutput,
@@ -596,7 +596,7 @@ test('parseSyncResults reads current CLI OK and FAIL rows', () => {
     '    https://www.zhihu.com/draft/123',
     '    Draft saved',
     '  [FAIL] xiaohongshu',
-    '    Run weibot login xiaohongshu first',
+    '    Run creator login xiaohongshu first',
     '',
     'Sync completed: 1 success, 1 failed',
   ].join('\n');
@@ -609,7 +609,7 @@ test('parseSyncResults reads current CLI OK and FAIL rows', () => {
     },
     xiaohongshu: {
       status: 'failed',
-      error: 'Run weibot login xiaohongshu first',
+      error: 'Run creator login xiaohongshu first',
     },
   });
 });
@@ -3943,8 +3943,8 @@ test('root npm test runs focused core, CLI, and dashboard suites without recursi
 
   assert.equal(rootPackage.scripts.build, 'npm run build:core && npm run build:cli');
   assert.equal(rootPackage.scripts.dashboard, 'npm run build && npm --prefix publisher-dashboard start');
-  assert.equal(rootPackage.scripts['core:test'], 'npx -y pnpm@9.15.9 --filter @weibot/core test -- --run');
-  assert.equal(rootPackage.scripts['cli:test'], 'npx -y pnpm@9.15.9 --filter @weibot/cli test -- --run');
+  assert.equal(rootPackage.scripts['core:test'], 'npx -y pnpm@9.15.9 --filter @creator-workbench/core test -- --run');
+  assert.equal(rootPackage.scripts['cli:test'], 'npx -y pnpm@9.15.9 --filter @creator-workbench/cli test -- --run');
   assert.equal(rootPackage.scripts['dashboard:test'], 'npm run build && npm --prefix publisher-dashboard test');
   assert.equal(rootPackage.scripts.test, 'npm run core:test && npm run cli:test && npm run dashboard:test');
   assert.doesNotMatch(rootPackage.scripts['core:test'], /npm (?:run )?test(?:\s|$)/);
@@ -4869,7 +4869,7 @@ test('sanitizes mixed HTML while rendering protected Markdown literals safely', 
       '<script>alert("示例")</script>',
       '```',
     ].join('\n');
-    const forgedToken = '__WEIBOT_IMPORT_PROTECTED_deadbeef_0__';
+    const forgedToken = '__CREATOR_IMPORT_PROTECTED_deadbeef_0__';
     const body = [
       '# 混合文章',
       '',

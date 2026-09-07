@@ -2,7 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
+const { loadChromium, resolveBrowserPath } = require('../runtime/browser.cjs');
 const { isIP } = require('node:net');
 const { createHash } = require('node:crypto');
 const requireCore = require('node:module').createRequire(path.join(__dirname, '../packages/core/package.json'));
@@ -366,10 +366,7 @@ function boundedOption(value, fallback, max, name) {
 }
 function localChromium(injected) {
   if (injected) return injected;
-  for (const name of ['playwright', 'playwright-core', path.join(os.homedir(), '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright')]) {
-    try { return require(name).chromium; } catch (error) { if (error.code !== 'MODULE_NOT_FOUND') throw error; }
-  }
-  fail('未找到本机图片解码器，请注入 chromium 或配置本机 Playwright', 503);
+  try { return loadChromium(); } catch (error) { fail(error.message, 503); }
 }
 function timed(promise, ms) {
   let timer;
@@ -408,7 +405,7 @@ async function validateAssetImages(assets, opts = {}) {
   let current = -1;
   try {
     browser = await localChromium(opts.chromium).launch({ headless: true,
-      executablePath: opts.executablePath || (process.platform === 'darwin' ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : undefined),
+      executablePath: opts.executablePath || (opts.chromium ? undefined : resolveBrowserPath()),
       timeout: remaining(), args: ['--disable-background-networking', '--disable-component-update', '--no-first-run'] });
     const context = await timed(browser.newContext({ javaScriptEnabled: false, offline: true,
       serviceWorkers: 'block', acceptDownloads: false }), remaining());

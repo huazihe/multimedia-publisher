@@ -1,4 +1,0 @@
-﻿interface:
-  display_name: "鍗氬鍥彂甯?
-  short_description: "浣跨敤 WEIBOT Node 杩愯鏃朵繚瀛樺崥瀹㈠洯鑽夌"
-  default_prompt: "Use $wechat-cnblogs to publish an article draft."

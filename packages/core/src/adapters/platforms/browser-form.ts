@@ -132,7 +132,7 @@ abstract class BrowserFormAdapter extends CodeAdapter {
     if (!port) {
       return {
         isAuthenticated: false,
-        error: `请先运行 weibot login ${this.config.id}，或在可视化面板完成 ${this.config.name} 登录。`,
+        error: `请先运行 creator login ${this.config.id}，或在可视化面板完成 ${this.config.name} 登录。`,
       }
     }
 
@@ -184,7 +184,7 @@ abstract class BrowserFormAdapter extends CodeAdapter {
     const port = this.resolveCdpPort()
     if (!port) {
       return this.createResult(false, {
-        error: `请先运行 weibot login ${this.config.id}，或在可视化面板完成 ${this.config.name} 登录。`,
+        error: `请先运行 creator login ${this.config.id}，或在可视化面板完成 ${this.config.name} 登录。`,
       })
     }
 
@@ -668,7 +668,7 @@ const INDUSTRY_FORUM_PLATFORMS: BrowserFormPlatformConfig[] = [
     loginUrl: 'http://www.china-vision.org/',
     publishUrl: 'https://www.china-vision.org/user-add-news.html',
     domains: ['.china-vision.org'],
-    envNames: ['WEIBOT_CHINA_VISION_CDP_PORT', 'CHINA_VISION_CDP_PORT'],
+    envNames: ['CREATOR_CHINA_VISION_CDP_PORT', 'CHINA_VISION_CDP_PORT'],
     preferredHost: 'china-vision.org',
     titleSelectors: ['input[name="title"]'],
     summarySelectors: ['textarea[name="summary"]'],
@@ -682,7 +682,7 @@ const INDUSTRY_FORUM_PLATFORMS: BrowserFormPlatformConfig[] = [
     loginUrl: 'https://club.bjx.com.cn/',
     publishUrl: 'https://club.bjx.com.cn/posts/add',
     domains: ['.bjx.com.cn'],
-    envNames: ['WEIBOT_BJX_CLUB_CDP_PORT', 'BJX_CLUB_CDP_PORT'],
+    envNames: ['CREATOR_BJX_CLUB_CDP_PORT', 'BJX_CLUB_CDP_PORT'],
     preferredHost: 'club.bjx.com.cn',
     titleSelectors: ['input[name="subject"]'],
     editorSelectors: ['#editor'],
@@ -695,7 +695,7 @@ const INDUSTRY_FORUM_PLATFORMS: BrowserFormPlatformConfig[] = [
     loginUrl: 'https://bbs.elecfans.com/member.php?mod=logging&action=login',
     publishUrl: 'https://www.elecfans.com/d/article/write',
     domains: ['.elecfans.com'],
-    envNames: ['WEIBOT_ELECFANS_CDP_PORT', 'ELECFANS_CDP_PORT'],
+    envNames: ['CREATOR_ELECFANS_CDP_PORT', 'ELECFANS_CDP_PORT'],
     preferredHost: 'elecfans.com',
     titleSelectors: [
       'input[placeholder*="标题"]',
@@ -724,7 +724,7 @@ const INDUSTRY_FORUM_PLATFORMS: BrowserFormPlatformConfig[] = [
     loginUrl: 'https://www.eet-china.com/',
     publishUrl: 'https://mbb.eet-china.com/home.php?mod=spacecp&ac=blog',
     domains: ['.eet-china.com'],
-    envNames: ['WEIBOT_EET_CHINA_CDP_PORT', 'EET_CHINA_CDP_PORT'],
+    envNames: ['CREATOR_EET_CHINA_CDP_PORT', 'EET_CHINA_CDP_PORT'],
     preferredHost: 'eet-china.com',
     titleSelectors: ['#subject', 'input[name="subject"]'],
     editorSelectors: [
@@ -742,7 +742,7 @@ const INDUSTRY_FORUM_PLATFORMS: BrowserFormPlatformConfig[] = [
     loginUrl: 'http://bbs.eeworld.com.cn/member.php?mod=logging&action=login',
     publishUrl: 'http://bbs.eeworld.com.cn/forum.php?mod=post&action=newthread&fid=29',
     domains: ['.eeworld.com.cn'],
-    envNames: ['WEIBOT_EEWORLD_CDP_PORT', 'EEWORLD_CDP_PORT'],
+    envNames: ['CREATOR_EEWORLD_CDP_PORT', 'EEWORLD_CDP_PORT'],
     preferredHost: 'bbs.eeworld.com.cn',
     titleSelectors: ['input[name="subject"]', '#subject'],
     editorSelectors: ['body.cke_editable[contenteditable="true"]', 'body[contenteditable="true"]'],
@@ -755,7 +755,7 @@ const INDUSTRY_FORUM_PLATFORMS: BrowserFormPlatformConfig[] = [
     loginUrl: 'https://om.qq.com/',
     publishUrl: 'https://om.qq.com/main/creation/article',
     domains: ['.qq.com', '.om.qq.com'],
-    envNames: ['WEIBOT_QIEHAO_CDP_PORT', 'QIEHAO_CDP_PORT'],
+    envNames: ['CREATOR_QIEHAO_CDP_PORT', 'QIEHAO_CDP_PORT'],
     preferredHost: 'om.qq.com',
     titleSelectors: [
       'input[placeholder*="标题"]',
@@ -779,7 +779,7 @@ const INDUSTRY_FORUM_PLATFORMS: BrowserFormPlatformConfig[] = [
     loginUrl: 'http://www.ca800.com/common/login.aspx?gourl=http%3a%2f%2fwww.ca800.com%2fc%2fInfo%2farticleInfo.aspx',
     publishUrl: 'http://www.ca800.com/c/Info/articleInfo.aspx',
     domains: ['.ca800.com'],
-    envNames: ['WEIBOT_CA800_CDP_PORT', 'CA800_CDP_PORT'],
+    envNames: ['CREATOR_CA800_CDP_PORT', 'CA800_CDP_PORT'],
     preferredHost: 'ca800.com',
     titleSelectors: ['#ctl00_body_txtTitle', 'input[name="ctl00$body$txtTitle"]'],
     summarySelectors: ['#ctl00_body_txtDescription', 'textarea[name="ctl00$body$txtDescription"]'],
@@ -798,7 +798,7 @@ const INDUSTRY_FORUM_PLATFORMS: BrowserFormPlatformConfig[] = [
     loginUrl: 'https://m.b2b168.com/',
     publishUrl: 'https://m.b2b168.com/index.aspx?pg=glNews&t=0',
     domains: ['.b2b168.com'],
-    envNames: ['WEIBOT_B2B168_CDP_PORT', 'B2B168_CDP_PORT'],
+    envNames: ['CREATOR_B2B168_CDP_PORT', 'B2B168_CDP_PORT'],
     preferredHost: 'b2b168.com',
     titleSelectors: ['#Subject', 'input[name="Subject"]'],
     editorSelectors: [
@@ -816,7 +816,7 @@ const INDUSTRY_FORUM_PLATFORMS: BrowserFormPlatformConfig[] = [
     loginUrl: 'https://user.app17.com/user.aspx?index/index',
     publishUrl: 'https://user.app17.com/user.aspx?article/articleedit',
     domains: ['.app17.com'],
-    envNames: ['WEIBOT_APP17_CDP_PORT', 'APP17_CDP_PORT'],
+    envNames: ['CREATOR_APP17_CDP_PORT', 'APP17_CDP_PORT'],
     preferredHost: 'app17.com',
     titleSelectors: ['#Title', 'input[name="Title"]'],
     editorSelectors: [
@@ -834,7 +834,7 @@ const INDUSTRY_FORUM_PLATFORMS: BrowserFormPlatformConfig[] = [
     loginUrl: 'https://my.huangye88.com/',
     publishUrl: 'https://fabuxinxi.huangye88.com/',
     domains: ['.huangye88.com'],
-    envNames: ['WEIBOT_HUANGYE88_CDP_PORT', 'HUANGYE88_CDP_PORT'],
+    envNames: ['CREATOR_HUANGYE88_CDP_PORT', 'HUANGYE88_CDP_PORT'],
     preferredHost: 'huangye88.com',
     titleSelectors: ['input[name="title"]', '#title', 'input[placeholder*="标题"]'],
     editorSelectors: ['textarea[name="content"]', '#content', '[contenteditable="true"]'],
@@ -847,7 +847,7 @@ const INDUSTRY_FORUM_PLATFORMS: BrowserFormPlatformConfig[] = [
     loginUrl: 'https://user.51sole.com/user/WebSiteInfo.aspx',
     publishUrl: 'https://user.51sole.com/user/web/send_information.aspx',
     domains: ['.51sole.com'],
-    envNames: ['WEIBOT_51SOLE_CDP_PORT', 'SOLE51_CDP_PORT'],
+    envNames: ['CREATOR_51SOLE_CDP_PORT', 'SOLE51_CDP_PORT'],
     preferredHost: '51sole.com',
     titleSelectors: ['#txtTitle', 'input[name="txtTitle"]'],
     editorSelectors: [

@@ -335,7 +335,7 @@ test('empty account configuration removes the account branch and records canonic
   assert.equal(document.querySelector('[data-wechat-account="true"]'), null);
   assert.equal(document.querySelector('[data-wechat-slot="account-name"]'), null);
   assert.equal(document.querySelector('[data-wechat-slot="account-description"]'), null);
-  assert.doesNotMatch(html, /维视智造|机器视觉/);
+  assert.doesNotMatch(html, /公众号名称|公众号简介/);
 });
 
 test('canonical normalization and metadata inspection use the rendered title summary and body bytes', () => {

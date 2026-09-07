@@ -12,7 +12,7 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'publish-recovery-test-'))
 process.env.PUBLISHER_DB = path.join(scratch, 'publisher.sqlite');
 process.env.PUBLISHER_DATA_DIR = scratch;
 process.env.PUBLISHER_OPERATIONS_FILE = path.join(scratch, 'default-operations.json');
-process.env.WEIBOT_COOKIE_FILE = path.join(scratch, 'unused-cookies.json');
+process.env.CREATOR_COOKIE_FILE = path.join(scratch, 'unused-cookies.json');
 const { db, createDashboardServer, createOperationJournal, importContent, updateContent,
   getDashboardData, buildPublishOperationSignature, DRAFTS_DIR } = require('../server');
 

@@ -182,7 +182,7 @@ function env(name: string): string | undefined {
 }
 
 function resolveCdpPort(): number | null {
-  const raw = env('WEIBOT_DOUYIN_CDP_PORT') || env('DOUYIN_CDP_PORT') || env('WEIBOT_CDP_PORT')
+  const raw = env('CREATOR_DOUYIN_CDP_PORT') || env('DOUYIN_CDP_PORT') || env('CREATOR_CDP_PORT')
   if (!raw) return null
 
   const port = Number(raw)
@@ -295,7 +295,7 @@ export class DouyinAdapter extends CodeAdapter {
     if (!port) {
       return {
         isAuthenticated: false,
-        error: 'Set --douyin-cdp-port or WEIBOT_DOUYIN_CDP_PORT to a logged-in Chrome DevTools port.',
+        error: 'Set --douyin-cdp-port or CREATOR_DOUYIN_CDP_PORT to a logged-in Chrome DevTools port.',
       }
     }
 
@@ -348,7 +348,7 @@ export class DouyinAdapter extends CodeAdapter {
     const port = resolveCdpPort()
     if (!port) {
       return this.createResult(false, {
-        error: 'Set --douyin-cdp-port <port> or WEIBOT_DOUYIN_CDP_PORT before syncing to Douyin.',
+        error: 'Set --douyin-cdp-port <port> or CREATOR_DOUYIN_CDP_PORT before syncing to Douyin.',
       })
     }
 
@@ -483,7 +483,7 @@ export class DouyinAdapter extends CodeAdapter {
       const match = source.match(/^data:([^;,]+);base64,(.+)$/)
       if (!match) return null
       const ext = imageExtensionFromMime(match[1])
-      const filePath = path.join(os.tmpdir(), `weibot-douyin-cover-${Date.now()}.${ext}`)
+      const filePath = path.join(os.tmpdir(), `creator-douyin-cover-${Date.now()}.${ext}`)
       await fs.promises.writeFile(filePath, Buffer.from(match[2], 'base64'))
       return filePath
     }
@@ -493,7 +493,7 @@ export class DouyinAdapter extends CodeAdapter {
       if (!response.ok) return null
       const blob = await response.blob()
       const ext = imageExtensionFromMime(blob.type || response.headers.get('content-type') || '')
-      const filePath = path.join(os.tmpdir(), `weibot-douyin-cover-${Date.now()}.${ext}`)
+      const filePath = path.join(os.tmpdir(), `creator-douyin-cover-${Date.now()}.${ext}`)
       await fs.promises.writeFile(filePath, Buffer.from(await blob.arrayBuffer()))
       return filePath
     }

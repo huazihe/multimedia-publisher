@@ -63,7 +63,7 @@ if (process.argv[2] === '--mock-cli') {
         try {
           assert.equal(command, DEFAULT_CLI_PATH);
           assert.equal(args[0], '--profile');
-          assert.ok(['misshe-personal', 'enterprise-reader'].includes(args[1]));
+          assert.ok(['personal', 'enterprise-reader'].includes(args[1]));
           assert.deepEqual(args.slice(2, 4), ['--as', 'user']);
           assert.equal(options.shell, false);
           assert.equal(options.killSignal, 'SIGKILL');
@@ -125,7 +125,7 @@ if (process.argv[2] === '--mock-cli') {
     assert.equal(fs.readFileSync(result.markdownPath, 'utf8'), content);
     assert.deepEqual(result.assets, []);
     assert.deepEqual(result.warnings, []);
-    assert.deepEqual(result.source, { url: URL, documentId: DOCUMENT_ID, profile: 'misshe-personal' });
+    assert.deepEqual(result.source, { url: URL, documentId: DOCUMENT_ID, profile: 'personal' });
     assert.equal(path.dirname(result.bundleDir), outputRoot);
     assert.deepEqual(fs.readdirSync(result.bundleDir), ['original.md']);
     assert.equal(fs.statSync(result.bundleDir).mode & 0o777, 0o700);
@@ -354,7 +354,7 @@ if (process.argv[2] === '--mock-cli') {
   test('rejects profile aliases and shell injection instead of choosing another account', async t => {
     const { outputRoot } = setup(t);
     const cli = cliMock();
-    for (const profile of ['bot', 'default', 'cli_aa9edc67b3385cd2', 'misshe-personal; touch /tmp/x', '--as bot', {}, null, '']) {
+    for (const profile of ['bot', 'default', 'cli_fixture', 'personal; invalid-command', '--as bot', {}, null, '']) {
       await rejectsCode(exportFeishuDocument({ url: URL, outputRoot, profile }, cli), 'INVALID_PROFILE');
     }
     assert.equal(cli.calls.length, 0);
@@ -460,7 +460,7 @@ if (process.argv[2] === '--mock-cli') {
   test('missing_scope and expired authorization stop with redacted errors and no fallback or login', async t => {
     const { outputRoot } = setup(t);
     const secret = 'TEST_ONLY_SECRET_DO_NOT_EXPOSE';
-    for (const profile of ['misshe-personal', 'enterprise-reader']) {
+    for (const profile of ['personal', 'enterprise-reader']) {
       for (const [signal, code] of [['missing_scope', 'FEISHU_MISSING_SCOPE'], ['needs_refresh', 'FEISHU_AUTH_REQUIRED'], ['permission_denied HTTP 403', 'FEISHU_PERMISSION_DENIED']]) {
         const cli = cliMock({ error: Object.assign(new Error(`Command failed: access_token=${secret}`), { stderr: `Authorization: Bearer ${secret}\n${signal}` }) });
         await assert.rejects(exportFeishuDocument({ url: URL, outputRoot, profile }, cli), error => {
@@ -569,7 +569,7 @@ if (process.argv[2] === '--mock-cli') {
 
   test('enforces per-command and total timeout bounds and handles unavailable CLI safely', async t => {
     const { outputRoot } = setup(t);
-    for (const deps of [{ timeoutMs: 0 }, { timeoutMs: 60001 }, { totalTimeoutMs: 300001 }, { totalTimeoutMs: NaN }, { cliPath: 'relative-cli' }]) {
+    for (const deps of [{ timeoutMs: 0 }, { timeoutMs: 60001 }, { totalTimeoutMs: 300001 }, { totalTimeoutMs: NaN }, { cliPath: './relative-cli' }]) {
       await rejectsCode(exportFeishuDocument({ url: URL, outputRoot }, deps), 'INVALID_OPTIONS');
     }
     await rejectsCode(exportFeishuDocument({ url: URL, outputRoot }, cliMock({ error: Object.assign(new Error('secret command'), { killed: true }) })), 'FEISHU_TIMEOUT');

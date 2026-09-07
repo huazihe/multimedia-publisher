@@ -7,8 +7,9 @@ import path from 'node:path'
 import readline from 'node:readline'
 import chalk from 'chalk'
 import WebSocket from 'ws'
-import type { Cookie } from '@weibot/core'
+import type { Cookie } from '@creator-workbench/core'
 import type { DirectRuntimeOptions } from './direct'
+import { resolveBrowserPath as resolveSharedBrowserPath, resolveLoginRoot } from '../../../runtime/browser.cjs'
 
 interface PlatformLoginConfig {
   name: string
@@ -306,13 +307,12 @@ async function readExistingCookies(filePath: string): Promise<Cookie[]> {
 }
 
 function resolveOutputFile(options: LoginOptions, runtimeOptions: DirectRuntimeOptions): string {
-  return path.resolve(options.output || runtimeOptions.cookieFile || process.env.WEIBOT_COOKIE_FILE || 'cookies.json')
+  return path.resolve(options.output || runtimeOptions.cookieFile || process.env.CREATOR_COOKIE_FILE || 'cookies.json')
 }
 
-function resolveUserDataDir(platform: string, options: LoginOptions, runtimeOptions: DirectRuntimeOptions): string {
+export function resolveUserDataDir(platform: string, options: LoginOptions, _runtimeOptions: DirectRuntimeOptions): string {
   if (options.userDataDir) return path.resolve(options.userDataDir)
-  if (runtimeOptions.storageDir) return path.resolve(runtimeOptions.storageDir, 'browser', platform)
-  return path.resolve('.weibot-login', platform)
+  return path.join(resolveLoginRoot(), platform)
 }
 
 async function writeBrowserSession(
@@ -323,48 +323,8 @@ async function writeBrowserSession(
   await writeFile(path.join(userDataDir, 'session.json'), `${JSON.stringify(session, null, 2)}\n`, 'utf-8')
 }
 
-function candidateBrowsers(): string[] {
-  const candidates = [
-    process.env.CHROME_PATH,
-  ].filter(Boolean) as string[]
-
-  if (process.platform === 'win32') {
-    const programFiles = [
-      process.env.PROGRAMFILES,
-      process.env['PROGRAMFILES(X86)'],
-      process.env.LOCALAPPDATA,
-    ].filter(Boolean) as string[]
-
-    for (const root of programFiles) {
-      candidates.push(
-        path.join(root, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-        path.join(root, 'Microsoft', 'Edge', 'Application', 'msedge.exe')
-      )
-    }
-  } else if (process.platform === 'darwin') {
-    candidates.push(
-      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'
-    )
-  } else {
-    candidates.push('/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/microsoft-edge')
-  }
-
-  return candidates
-}
-
 function resolveBrowserPath(explicitPath?: string): string {
-  if (explicitPath) {
-    const resolved = path.resolve(explicitPath)
-    if (fs.existsSync(resolved)) return resolved
-    throw new Error(`Browser not found: ${resolved}`)
-  }
-
-  for (const candidate of candidateBrowsers()) {
-    if (fs.existsSync(candidate)) return candidate
-  }
-
-  throw new Error('Could not find Chrome or Edge. Set CHROME_PATH or pass --browser <path>.')
+  return resolveSharedBrowserPath({ executablePath: explicitPath })
 }
 
 async function findFreePort(): Promise<number> {
@@ -607,5 +567,5 @@ export async function runDirectLogin(
   console.log(chalk.green(`已导出 ${exportedCookies.length} 个 Cookie 到 ${outputFile}`))
   console.log(chalk.gray(`域名: ${domains.join(', ')}`))
   console.log()
-  console.log(chalk.gray(`下一步可运行: weibot --cookie-file ${outputFile} auth ${platformId}`))
+  console.log(chalk.gray(`下一步可运行: creator --cookie-file ${outputFile} auth ${platformId}`))
 }

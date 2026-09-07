@@ -16,8 +16,9 @@ import {
   type Article,
   type PlatformPreparedArticle,
   type SyncResult,
-} from '@weibot/core'
-import { createNodeRuntime } from '@weibot/core/runtime/node'
+} from '@creator-workbench/core'
+import { createNodeRuntime } from '@creator-workbench/core/runtime/node'
+import { resolveLoginRoot } from '../../../runtime/browser.cjs'
 
 interface ParsedContent {
   title: string | null
@@ -84,92 +85,89 @@ const DOUYIN_DEFAULT_CDP_PORT = 9333
 
 const BROWSER_CDP_PLATFORMS: Record<string, BrowserCdpConfig> = {
   douyin: {
-    envName: 'WEIBOT_DOUYIN_CDP_PORT',
+    envName: 'CREATOR_DOUYIN_CDP_PORT',
     legacyEnvName: 'DOUYIN_CDP_PORT',
     optionName: 'douyinCdpPort',
     defaultPort: DOUYIN_DEFAULT_CDP_PORT,
     startUrl: DOUYIN_UPLOAD_URL,
   },
   toutiao: {
-    envName: 'WEIBOT_TOUTIAO_CDP_PORT',
+    envName: 'CREATOR_TOUTIAO_CDP_PORT',
     legacyEnvName: 'TOUTIAO_CDP_PORT',
     optionName: 'toutiaoCdpPort',
     startUrl: 'https://mp.toutiao.com/profile_v4/graphic/publish',
   },
   xiaohongshu: {
-    envName: 'WEIBOT_XIAOHONGSHU_CDP_PORT',
+    envName: 'CREATOR_XIAOHONGSHU_CDP_PORT',
     legacyEnvName: 'XIAOHONGSHU_CDP_PORT',
     optionName: 'xiaohongshuCdpPort',
     startUrl: 'https://creator.xiaohongshu.com/publish/publish?source=official',
   },
   qiehao: {
-    envName: 'WEIBOT_QIEHAO_CDP_PORT',
+    envName: 'CREATOR_QIEHAO_CDP_PORT',
     legacyEnvName: 'QIEHAO_CDP_PORT',
     optionName: 'qiehaoCdpPort',
     startUrl: 'https://om.qq.com/main/creation/article',
   },
   douban: {
-    envName: 'WEIBOT_DOUBAN_CDP_PORT',
+    envName: 'CREATOR_DOUBAN_CDP_PORT',
     legacyEnvName: 'DOUBAN_CDP_PORT',
     startUrl: 'https://www.douban.com/topic/create?subtype=note',
   },
   'china-vision': {
-    envName: 'WEIBOT_CHINA_VISION_CDP_PORT',
+    envName: 'CREATOR_CHINA_VISION_CDP_PORT',
     legacyEnvName: 'CHINA_VISION_CDP_PORT',
     startUrl: 'https://www.china-vision.org/user-add-news.html',
   },
   'bjx-club': {
-    envName: 'WEIBOT_BJX_CLUB_CDP_PORT',
+    envName: 'CREATOR_BJX_CLUB_CDP_PORT',
     legacyEnvName: 'BJX_CLUB_CDP_PORT',
     startUrl: 'https://club.bjx.com.cn/forum.php?mod=post&action=newthread',
   },
   elecfans: {
-    envName: 'WEIBOT_ELECFANS_CDP_PORT',
+    envName: 'CREATOR_ELECFANS_CDP_PORT',
     legacyEnvName: 'ELECFANS_CDP_PORT',
     startUrl: 'https://www.elecfans.com/d/article/write',
   },
   'eet-china': {
-    envName: 'WEIBOT_EET_CHINA_CDP_PORT',
+    envName: 'CREATOR_EET_CHINA_CDP_PORT',
     legacyEnvName: 'EET_CHINA_CDP_PORT',
     startUrl: 'https://www.eet-china.com/',
   },
   eeworld: {
-    envName: 'WEIBOT_EEWORLD_CDP_PORT',
+    envName: 'CREATOR_EEWORLD_CDP_PORT',
     legacyEnvName: 'EEWORLD_CDP_PORT',
     startUrl: 'http://bbs.eeworld.com.cn/forum.php?mod=post&action=newthread&fid=29',
   },
   ca800: {
-    envName: 'WEIBOT_CA800_CDP_PORT',
+    envName: 'CREATOR_CA800_CDP_PORT',
     legacyEnvName: 'CA800_CDP_PORT',
     startUrl: 'http://www.ca800.com/c/Info/articleInfo.aspx',
   },
   b2b168: {
-    envName: 'WEIBOT_B2B168_CDP_PORT',
+    envName: 'CREATOR_B2B168_CDP_PORT',
     legacyEnvName: 'B2B168_CDP_PORT',
     startUrl: 'https://m.b2b168.com/index.aspx?pg=glNews&t=0',
   },
   app17: {
-    envName: 'WEIBOT_APP17_CDP_PORT',
+    envName: 'CREATOR_APP17_CDP_PORT',
     legacyEnvName: 'APP17_CDP_PORT',
     startUrl: 'https://user.app17.com/user.aspx?article/articleedit',
   },
   huangye88: {
-    envName: 'WEIBOT_HUANGYE88_CDP_PORT',
+    envName: 'CREATOR_HUANGYE88_CDP_PORT',
     legacyEnvName: 'HUANGYE88_CDP_PORT',
     startUrl: 'https://fabuxinxi.huangye88.com/',
   },
   '51sole': {
-    envName: 'WEIBOT_51SOLE_CDP_PORT',
+    envName: 'CREATOR_51SOLE_CDP_PORT',
     legacyEnvName: 'SOLE51_CDP_PORT',
     startUrl: 'https://user.51sole.com/user/web/send_information.aspx',
   },
 }
 
-function resolveBrowserSessionFile(platform: string, options: DirectRuntimeOptions): string {
-  const userDataDir = options.storageDir
-    ? path.resolve(options.storageDir, 'browser', platform)
-    : path.resolve('.weibot-login', platform)
-  return path.join(userDataDir, 'session.json')
+export function resolveBrowserSessionFile(platform: string, _options: DirectRuntimeOptions): string {
+  return path.join(resolveLoginRoot(), platform, 'session.json')
 }
 
 function readBrowserSession(platform: string, options: DirectRuntimeOptions): BrowserSession | null {
@@ -219,7 +217,7 @@ async function ensureBrowserCdpSession(
       return
     }
     if (!required) return
-    throw new Error(`${platform} login session not found. Run: weibot login ${platform}`)
+    throw new Error(`${platform} login session not found. Run: creator login ${platform}`)
   }
 
   if (!await isCdpAlive(session.port)) {
@@ -680,7 +678,7 @@ export async function runDirectSync(
   console.log(`  标题: ${chalk.cyan(article.title)}`)
   console.log(`  平台: ${chalk.cyan(platforms.join(', '))}`)
   console.log(`  模式: ${chalk.cyan(directMode ? '直接发布' : '保存草稿')}`)
-  console.log(`  Cookie: ${chalk.cyan(runtimeOptions.cookieFile || process.env.WEIBOT_COOKIE_FILE || '(未指定)')}`)
+  console.log(`  Cookie: ${chalk.cyan(runtimeOptions.cookieFile || process.env.CREATOR_COOKIE_FILE || '(未指定)')}`)
   console.log()
 
   if (options.dryRun) {

@@ -6,7 +6,7 @@ export interface AccountIdentity {
 
 export function buildAccountIdentityScript(): string {
   return `(() => {
-    const badText = /登录|扫码|验证码|创作者中心|创作中心|首页|发布|内容管理|数据|消息|通知|设置|退出|帮助|全部|作品|粉丝|收益|草稿|搜索|素材|任务|账号管理|平台|小红书|抖音|头条|今日头条|WEIBOT/i;
+    const badText = /登录|扫码|验证码|创作者中心|创作中心|首页|发布|内容管理|数据|消息|通知|设置|退出|帮助|全部|作品|粉丝|收益|草稿|搜索|素材|任务|账号管理|平台|小红书|抖音|头条|今日头条|CREATOR/i;
     const nameTerms = ['nickname', 'nick_name', 'screen_name', 'screenname', 'user_name', 'username', 'display_name', 'displayname', 'account_name', 'accountname', 'media_name', 'medianame', 'author_name', 'authorname', 'creator_name', 'creatorname', 'shop_name', 'shopname', 'name'];
     const idTerms = ['user_id', 'userid', 'uid', 'sec_uid', 'secuid', 'unique_id', 'uniqueid', 'author_id', 'authorid', 'media_id', 'mediaid', 'account_id', 'accountid', 'creator_id', 'creatorid', 'douyin_id', 'douyinid', 'x_user_id'];
     const avatarTerms = ['avatar', 'head', 'icon', 'logo', 'image', 'picture'];

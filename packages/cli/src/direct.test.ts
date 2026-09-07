@@ -10,7 +10,7 @@ import {
   type PlatformAdapter,
   type PublishOptions,
   type SyncResult,
-} from '@weibot/core'
+} from '@creator-workbench/core'
 import type { Command } from 'commander'
 import { describe, expect, it, vi } from 'vitest'
 import { buildPlatformPreview, printResults, runDirectPreview, runDirectSync } from './direct'
@@ -25,9 +25,9 @@ const sideEffectProbes = vi.hoisted(() => ({
   writeFileSync: vi.fn(),
 }))
 
-vi.mock('@weibot/core/runtime/node', async () => {
-  const actual = await vi.importActual<typeof import('@weibot/core/runtime/node')>(
-    '@weibot/core/runtime/node'
+vi.mock('@creator-workbench/core/runtime/node', async () => {
+  const actual = await vi.importActual<typeof import('@creator-workbench/core/runtime/node')>(
+    '@creator-workbench/core/runtime/node'
   )
   sideEffectProbes.createNodeRuntime.mockImplementation(actual.createNodeRuntime)
   return {
@@ -135,7 +135,7 @@ function runBuiltCli(args: string[]) {
 }
 
 function withMarkdownFixture<T>(markdown: string, callback: (filePath: string) => T): T {
-  const tempDir = realFs.mkdtempSync(path.join(os.tmpdir(), 'weibot-cli-front-matter-'))
+  const tempDir = realFs.mkdtempSync(path.join(os.tmpdir(), 'creator-cli-front-matter-'))
   const filePath = path.join(tempDir, 'article.md')
   try {
     realFs.writeFileSync(filePath, markdown, 'utf8')
@@ -146,7 +146,7 @@ function withMarkdownFixture<T>(markdown: string, callback: (filePath: string) =
 }
 
 function withHtmlFixture<T>(html: string, callback: (filePath: string, directory: string) => T): T {
-  const directory = realFs.mkdtempSync(path.join(os.tmpdir(), 'weibot-cli-css-'))
+  const directory = realFs.mkdtempSync(path.join(os.tmpdir(), 'creator-cli-css-'))
   const filePath = path.join(directory, 'article.html')
   try {
     realFs.writeFileSync(filePath, html, 'utf8')
@@ -164,7 +164,7 @@ describe('rendered local image references', () => {
   const run = (source: (outside: string) => string, extension: 'md' | 'html',
     check: (preview: ReturnType<typeof buildPlatformPreview>, outside: string, file: string) => void,
     platform = 'weixin') => {
-    const directory = realFs.mkdtempSync(path.join(os.tmpdir(), 'weibot-cli-image-references-'))
+    const directory = realFs.mkdtempSync(path.join(os.tmpdir(), 'creator-cli-image-references-'))
     try {
       const articleDirectory = path.join(directory, 'article')
       realFs.mkdirSync(articleDirectory)
@@ -631,7 +631,7 @@ describe('runDirectSync', () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() => {
       throw new Error('sync preparation test attempted network access')
     })
-    const previousPort = process.env.WEIBOT_XIAOHONGSHU_CDP_PORT
+    const previousPort = process.env.CREATOR_XIAOHONGSHU_CDP_PORT
     const previousExitCode = process.exitCode
 
     try {
@@ -653,9 +653,9 @@ describe('runDirectSync', () => {
       expect(zipArticle?.markdown).toContain('![远程示例图]')
     } finally {
       if (previousPort === undefined) {
-        delete process.env.WEIBOT_XIAOHONGSHU_CDP_PORT
+        delete process.env.CREATOR_XIAOHONGSHU_CDP_PORT
       } else {
-        process.env.WEIBOT_XIAOHONGSHU_CDP_PORT = previousPort
+        process.env.CREATOR_XIAOHONGSHU_CDP_PORT = previousPort
       }
       process.exitCode = previousExitCode
       fetchSpy.mockRestore()
@@ -780,7 +780,7 @@ describe('CLI preview command', () => {
     const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
 
     try {
-      process.argv = ['node', 'weibot']
+      process.argv = ['node', 'creator']
       const { program } = await import('./index') as { program?: Command }
       const previewCommand = program?.commands.find(command => command.name() === 'preview')
 

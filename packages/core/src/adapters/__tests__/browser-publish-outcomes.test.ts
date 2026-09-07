@@ -33,7 +33,7 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(new Blob(['png'], { type: 'image/png' }))))
   vi.spyOn(fs.promises, 'writeFile').mockResolvedValue(undefined)
   vi.spyOn(fs.promises, 'unlink').mockResolvedValue(undefined)
-  vi.stubEnv('WEIBOT_DOUYIN_CDP_PORT', '9333')
+  vi.stubEnv('CREATOR_DOUYIN_CDP_PORT', '9333')
 })
 afterEach(() => {
   vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.useRealTimers(); browser.connect.mockReset()

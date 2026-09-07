@@ -83,8 +83,8 @@ function analysisCitationUrl(value) {
   url.hash = '';
   return url.href;
 }
-function runCodexAnalysis(input, { executable = 'codex', timeoutMs = 180000, spawnImpl = spawn } = {}) {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'weibot-topic-analysis-'));
+function runCodexAnalysis(input, { executable = process.env.CREATOR_CODEX_CLI || 'codex', timeoutMs = 180000, spawnImpl = spawn } = {}) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'creator-topic-analysis-'));
   const schemaPath = path.join(directory, 'schema.json');
   const answerPath = path.join(directory, 'answer.json');
   fs.writeFileSync(schemaPath, JSON.stringify(OUTPUT_SCHEMA), { mode: 0o600 });

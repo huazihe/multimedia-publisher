@@ -1345,7 +1345,7 @@ function renderPublish() {
 
     <div class="panel publish-platform-panel">
       <h2>文章发布与导出（${platforms.filter(p=>p.id!=='zip-download').length} 个平台）</h2>
-      <p class="field-note">常用文章平台优先；工业与其他垂直入口不再占据列表，历史记录保留。</p>
+      <p class="field-note">选择目标平台，每项均标明支持的内容准备方式。</p>
       ${platformCatalogGroups(platforms).map(group=>group.id==='technical'
         ? `<details class="platform-catalog-group" data-platform-group="technical" ${group.platforms.some(p=>state.selectedPlatforms.has(p.id))?'open':''}><summary>${escapeHtml(group.name)}（${group.platforms.length}）</summary>${platformPickerHtml(group.platforms)}</details>`
         : `<section class="platform-catalog-group" data-platform-group="${group.id}"><h3>${escapeHtml(group.name)}（${group.platforms.length}）</h3>${group.id==='tool'?'<p class="field-note">只导出到本机，不会发布到网站。</p>':''}${platformPickerHtml(group.platforms)}</section>`).join('')}
@@ -3299,7 +3299,7 @@ function topicResearchPanel() {
     source_unavailable:'来源暂不可用', needs_sources:'缺少来源', blocked:'访问受限', unavailable:'暂不可用', error:'采集失败' };
   const selected = state.topicPlatforms || TOPIC_PLATFORMS;
   return `<section class="panel topic-research-panel" aria-label="常用平台选题雷达">
-    <div class="panel-head"><div><h2>常用平台选题雷达</h2><p class="field-note">公众号沿用小普多源选题逻辑；少数派观察首页与精选内容信号，其他平台保留各自来源。指标不混算，标题线索不冒充全文分析。</p></div>
+    <div class="panel-head"><div><h2>常用平台选题雷达</h2><p class="field-note">按平台收集内容线索，结合你的关注领域生成选题。各平台的来源和采集状态单独显示。</p></div>
     <span role="status">${escapeHtml(run ? labels[run.status] || run.status : '尚未采集')}</span></div>
     <label for="topic-keyword">关注领域</label><input id="topic-keyword" data-user-editable value="${escapeHtml(state.topicKeyword || 'AI工具、产品、效率工作流和职业实践')}" maxlength="200" ${busy?'disabled':''}>
     <div class="topic-platform-choices">${TOPIC_PLATFORMS.map(id=>`<label><input type="checkbox" data-topic-platform="${id}" ${selected.includes(id)?'checked':''} ${busy?'disabled':''}>${escapeHtml(topicPlatformName(id))}</label>`).join('')}</div>
@@ -3477,7 +3477,7 @@ function renderPublishRecovery() {
   const recoveryPlatforms=[...(state.data?.platforms || [])];if(!recoveryPlatforms.some(p=>p.id===context.platform))recoveryPlatforms.push({id:context.platform,name:platformName(context.platform)});
   host.innerHTML=`<label for="recovery-platform">需要恢复的平台</label><select id="recovery-platform" class="recovery-platform-select" data-recovery-platform>${sortLoginPlatforms(recoveryPlatforms).map(p=>`<option value="${escapeHtml(p.id)}" ${p.id===context.platform?'selected':''}>${escapeHtml(platformName(p.id))}${state.data.platforms.some(active=>active.id===p.id)?'':'（历史）'}</option>`).join('')}</select>
     ${!data ? `<p class="recovery-feedback">${context.loading?'正在读取稿件、窗口与上次同步状态…':escapeHtml(context.feedback || '读取未完成')}</p><button class="secondary" data-action="reload-recovery">重新读取状态</button>` : `
-    <section class="recovery-section"><h3>1. 本地稿件</h3><p>${needsRefresh?'本页与工作台保存的版本不同，或之前被误标为冲突。若编辑内容不同，恢复时会先另存“恢复副本”，再读取最新稿。':'原稿保存在工作台；恢复平台窗口不会清空本页编辑。'}</p><button class="secondary" data-action="restore-working-copy">保留编辑并读取最新稿</button></section>
+    <section class="recovery-section"><h3>1. 本地稿件</h3><p>${needsRefresh?'本页与保存的稿件版本不同。恢复时会先另存当前编辑，再读取最新稿。':'原稿保存在工作台；恢复平台窗口不会清空本页编辑。'}</p><button class="secondary" data-action="restore-working-copy">保留编辑并读取最新稿</button></section>
     <section class="recovery-section"><h3>2. 恢复平台窗口</h3><p>${escapeHtml(sessionLabels[session.state] || session.message || '窗口状态待确认')}</p><div class="recovery-actions">${['missing','mismatch'].includes(session.state)?'<button class="secondary" data-action="recovery-platform-login">前往平台登录</button>':`<button class="primary" data-action="reopen-recovery-window">${definitive?'查看已保存草稿 / 平台结果':session.state==='closed'?'重新打开平台窗口':'打开原窗口核对'}</button>`}</div><p>只打开或恢复窗口，不重新填稿、不点击发布。</p></section>
     <section class="recovery-section"><h3>3. 核对上次同步</h3><p>${result?escapeHtml(statusLabel(result.status)+'：'+(result.message || result.error || '请到平台核对')):'没有找到该稿件在此平台的同步记录。'}</p>
       ${data.canConfirmNotSubmitted?`<label class="recovery-confirm"><input type="checkbox" data-confirm-not-submitted><span>我已检查平台的草稿、审核中和已发布列表，确认这次内容未保存、未提交审核，也未发布。</span></label><button class="secondary" data-action="confirm-recovery-not-submitted" disabled>确认后允许重新准备</button><p>如果仍在处理中或无法判断，请不要勾选。这是人工核对声明，只解除本平台的重试限制，不会自动再次投递。</p>`:''}

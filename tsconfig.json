@@ -18,8 +18,8 @@
     "sourceMap": true,
     "baseUrl": ".",
     "paths": {
-      "@weibot/core": ["packages/core/src"],
-      "@weibot/core/*": ["packages/core/src/*"]
+      "@creator-workbench/core": ["packages/core/src"],
+      "@creator-workbench/core/*": ["packages/core/src/*"]
     }
   },
   "exclude": ["node_modules", "dist"]
